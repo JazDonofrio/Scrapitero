@@ -24,8 +24,8 @@ Usar siempre este patrón exacto (el PYTHONPATH doble es obligatorio):
 ```bash
 echo '<JSON_INPUT>' | \
   env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.venv/lib/python3.12/site-packages:/opt/scrapitero/src \
-  /opt/scrapitero/.venv/bin/python3 -m scrapitero.rpc.<nombre_agente>
+  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+  python3 -m scrapitero.rpc.<nombre_agente>
 ```
 
 ## Idioma
