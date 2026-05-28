@@ -29,17 +29,24 @@ Cuando el usuario dice cosas como:
 
 ## Protocolo del loop (seguir en orden)
 
+## IMPORTANTE
+- **Nunca instalar paquetes.** El venv `/opt/scrapitero/.venv` ya tiene todo instalado.
+- Siempre usar el Python del venv directamente: `/opt/scrapitero/.venv/bin/python`
+- Siempre cargar el .env: `env $(cat /opt/scrapitero/.env | xargs)`
+- Siempre pasar PYTHONPATH: `PYTHONPATH=/opt/scrapitero/src`
+- Responder siempre en español.
+
 ### Paso 1 — Crear survey
 ```bash
-cd /opt/scrapitero && source .venv/bin/activate && export $(cat .env | xargs)
-python3 -c "
-import uuid, os
+env $(cat /opt/scrapitero/.env | xargs) PYTHONPATH=/opt/scrapitero/src \
+/opt/scrapitero/.venv/bin/python -c "
+import uuid
 from sqlalchemy import text
 from scrapitero.db.engine import get_engine
 survey_id = uuid.uuid4()
 with get_engine().begin() as conn:
     conn.execute(text(\"INSERT INTO surveys (survey_id, region_id) VALUES (:sid, :rid)\"),
-                 {'sid': survey_id, 'rid': 'vg-mt-br'})
+                 {'sid': str(survey_id), 'rid': 'vg-mt-br'})
 print(survey_id)
 "
 ```

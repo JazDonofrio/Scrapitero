@@ -17,8 +17,16 @@ Siempre usá los agentes RPC y leé solo sus outputs resumidos (JSON).
 - DB: PostgreSQL+PostGIS en Docker (`scrapitero_db`)
 
 ## Patrón de invocación de todos los agentes
+
+**IMPORTANTE: el venv ya está instalado. NUNCA corras pip install ni uv install.**
+Usar siempre el Python del venv directamente:
+
 ```bash
-cd /opt/scrapitero
-source .venv/bin/activate && export $(cat .env | xargs)
-echo '<JSON_INPUT>' | python -m scrapitero.rpc.<nombre_agente>
+echo '<JSON_INPUT>' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.<nombre_agente>
 ```
+
+## Idioma
+Siempre responder en español. Todos los mensajes, reportes y notificaciones en español.

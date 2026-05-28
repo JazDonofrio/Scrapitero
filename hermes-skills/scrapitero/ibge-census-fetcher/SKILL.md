@@ -24,13 +24,12 @@ Cuando `coverage-reporter` devuelve `setores == 0`.
 | `vg-mt-br` | `5108402` | `mt` | Várzea Grande, Mato Grosso |
 
 ## Comando
+**No instalar nada. El venv ya está listo.**
 ```bash
-cd /opt/scrapitero && source .venv/bin/activate && export $(cat .env | xargs)
-echo '{
-  "region_id": "vg-mt-br",
-  "municipio_codigo": "5108402",
-  "estado_uf": "mt"
-}' | python -m scrapitero.rpc.ibge_census_fetcher
+echo '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.ibge_census_fetcher
 ```
 
 ## Output esperado

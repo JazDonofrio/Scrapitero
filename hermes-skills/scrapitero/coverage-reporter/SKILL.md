@@ -21,14 +21,20 @@ Devuelve un JSON compacto con el estado del relevamiento activo.
 - Para saber si el relevamiento está completo
 
 ## Comando
+**No instalar nada. El venv ya está listo.**
 ```bash
-cd /opt/scrapitero && source .venv/bin/activate && export $(cat .env | xargs)
-echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}' | python -m scrapitero.rpc.coverage_reporter
+echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.coverage_reporter
 ```
 
 Si no hay survey activo todavía, omitir `survey_id`:
 ```bash
-echo '{"region_id":"vg-mt-br"}' | python -m scrapitero.rpc.coverage_reporter
+echo '{"region_id":"vg-mt-br"}' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.coverage_reporter
 ```
 
 ## Output esperado
