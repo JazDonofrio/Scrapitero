@@ -1,6 +1,6 @@
 ---
 name: relevar-region
-description: "Orquesta el relevamiento completo de una región geográfica. Corre el loop de agentes Scrapitero hasta alcanzar cobertura aceptable. Activar cuando el usuario pide relevar una zona."
+description: "Relevamiento de regiones BRASILEÑAS (IBGE/SIDRA). SOLO para Brasil. Activar cuando el usuario pide relevar una región brasileña como Várzea Grande, vg-mt-br u otras ciudades de Brasil. NO usar para Argentina."
 version: 1.0.0
 author: Scrapitero
 platforms: [linux]

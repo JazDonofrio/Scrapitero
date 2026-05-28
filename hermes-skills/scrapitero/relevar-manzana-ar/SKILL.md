@@ -1,6 +1,6 @@
 ---
 name: relevar-manzana-ar
-description: "Orquesta el relevamiento de una manzana catastral en Argentina (Buenos Aires Province). Usa ARBA, OSM y Google Maps. Activar cuando el usuario pide relevar una manzana argentina con notación Partido/Circunscripción/Sección/Manzana."
+description: "Relevamiento catastral de manzanas en Argentina (Buenos Aires Province). Activar cuando el usuario menciona Partido, Circunscripción, Sección, Manzana, Ituzaingó, ARBA, o cualquier localidad argentina. USA ARBA + OSM + Google Maps."
 version: 1.0.0
 author: Scrapitero
 platforms: [linux]
