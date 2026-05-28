@@ -1,0 +1,5 @@
+pydantic
+httpx
+python-telegram-bot
+python-dotenv
+asyncio

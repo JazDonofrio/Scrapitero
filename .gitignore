@@ -1,0 +1,64 @@
+# === Secretos ===
+.env
+*.env
+.env.*
+!.env.example
+
+# === SSH keys (nunca al repo) ===
+*.pem
+*.key
+*_rsa
+*_ed25519
+!*.pub
+scrapitero_vps*
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# === Virtual envs / uv ===
+venv/
+.venv/
+env/
+.uv/
+
+# === Datos pesados (no van al repo) ===
+data/
+*.parquet
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.zip
+*.tar.gz
+*.gz
+# JSONs y CSVs de resultados — solo los de ejemplo/test van al repo
+*.csv
+*.json
+!.env.example
+!tests/**/*.json
+!tests/**/*.csv
+
+# === Docker volumes locales ===
+data/postgres/
+
+# === Logs ===
+*.log
+logs/
+
+# === macOS / Editor ===
+.DS_Store
+.AppleDouble
+.vscode/
+.idea/
+*.swp
+*.swo
