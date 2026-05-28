@@ -20,6 +20,8 @@ echo '<JSON_INPUT>' | python -m scrapitero.rpc.<nombre_agente>
 | CoverageReporter | `scrapitero.rpc.coverage_reporter` | Siempre primero, para ver el estado actual |
 | IBGECensusFetcher | `scrapitero.rpc.ibge_census_fetcher` | Cuando `setores == 0` en el CoverageReport |
 | AddressResolver | `scrapitero.rpc.address_resolver` | Cuando `parcelas_con_direccion / footprints < 0.90` |
+| ARBACadastralFetcher | `scrapitero.rpc.arba_cadastral_fetcher` | Parcelas de Buenos Aires Province (Argentina) |
+| OSMBuildingFetcher | `scrapitero.rpc.osm_building_fetcher` | Footprints de edificios OSM (cualquier país) |
 
 ## Flujo correcto
 
