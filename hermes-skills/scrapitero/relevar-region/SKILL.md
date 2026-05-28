@@ -69,7 +69,7 @@ echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}' | python -m scrapitero
 | `setores == 0` | `ibge-census-fetcher` |
 | `footprints == 0` | `building-footprint-fetcher` *(próximamente)* |
 | `footprints_con_setor / footprints < 0.95` | `spatial-joiner` *(próximamente)* |
-| `parcelas_con_direccion / max(footprints,1) < 0.90` | `address-resolver` *(próximamente)* |
+| `parcelas_con_direccion / max(footprints,1) < 0.90` | `address-resolver` |
 | `parcelas_con_habitantes == 0 y footprints > 0` | `population-estimator` *(próximamente)* |
 | `cobertura_habitantes_pct >= 0.95` | → ir a Paso 3 (exportar) |
 
@@ -103,5 +103,5 @@ Al terminar (cobertura alcanzada o límite de steps), reportar:
 
 ## Notas importantes
 - Los agentes marcados como "próximamente" aún no están implementados
-- En esta primera versión solo está disponible `ibge-census-fetcher`
+- Agentes disponibles: `ibge-census-fetcher`, `address-resolver`
 - Cada vez que se corre un agente, **siempre** verificar con `coverage-reporter` después

@@ -19,6 +19,7 @@ echo '<JSON_INPUT>' | python -m scrapitero.rpc.<nombre_agente>
 |--------|-----|---------------|
 | CoverageReporter | `scrapitero.rpc.coverage_reporter` | Siempre primero, para ver el estado actual |
 | IBGECensusFetcher | `scrapitero.rpc.ibge_census_fetcher` | Cuando `setores == 0` en el CoverageReport |
+| AddressResolver | `scrapitero.rpc.address_resolver` | Cuando `parcelas_con_direccion / footprints < 0.90` |
 
 ## Flujo correcto
 
@@ -41,6 +42,13 @@ echo '{"region_id":"vg-mt-br"}' | \
 echo '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}' | \
   source .venv/bin/activate && export $(cat .env | xargs) && \
   python -m scrapitero.rpc.ibge_census_fetcher
+```
+
+**Resolver direcciones faltantes:**
+```bash
+echo '{"region_id":"vg-mt-br","survey_id":"<UUID>","batch_size":100}' | \
+  source .venv/bin/activate && export $(cat .env | xargs) && \
+  python -m scrapitero.rpc.address_resolver
 ```
 
 ## Lo que NO debés hacer
