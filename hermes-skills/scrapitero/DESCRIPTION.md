@@ -19,13 +19,13 @@ Siempre usá los agentes RPC y leé solo sus outputs resumidos (JSON).
 ## Patrón de invocación de todos los agentes
 
 **IMPORTANTE: el venv ya está instalado. NUNCA corras pip install ni uv install.**
-Usar siempre el Python del venv directamente:
+Usar siempre este patrón exacto (el PYTHONPATH doble es obligatorio):
 
 ```bash
 echo '<JSON_INPUT>' | \
   env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/src \
-  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.<nombre_agente>
+  PYTHONPATH=/opt/scrapitero/.venv/lib/python3.12/site-packages:/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python3 -m scrapitero.rpc.<nombre_agente>
 ```
 
 ## Idioma

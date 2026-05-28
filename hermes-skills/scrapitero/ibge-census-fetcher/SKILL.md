@@ -28,8 +28,8 @@ Cuando `coverage-reporter` devuelve `setores == 0`.
 ```bash
 echo '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}' | \
   env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/src \
-  /opt/scrapitero/.venv/bin/python -m scrapitero.rpc.ibge_census_fetcher
+  PYTHONPATH=/opt/scrapitero/.venv/lib/python3.12/site-packages:/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python3 -m scrapitero.rpc.ibge_census_fetcher
 ```
 
 ## Output esperado

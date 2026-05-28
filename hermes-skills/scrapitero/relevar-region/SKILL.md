@@ -38,8 +38,9 @@ Cuando el usuario dice cosas como:
 
 ### Paso 1 — Crear survey
 ```bash
-env $(cat /opt/scrapitero/.env | xargs) PYTHONPATH=/opt/scrapitero/src \
-/opt/scrapitero/.venv/bin/python -c "
+env $(cat /opt/scrapitero/.env | xargs) \
+PYTHONPATH=/opt/scrapitero/.venv/lib/python3.12/site-packages:/opt/scrapitero/src \
+/opt/scrapitero/.venv/bin/python3 -c "
 import uuid
 from sqlalchemy import text
 from scrapitero.db.engine import get_engine
