@@ -48,12 +48,27 @@ print(survey_id)
 Guardar el `survey_id` para los pasos siguientes.
 
 ### Paso 2 — Cargar parcelas ARBA
+
+Intentar primero con el WFS público (no requiere autenticación):
 ```bash
 echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
   env $(cat /opt/scrapitero/.env | xargs) \
   PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
   python3 -m scrapitero.rpc.arba_cadastral_fetcher
 ```
+
+**Si el WFS falla o devuelve 0 parcelas**, usar el portal Carto (requiere sesión):
+```bash
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+  python3 -m scrapitero.rpc.arba_carto_fetcher
+```
+
+**Si el output del Carto tiene `"needs_cookies": true`:**
+Usar el skill `arba-carto-fetcher` — contiene el protocolo completo para pedir
+el JSESSIONID al usuario por Telegram y reintentar.
+
 Ajustar partido_id, circunscripcion, seccion y manzana según lo que pidió el usuario.
 
 ### Paso 3 — Ver estado
@@ -92,7 +107,7 @@ Repetir el `coverage_reporter` del Paso 3 y reportar al usuario:
 ## Tabla de decisión
 | Condición en CoverageReport | Acción |
 |-----------------------------|--------|
-| `parcelas == 0` | Correr `arba-cadastral-fetcher` |
+| `parcelas == 0` | Correr `arba-cadastral-fetcher`; si falla → `arba-carto-fetcher` |
 | `footprints == 0` | Correr `osm-building-fetcher` |
 | `parcelas_con_direccion / max(parcelas,1) < 0.90` | Correr `address-resolver` |
 | `parcelas_con_direccion / max(parcelas,1) >= 0.90` | Reportar éxito al usuario |
