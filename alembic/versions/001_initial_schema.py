@@ -70,9 +70,9 @@ def upgrade() -> None:
         sa.Column("source_file", sa.String(200)),
         sa.Column("loaded_at", sa.DateTime, server_default=sa.func.now()),
     )
-    op.create_index("idx_setores_geometry", "setores_censitarios", ["geometry"],
-                    postgresql_using="gist")
-    op.create_index("idx_setores_region", "setores_censitarios", ["region_id"])
+    # GeoAlchemy2 crea el índice GIST de geometry automáticamente al crear la tabla
+    op.create_index("idx_setores_region", "setores_censitarios", ["region_id"],
+                    if_not_exists=True)
 
     # ── parcelas ──────────────────────────────────────────────────────────────
     op.create_table(
@@ -118,10 +118,10 @@ def upgrade() -> None:
         sa.Column("fecha_relevamiento", sa.Date, server_default=sa.func.current_date()),
         sa.Column("validado_manual", sa.Boolean, server_default="false"),
     )
-    op.create_index("idx_parcelas_geometry", "parcelas", ["geometry"],
-                    postgresql_using="gist")
-    op.create_index("idx_parcelas_survey", "parcelas", ["survey_id"])
-    op.create_index("idx_parcelas_setor", "parcelas", ["setor_censitario_id"])
+    # GeoAlchemy2 crea el índice GIST de geometry automáticamente
+    op.create_index("idx_parcelas_survey", "parcelas", ["survey_id"], if_not_exists=True)
+    op.create_index("idx_parcelas_setor", "parcelas", ["setor_censitario_id"],
+                    if_not_exists=True)
 
     # ── edificios ─────────────────────────────────────────────────────────────
     op.create_table(
@@ -139,12 +139,10 @@ def upgrade() -> None:
         sa.Column("source", sa.String(30)),
         sa.Column("external_id", sa.String(100)),
     )
-    op.create_index("idx_edificios_footprint", "edificios", ["footprint"],
-                    postgresql_using="gist")
-    op.create_index("idx_edificios_centroid", "edificios", ["centroid"],
-                    postgresql_using="gist")
-    op.create_index("idx_edificios_survey", "edificios", ["survey_id"])
-    op.create_index("idx_edificios_setor", "edificios", ["setor_censitario_id"])
+    # GeoAlchemy2 crea los índices GIST de footprint y centroid automáticamente
+    op.create_index("idx_edificios_survey", "edificios", ["survey_id"], if_not_exists=True)
+    op.create_index("idx_edificios_setor", "edificios", ["setor_censitario_id"],
+                    if_not_exists=True)
 
     # ── unidades_funcionales ──────────────────────────────────────────────────
     op.create_table(
@@ -175,7 +173,7 @@ def upgrade() -> None:
         sa.Column("error", sa.Text),
         sa.Column("created_at", sa.DateTime, server_default=sa.func.now()),
     )
-    op.create_index("idx_log_survey", "orchestrator_log", ["survey_id"])
+    op.create_index("idx_log_survey", "orchestrator_log", ["survey_id"], if_not_exists=True)
 
 
 def downgrade() -> None:
