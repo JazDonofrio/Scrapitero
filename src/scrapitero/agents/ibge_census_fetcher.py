@@ -48,11 +48,11 @@ class IBGEOutput(BaseModel):
 
 def _malha_url(estado_uf: str) -> str:
     """URL del SHP de setores censitários 2022 para un estado."""
-    uf = estado_uf.lower()
+    uf = estado_uf.upper()
     return (
         "https://geoftp.ibge.gov.br/organizacao_do_territorio/"
         "malhas_territoriais/malhas_de_setores_censitarios__divisoes_intramunicipais/"
-        f"censo_2022/setores_censitarios_shp/{uf}/{uf}_setores_censitarios.zip"
+        f"censo_2022/setores/shp/UF/{uf}_setores_CD2022.zip"
     )
 
 
