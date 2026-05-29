@@ -361,8 +361,15 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
     engine = get_engine()
 
     # Cargar parcelas de la manzana desde DB
+    # ST_PointOnSurface garantiza un punto interior al polígono (mejor que el centroide)
     with engine.connect() as conn:
-        q = "SELECT parcela_id::text, centroid_lat, centroid_lng, cca_code FROM parcelas WHERE region_id = :region"
+        q = """
+            SELECT parcela_id::text,
+                   ST_Y(ST_PointOnSurface(geometry)) AS lat,
+                   ST_X(ST_PointOnSurface(geometry)) AS lng,
+                   cca_code
+            FROM parcelas WHERE region_id = :region
+        """
         params: dict = {"region": input.region_id}
         if input.survey_id:
             q += " AND survey_id = :sid"
@@ -455,13 +462,31 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                 if nomencla and not _nomencla_matches_cca(nomencla, cca_code):
                     logger.warning(
                         f"Parcela {parcela_id[:8]}… CCA={_parc_num_from_cca(cca_code)!r} "
-                        f"pero carto devolvió {nomencla!r} — descartando datos de carto"
+                        f"pero carto devolvió {nomencla!r} — reintentando con offsets"
                     )
-                    # Guardar solo dirección de geocoding, no datos de carto
-                    _update_parcela(conn, parcela_id, calle, numero,
-                                    fuente_dir, "", 0, 0, None, None)
-                    time.sleep(input.delay_ms / 1000)
-                    continue
+                    # Reintentar con puntos desplazados dentro del polígono
+                    OFFSETS = [(0.00005,0), (-0.00005,0), (0,0.00005), (0,-0.00005),
+                               (0.00003,0.00003), (-0.00003,-0.00003)]
+                    matched = False
+                    for dlat, dlng in OFFSETS:
+                        data2 = _get_info(client, lng + dlng, lat + dlat)
+                        if not data2:
+                            continue
+                        dom2, nom2, rows2 = _parsear_subparcelas(data2)
+                        if nom2 and _nomencla_matches_cca(nom2, cca_code):
+                            logger.info(f"Parcela {parcela_id[:8]}… encontrada con offset ({dlat},{dlng})")
+                            domicilio, nomencla, rows = dom2, nom2, rows2
+                            matched = True
+                            break
+                    if not matched:
+                        logger.warning(
+                            f"Parcela {parcela_id[:8]}… CCA={_parc_num_from_cca(cca_code)!r} "
+                            "no encontrada en carto con ningún punto — guardando solo geocoding"
+                        )
+                        _update_parcela(conn, parcela_id, calle, numero,
+                                        fuente_dir, "", 0, 0, None, None)
+                        time.sleep(input.delay_ms / 1000)
+                        continue
 
                 cocheras = sum(1 for r in rows if 0 < r["s_m2"] < COCHERA_M2)
                 uf       = sum(1 for r in rows if r["s_m2"] >= COCHERA_M2)
