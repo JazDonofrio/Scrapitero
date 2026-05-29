@@ -1,15 +1,14 @@
-"""ARBACartoFetcher — enriquece parcelas con datos de carto.arba.gov.ar.
+"""ARBACartoFetcher — descarga y enriquece parcelas desde carto.arba.gov.ar.
 
-Para cada parcela ya cargada en la DB (por ARBACadastralFetcher),
-llama a /cartoArba/client/getInfo con las coordenadas y extrae:
-  - subparcelas (partidas, s_terreno, sp)
-  - domicilio registrado en carto
-  - nomenclatura catastral
+Flujo autónomo (no requiere arba_cadastral_fetcher previo):
+  1. Si no hay parcelas en DB para la manzana → las descarga de IDERA WFS
+  2. Para cada parcela llama a carto.arba.gov.ar/client/getInfo y extrae:
+     - subparcelas (partidas, s_terreno, sp)
+     - domicilio registrado en carto
+     - nomenclatura catastral
 
 Si necesita JSESSIONID → devuelve needs_cookies=True con instrucciones.
 El JSESSIONID se persiste en ARBA_SESSION_FILE para reutilización.
-
-Flujo basado en consulta_arba.py (código testado).
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents.arba_cadastral_fetcher import fetch_idera, _upsert_parcelas
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -331,19 +331,54 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
     _save_session(jsessionid)
     engine = get_engine()
 
-    # Cargar parcelas de la región desde DB
+    # Cargar parcelas de la manzana desde DB
     with engine.connect() as conn:
         q = "SELECT parcela_id::text, centroid_lat, centroid_lng FROM parcelas WHERE region_id = :region"
         params: dict = {"region": input.region_id}
         if input.survey_id:
             q += " AND survey_id = :sid"
             params["sid"] = input.survey_id
+        if input.manzana:
+            q += " AND fuente_parcela = 'arba_idera'"
         parcelas_db = conn.execute(text(q), params).fetchall()
+
+    # Si no hay parcelas, descargarlas de IDERA WFS primero
+    if not parcelas_db and input.circunscripcion and input.seccion and input.manzana:
+        logger.info("Sin parcelas en DB — descargando desde IDERA WFS...")
+        try:
+            features = fetch_idera(
+                input.partido_id, input.circunscripcion,
+                input.seccion, input.manzana
+            )
+            if not features:
+                return ARBACartoOutput(
+                    ok=False,
+                    error=(
+                        f"IDERA WFS no devolvió parcelas para "
+                        f"Partido={input.partido_id} Circ={input.circunscripcion} "
+                        f"Secc={input.seccion} Mza={input.manzana}. "
+                        "Verificar nomenclatura catastral."
+                    )
+                )
+            _upsert_parcelas(features, input.region_id, input.survey_id)
+            logger.info(f"IDERA: {len(features)} parcelas cargadas en DB")
+        except Exception as e:
+            return ARBACartoOutput(ok=False, error=f"IDERA WFS falló: {e}")
+
+        # Recargar desde DB
+        with engine.connect() as conn:
+            parcelas_db = conn.execute(text(
+                "SELECT parcela_id::text, centroid_lat, centroid_lng FROM parcelas "
+                "WHERE region_id = :region AND survey_id = :sid"
+            ), {"region": input.region_id, "sid": input.survey_id}).fetchall()
 
     if not parcelas_db:
         return ARBACartoOutput(
             ok=False,
-            error="No hay parcelas en la DB para esta región. Correr arba_cadastral_fetcher primero."
+            error=(
+                "No hay parcelas para procesar. "
+                "Indicá circunscripcion, seccion y manzana para descargarlas automáticamente."
+            )
         )
 
     logger.info(f"Enriqueciendo {len(parcelas_db)} parcelas con carto.arba.gov.ar...")

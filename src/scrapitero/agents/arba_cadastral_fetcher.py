@@ -132,6 +132,9 @@ def _upsert_parcelas(features: list[dict], region_id: str,
                 geom = shape(geom_raw)
                 if not geom.is_valid:
                     geom = geom.buffer(0)
+                # PostGIS columna Polygon — convertir MultiPolygon al polígono mayor
+                if geom.geom_type == "MultiPolygon":
+                    geom = max(geom.geoms, key=lambda g: g.area)
             except Exception as e:
                 logger.warning(f"Geometría inválida para cca={cca}: {e}")
                 continue
