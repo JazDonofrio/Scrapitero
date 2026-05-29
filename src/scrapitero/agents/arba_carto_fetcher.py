@@ -94,6 +94,30 @@ def _save_session(jsessionid: str) -> None:
     ARBA_SESSION_FILE.write_text(json.dumps({"jsessionid": jsessionid}))
 
 
+def _parc_num_from_cca(cca: str) -> str:
+    """Extrae el número de parcela del CCA (posición 32-38 + sufijo)."""
+    if not cca or len(cca) < 39:
+        return ""
+    num = cca[32:39].lstrip("0") or "0"
+    suffix = cca[39:].lstrip("0")
+    return f"{num}{suffix}" if suffix else num
+
+
+def _nomencla_matches_cca(nomencla: str, cca: str) -> bool:
+    """Verifica que la nomenclatura de carto corresponda al CCA de IDERA."""
+    if not nomencla or not cca:
+        return True  # sin datos suficientes, aceptar
+    expected = _parc_num_from_cca(cca)
+    if not expected:
+        return True
+    # Buscar "Parcela: <N>" en la nomenclatura
+    import re as _re
+    m = _re.search(r"Parcela:\s*(\w+)", nomencla, _re.IGNORECASE)
+    if not m:
+        return True
+    return m.group(1).upper() == expected.upper()
+
+
 def _extract_jsessionid(cookie_header: str) -> Optional[str]:
     # Eliminar prefijo "Cookie:" si el usuario copió el header completo
     value = re.sub(r"(?i)^cookie\s*:\s*", "", cookie_header.strip())
@@ -338,7 +362,7 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
 
     # Cargar parcelas de la manzana desde DB
     with engine.connect() as conn:
-        q = "SELECT parcela_id::text, centroid_lat, centroid_lng FROM parcelas WHERE region_id = :region"
+        q = "SELECT parcela_id::text, centroid_lat, centroid_lng, cca_code FROM parcelas WHERE region_id = :region"
         params: dict = {"region": input.region_id}
         if input.survey_id:
             q += " AND survey_id = :sid"
@@ -402,7 +426,7 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
 
         with engine.begin() as conn:
             for row in parcelas_db:
-                parcela_id, lat, lng = row[0], row[1], row[2]
+                parcela_id, lat, lng, cca_code = row[0], row[1], row[2], row[3]
                 if lat is None or lng is None:
                     continue
 
@@ -414,7 +438,6 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                 procesadas += 1
 
                 if data is None:
-                    # Puede ser sesión inválida
                     session_invalida = True
                     break
 
@@ -427,6 +450,18 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                     time.sleep(input.delay_ms / 1000)
                     continue
                 prev_partidas = partidas_actuales if partidas_actuales else prev_partidas
+
+                # Validar que la nomenclatura de carto corresponde al CCA de IDERA
+                if nomencla and not _nomencla_matches_cca(nomencla, cca_code):
+                    logger.warning(
+                        f"Parcela {parcela_id[:8]}… CCA={_parc_num_from_cca(cca_code)!r} "
+                        f"pero carto devolvió {nomencla!r} — descartando datos de carto"
+                    )
+                    # Guardar solo dirección de geocoding, no datos de carto
+                    _update_parcela(conn, parcela_id, calle, numero,
+                                    fuente_dir, "", 0, 0, None, None)
+                    time.sleep(input.delay_ms / 1000)
+                    continue
 
                 cocheras = sum(1 for r in rows if 0 < r["s_m2"] < COCHERA_M2)
                 uf       = sum(1 for r in rows if r["s_m2"] >= COCHERA_M2)
