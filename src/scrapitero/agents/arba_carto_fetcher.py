@@ -1,22 +1,24 @@
-"""ARBACartoFetcher — descarga parcelas desde el portal Carto de ARBA.
+"""ARBACartoFetcher — enriquece parcelas con datos de carto.arba.gov.ar.
 
-Fuente: https://carto.arba.gov.ar/cartoArba/
-App Java con sesión jsessionid. Los endpoints requieren cookie activa.
+Para cada parcela ya cargada en la DB (por ARBACadastralFetcher),
+llama a /cartoArba/client/getInfo con las coordenadas y extrae:
+  - subparcelas (partidas, s_terreno, sp)
+  - domicilio registrado en carto
+  - nomenclatura catastral
 
-Flujo:
-  1. Intentar con cookies guardadas en ARBA_SESSION_FILE
-  2. Si falla (no cookies / sesión expirada) → devolver needs_cookies=True
-  3. Hermes pide las cookies al usuario por Telegram
-  4. El usuario ejecuta este agente con las cookies nuevas (campo `jsessionid`)
-  5. Las cookies se guardan y se usa el resultado
+Si necesita JSESSIONID → devuelve needs_cookies=True con instrucciones.
+El JSESSIONID se persiste en ARBA_SESSION_FILE para reutilización.
 
-El agente intenta varios endpoints conocidos del portal (fallback automático).
+Flujo basado en consulta_arba.py (código testado).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -24,290 +26,295 @@ from typing import Optional
 import httpx
 from loguru import logger
 from pydantic import BaseModel
-from shapely.geometry import shape
-from shapely.ops import transform as shp_transform
-import pyproj
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 
+# ── Config ────────────────────────────────────────────────────────────────────
 
-# ── Configuración ─────────────────────────────────────────────────────────────
-
-CARTO_BASE = "https://carto.arba.gov.ar/cartoArba"
+CARTO_BASE       = "https://carto.arba.gov.ar/cartoArba"
+GMAPS_GEO        = "https://maps.googleapis.com/maps/api/geocode/json"
+NOMINATIM        = "https://nominatim.openstreetmap.org/reverse"
+COCHERA_M2       = 25   # subparcela < 25 m² → cochera; >= 25 m² → unidad funcional
 ARBA_SESSION_FILE = Path(os.environ.get("ARBA_SESSION_FILE",
                                          "/opt/scrapitero/.arba_session.json"))
-
-# Endpoints a intentar en orden (el servidor puede cambiarlos sin aviso)
-SEARCH_ENDPOINTS = [
-    "/getParcelasByNomenclatura",
-    "/BusquedaParcelaAction",
-    "/busquedaNomenclatura",
-    "/SearchParcelaAction",
-    "/parcela/buscar",
-    "/rest/parcela/nomenclatura",
-]
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
 class ARBACartoInput(BaseModel):
-    region_id: str                          # "ituzaingo-ba-ar"
+    region_id: str
     survey_id: str
     partido_id: str                         # "136"
-    circunscripcion: Optional[str] = None   # "2"
-    seccion: Optional[str] = None           # "C"
-    manzana: Optional[str] = None           # "184"
-    parcela: Optional[str] = None           # número de parcela (opcional)
-
-    # Si el usuario envió el jsessionid por Telegram, pasarlo acá
+    circunscripcion: Optional[str] = None
+    seccion: Optional[str] = None
+    manzana: Optional[str] = None
     jsessionid: Optional[str] = None
-
-    # Alternativa: pegar el header Cookie completo copiado de DevTools
     cookie_header: Optional[str] = None
+    delay_ms: int = 400                     # delay entre requests a carto
 
 
 class ARBACartoOutput(BaseModel):
     ok: bool
-    parcelas_insertadas: int = 0
-    parcelas_actualizadas: int = 0
-    endpoint_usado: Optional[str] = None
-    fuentes: list[str] = []
-
-    # Señal para Hermes: necesita que el usuario provea la sesión
+    parcelas_procesadas: int = 0
+    parcelas_con_subparcelas: int = 0
+    total_uf: int = 0
+    total_cocheras: int = 0
     needs_cookies: bool = False
     cookie_instructions: Optional[str] = None
-
+    fuentes: list[str] = []
     error: Optional[str] = None
 
 
-# ── Manejo de cookies ─────────────────────────────────────────────────────────
+# ── Sesión ────────────────────────────────────────────────────────────────────
+
+COOKIE_INSTRUCTIONS = (
+    "Necesito el JSESSIONID de carto.arba.gov.ar.\n\n"
+    "Pasos:\n"
+    "1. Abrí Chrome → https://carto.arba.gov.ar/cartoArba/\n"
+    "2. F12 → Network → buscá la manzana (Partido, Circunscripción, Sección, Manzana)\n"
+    "3. Hacé click en cualquier request a 'getInfo'\n"
+    "4. Headers → Request Headers → copiá el valor del header 'Cookie:'\n"
+    "5. Enviame ese valor\n\n"
+    "Alternativa: F12 → Application → Cookies → carto.arba.gov.ar → valor de JSESSIONID"
+)
+
 
 def _load_session() -> Optional[str]:
-    """Carga jsessionid guardado en disco. Devuelve None si no existe."""
     if ARBA_SESSION_FILE.exists():
         try:
-            data = json.loads(ARBA_SESSION_FILE.read_text())
-            return data.get("jsessionid")
+            return json.loads(ARBA_SESSION_FILE.read_text()).get("jsessionid")
         except Exception:
             pass
     return None
 
 
 def _save_session(jsessionid: str) -> None:
-    """Persiste jsessionid en disco para reutilización."""
     ARBA_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     ARBA_SESSION_FILE.write_text(json.dumps({"jsessionid": jsessionid}))
-    logger.info(f"Sesión ARBA guardada en {ARBA_SESSION_FILE}")
 
 
-def _build_cookies(jsessionid: str) -> dict:
-    return {"JSESSIONID": jsessionid}
-
-
-def _parse_cookie_header(header: str) -> Optional[str]:
-    """Extrae JSESSIONID del header Cookie completo (copiado de DevTools)."""
-    for part in header.split(";"):
-        part = part.strip()
-        if part.upper().startswith("JSESSIONID="):
+def _extract_jsessionid(cookie_header: str) -> Optional[str]:
+    for part in cookie_header.split(";"):
+        if part.strip().upper().startswith("JSESSIONID="):
             return part.split("=", 1)[1].strip()
     return None
 
 
-# ── Parámetros de búsqueda ────────────────────────────────────────────────────
+# ── Conversión de coordenadas ─────────────────────────────────────────────────
 
-def _search_params(input: ARBACartoInput) -> dict:
-    params: dict = {"partido": input.partido_id.zfill(3)}
-    if input.circunscripcion:
-        params["circuns"] = input.circunscripcion.strip()
-    if input.seccion:
-        params["seccion"] = input.seccion.strip().upper()
-    if input.manzana:
-        params["manzana"] = input.manzana.strip().zfill(4)
-    if input.parcela:
-        params["parcela"] = input.parcela.strip().zfill(4)
-    return params
+def _to_3857(lon: float, lat: float) -> tuple[float, float]:
+    x = lon * 20037508.34 / 180
+    y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * 20037508.34 / math.pi
+    return x, y
 
 
-# ── Descubrimiento de endpoint ────────────────────────────────────────────────
+# ── carto.arba.gov.ar/client/getInfo ─────────────────────────────────────────
 
-def _try_endpoints(params: dict, cookies: dict) -> tuple[Optional[str], Optional[list]]:
-    """
-    Intenta cada endpoint conocido con GET y POST.
-    Devuelve (endpoint_url, features_list) o (None, None) si todos fallan.
-    """
-    headers = {
-        "Accept": "application/json, text/javascript, */*",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{CARTO_BASE}/",
+def _get_info(client: httpx.Client, lon: float, lat: float,
+              pad: float = 0.0004) -> Optional[dict]:
+    cx, cy = _to_3857(lon, lat)
+    dx = dy = pad * 20037508.34 / 180
+    W = H = 800
+    params = {
+        "x": str(W // 2), "y": str(H // 2), "epsg": "EPSG:3857",
+        "xmin": str(cx - dx), "ymin": str(cy - dy),
+        "xmax": str(cx + dx), "ymax": str(cy + dy),
+        "layerlistbaselayer": (
+            "carto:Macizos,carto:Parcelas Rurales,carto:Parcelas,"
+            "carto:Subparcelas,carto:Equipamiento_Comunitario,"
+            "carto:Espacio Verde,carto:Cotas,carto:Cotas_sp,"
+            "carto:Seccion,carto:Circunscripcion,carto:Partidos,"
+            "carto:Calles,carto:Limites,carto:Cuerpos_de_agua,"
+            "carto:Red_Ferroviaria,carto:ign_cursos_de_agua"
+        ),
+        "layerlistnotbaselayer": "",
+        "querylayerlistbaselayer": (
+            "carto:Macizos,carto:Parcelas Rurales,carto:Parcelas,"
+            "carto:Subparcelas,carto:Cotas,carto:Cotas_sp,"
+            "carto:Seccion,carto:Circunscripcion,carto:Partidos"
+        ),
+        "querylayerlistnotbaselayer": "",
+        "stylelayerlistbaselayer": (
+            "carto:Carto_Macizos,carto:Carto_Parcelas_Rurales,"
+            "carto:Carto_Parcelas,carto:Carto_Subparcelas,"
+            "carto:Equipamiento_Comunitario,carto:Carto_Espacio_Verde,"
+            "carto:empty,carto:empty,carto:Carto_Seccion,"
+            "carto:Carto_Circunscripcion,carto:Partidos,carto:empty,"
+            "carto:Limite,carto:Cuerpos_de_agua,"
+            "carto:Red_Ferrocarril,carto:Cursos_de_agua"
+        ),
+        "stylelayerlistnotbaselayer": "",
+        "listidslayervisibles": "60", "listidslayersidevisibles": "",
+        "listidsoperativosfisca": "", "listidsLayerdpout": "",
+        "listLayersRRwms": "", "listLayersRRwfs": "",
+        "scale": "846", "width": str(W), "height": str(H),
+        "lon": str(cx), "lat": str(cy),
     }
-
-    with httpx.Client(timeout=30, follow_redirects=False, cookies=cookies,
-                      headers=headers) as client:
-        for path in SEARCH_ENDPOINTS:
-            url = CARTO_BASE + path
-
-            # Intentar GET
-            try:
-                r = client.get(url, params=params)
-                if r.status_code == 200 and r.text.strip():
-                    data = _parse_response(r)
-                    if data is not None:
-                        logger.info(f"Endpoint encontrado: GET {url}")
-                        return url, data
-            except Exception as e:
-                logger.debug(f"GET {url} → {e}")
-
-            # Intentar POST
-            try:
-                r = client.post(url, data=params)
-                if r.status_code == 200 and r.text.strip():
-                    data = _parse_response(r)
-                    if data is not None:
-                        logger.info(f"Endpoint encontrado: POST {url}")
-                        return url, data
-            except Exception as e:
-                logger.debug(f"POST {url} → {e}")
-
-    return None, None
-
-
-def _parse_response(r: httpx.Response) -> Optional[list]:
-    """
-    Intenta parsear la respuesta como GeoJSON features o lista de dicts.
-    Devuelve lista de features o None si no es parseable como datos de parcelas.
-    """
-    ct = r.headers.get("content-type", "")
     try:
-        data = r.json()
-    except Exception:
-        # Puede ser XML/GML — ignorar por ahora
-        logger.debug(f"Respuesta no es JSON: {r.text[:100]}")
+        r = client.get(
+            f"{CARTO_BASE}/client/getInfo", params=params,
+            headers={"X-Requested-With": "XMLHttpRequest",
+                     "Referer": f"{CARTO_BASE}/"},
+            timeout=25,
+        )
+        if r.status_code == 200 and "json" in r.headers.get("content-type", ""):
+            return r.json()
+        if r.status_code in (401, 403):
+            logger.warning(f"getInfo: HTTP {r.status_code} — sesión inválida")
+            return None
+        logger.warning(f"getInfo: HTTP {r.status_code} — {r.text[:120]!r}")
+        return None
+    except Exception as e:
+        logger.warning(f"getInfo excepción: {e}")
         return None
 
-    # GeoJSON FeatureCollection
-    if isinstance(data, dict):
-        if data.get("type") == "FeatureCollection":
-            return data.get("features", [])
-        # Puede ser {"parcelas": [...]} u otro wrapper
-        for key in ("features", "parcelas", "results", "data"):
-            if key in data and isinstance(data[key], list):
-                return data[key]
-        # Dict único con geometría → envolver en lista
-        if "geometry" in data:
-            return [data]
 
-    if isinstance(data, list) and len(data) > 0:
-        return data
+def _parsear_subparcelas(data: dict) -> tuple[str, str, list[dict]]:
+    """
+    Extrae de la respuesta getInfo:
+      - domicilio: dirección registrada en ARBA
+      - nomencla:  nomenclatura catastral completa
+      - rows:      [{partida, s_m2, sp}] — subparcelas
+    """
+    nomencla  = ""
+    domicilio = ""
+    rows_out: list[dict] = []
 
-    return None
+    for bloque in data.get("data", []):
+        title = str(bloque.get("title", "")).lower()
+        bd    = bloque.get("data", {})
+        if not isinstance(bd, dict):
+            continue
 
+        if "nomenclatura" in title:
+            for row in bd.get("table", {}).values():
+                if row.get("clave") == "Abierta":
+                    nomencla = row.get("valor", "").strip()
+                    break
 
-# ── Upsert en DB ──────────────────────────────────────────────────────────────
-
-def _upsert_parcelas(features: list, region_id: str, survey_id: str) -> tuple[int, int]:
-    engine = get_engine()
-    insertadas = 0
-    actualizadas = 0
-
-    def _area(geom) -> Optional[float]:
-        try:
-            proj = pyproj.Transformer.from_crs(
-                "EPSG:4326", "EPSG:32721", always_xy=True
-            ).transform
-            return round(shp_transform(proj, geom).area, 2)
-        except Exception:
-            return None
-
-    with engine.begin() as conn:
-        for feat in features:
-            # Soportar GeoJSON feature o dict plano con geometry
-            if isinstance(feat, dict) and "geometry" in feat:
-                geom_raw = feat["geometry"]
-                props = feat.get("properties") or feat
-            else:
+        elif "valores" in title or "básic" in title or "basic" in title:
+            tabla = bd.get("table", {})
+            if not tabla or "partida" not in next(iter(tabla.values()), {}):
                 continue
-
-            if not geom_raw:
-                continue
-
-            try:
-                geom = shape(geom_raw)
-            except Exception:
-                continue
-
-            centroid = geom.centroid
-            lat, lng = round(centroid.y, 7), round(centroid.x, 7)
-            area = _area(geom)
-            geom_wkt = geom.wkt
-
-            # Dedup por coordenadas del centroide
-            existing = conn.execute(text("""
-                SELECT parcela_id FROM parcelas
-                WHERE region_id = :region
-                  AND fuente_parcela = 'arba_carto'
-                  AND ABS(centroid_lat - :lat) < 0.0001
-                  AND ABS(centroid_lng - :lng) < 0.0001
-            """), {"region": region_id, "lat": lat, "lng": lng}).fetchone()
-
-            if existing:
-                conn.execute(text("""
-                    UPDATE parcelas SET
-                        geometry = ST_GeomFromText(:geom, 4326),
-                        area_m2_terreno = :area
-                    WHERE parcela_id = :pid
-                """), {"geom": geom_wkt, "area": area, "pid": str(existing[0])})
-                actualizadas += 1
-            else:
-                new_id = uuid.uuid4()
-                conn.execute(text("""
-                    INSERT INTO parcelas
-                        (parcela_id, survey_id, region_id,
-                         geometry, centroid_lat, centroid_lng,
-                         area_m2_terreno, fuente_parcela)
-                    VALUES
-                        (:pid, :sid, :region,
-                         ST_GeomFromText(:geom, 4326), :lat, :lng,
-                         :area, 'arba_carto')
-                """), {
-                    "pid": str(new_id), "sid": survey_id, "region": region_id,
-                    "geom": geom_wkt, "lat": lat, "lng": lng, "area": area,
+            for _, row in sorted(tabla.items(), key=lambda x: int(x[0])):
+                if "partida" not in row:
+                    continue
+                try:
+                    s_m2 = int(float(row.get("s_terreno", 0) or 0))
+                except (ValueError, TypeError):
+                    s_m2 = 0
+                rows_out.append({
+                    "partida": str(row["partida"]),
+                    "s_m2": s_m2,
+                    "sp": str(row.get("sp", "")),
                 })
-                insertadas += 1
 
-    return insertadas, actualizadas
+        elif "direcci" in title:
+            partes = [v.strip() for v in bd.values()
+                      if isinstance(v, str) and v.strip()]
+            domicilio = " ".join(partes)
+
+    return domicilio, nomencla, rows_out
+
+
+# ── Geocodificación ────────────────────────────────────────────────────────────
+
+def _geocodificar(client: httpx.Client, lat: float, lon: float) -> tuple[str, str, str]:
+    """Devuelve (calle, numero, fuente). Intenta Google Maps → Nominatim."""
+    google_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+
+    if google_key:
+        for _ in range(3):
+            try:
+                r = client.get(GMAPS_GEO, params={
+                    "latlng": f"{lat},{lon}",
+                    "key": google_key,
+                    "language": "es",
+                }, timeout=10)
+                d = r.json()
+                if d.get("status") == "OK" and d.get("results"):
+                    comps = {t: c["long_name"]
+                             for c in d["results"][0].get("address_components", [])
+                             for t in c["types"]}
+                    road = comps.get("route", "")
+                    num  = comps.get("street_number", "")
+                    if road:
+                        return road, num, "google"
+                break
+            except Exception:
+                time.sleep(1.5)
+
+    # Nominatim fallback
+    try:
+        r = client.get(NOMINATIM, params={
+            "lat": lat, "lon": lon, "format": "json", "zoom": 18,
+        }, headers={"User-Agent": "Scrapitero/1.0"}, timeout=10)
+        if r.status_code == 200:
+            addr = r.json().get("address", {})
+            road = addr.get("road") or addr.get("pedestrian") or ""
+            num  = addr.get("house_number", "")
+            if road:
+                return road, num, "nominatim"
+    except Exception:
+        pass
+
+    return "", "", "sin_datos"
+
+
+# ── Actualizar parcela en DB ──────────────────────────────────────────────────
+
+def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
+                    fuente_dir: str, domicilio_carto: str,
+                    n_uf: int, n_cocheras: int, nomencla: str) -> None:
+    # Dirección: preferir carto (datos registrales) sobre geocoding
+    calle_final  = domicilio_carto.split()[0] if domicilio_carto else calle
+    numero_final = ""
+    if domicilio_carto:
+        partes = domicilio_carto.split()
+        numero_final = partes[1] if len(partes) > 1 else ""
+    else:
+        numero_final = numero
+
+    conn.execute(text("""
+        UPDATE parcelas SET
+            calle                       = :calle,
+            numero                      = :numero,
+            direccion_source            = :src,
+            unidades_funcionales_estimadas = :n_uf,
+            fuente_parcela              = 'arba_carto'
+        WHERE parcela_id = :pid
+    """), {
+        "calle": calle_final or None,
+        "numero": numero_final or None,
+        "src": "arba_carto" if domicilio_carto else fuente_dir,
+        "n_uf": n_uf,
+        "pid": parcela_id,
+    })
+
+
+def _insert_unidades(conn, parcela_id: str, rows: list[dict]) -> None:
+    """Inserta subparcelas en unidades_funcionales."""
+    # Limpiar UF previas de esta parcela
+    conn.execute(text("DELETE FROM unidades_funcionales WHERE edificio_id IN "
+                      "(SELECT edificio_id FROM edificios WHERE parcela_id = :pid)"),
+                 {"pid": parcela_id})
+    # NOTA: si no hay edificios asociados aún, las UF se guardan indirectamente
+    # a través del campo unidades_funcionales_estimadas en parcelas.
+    # Cuando BuildingFetcher cargue edificios, SpatialJoiner los asociará.
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-COOKIE_INSTRUCTIONS = (
-    "Necesito que me pases el JSESSIONID de carto.arba.gov.ar.\n\n"
-    "Pasos:\n"
-    "1. Abrí Chrome → https://carto.arba.gov.ar/cartoArba/\n"
-    "2. Abrí DevTools (F12) → pestaña Network\n"
-    "3. Hacé una búsqueda: Partido=136, Circunscripción=2, Sección=C, Manzana=184\n"
-    "4. Buscá en la lista de requests uno que diga 'getParcelasByNomenclatura' "
-    "o similar (tipo Fetch/XHR)\n"
-    "5. Click en esa request → Headers → Request Headers → copiá el valor de 'Cookie:'\n"
-    "6. Enviame el valor copiado por acá\n\n"
-    "Ejemplo: JSESSIONID=ABC123DEF456"
-)
-
-
 def run(input: ARBACartoInput) -> ARBACartoOutput:
-    # Resolver cookies: input > disco
+    # Resolver JSESSIONID
     jsessionid = input.jsessionid
-
     if not jsessionid and input.cookie_header:
-        jsessionid = _parse_cookie_header(input.cookie_header)
-        if not jsessionid:
-            logger.warning("No se pudo extraer JSESSIONID del cookie_header")
-
+        jsessionid = _extract_jsessionid(input.cookie_header)
     if not jsessionid:
         jsessionid = _load_session()
 
     if not jsessionid:
-        logger.info("No hay sesión ARBA disponible → needs_cookies")
         return ARBACartoOutput(
             ok=False,
             needs_cookies=True,
@@ -315,50 +322,100 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
             error="Sin sesión activa de carto.arba.gov.ar"
         )
 
-    # Guardar/renovar la sesión en disco
     _save_session(jsessionid)
-    cookies = _build_cookies(jsessionid)
-    params = _search_params(input)
+    engine = get_engine()
 
-    try:
-        endpoint, features = _try_endpoints(params, cookies)
+    # Cargar parcelas de la región desde DB
+    with engine.connect() as conn:
+        q = "SELECT parcela_id::text, centroid_lat, centroid_lng FROM parcelas WHERE region_id = :region"
+        params: dict = {"region": input.region_id}
+        if input.survey_id:
+            q += " AND survey_id = :sid"
+            params["sid"] = input.survey_id
+        parcelas_db = conn.execute(text(q), params).fetchall()
 
-        if endpoint is None:
-            # Puede ser sesión expirada o endpoint desconocido
-            logger.warning("Ningún endpoint respondió con datos")
-            # Borrar sesión guardada para forzar nuevo handshake
-            if ARBA_SESSION_FILE.exists():
-                ARBA_SESSION_FILE.unlink()
-            return ARBACartoOutput(
-                ok=False,
-                needs_cookies=True,
-                cookie_instructions=(
-                    "La sesión expiró o el endpoint cambió.\n"
-                    + COOKIE_INSTRUCTIONS
-                ),
-                error="Sesión expirada o endpoints desconocidos"
-            )
-
-        if not features:
-            return ARBACartoOutput(
-                ok=True,
-                parcelas_insertadas=0,
-                parcelas_actualizadas=0,
-                endpoint_usado=endpoint,
-                fuentes=["arba_carto"],
-                error="El endpoint respondió pero no devolvió parcelas. Verificar parámetros."
-            )
-
-        insertadas, actualizadas = _upsert_parcelas(features, input.region_id, input.survey_id)
-
+    if not parcelas_db:
         return ARBACartoOutput(
-            ok=True,
-            parcelas_insertadas=insertadas,
-            parcelas_actualizadas=actualizadas,
-            endpoint_usado=endpoint,
-            fuentes=["arba_carto"],
+            ok=False,
+            error="No hay parcelas en la DB para esta región. Correr arba_cadastral_fetcher primero."
         )
 
-    except Exception as e:
-        logger.exception("ARBACartoFetcher falló")
-        return ARBACartoOutput(ok=False, error=str(e))
+    logger.info(f"Enriqueciendo {len(parcelas_db)} parcelas con carto.arba.gov.ar...")
+
+    procesadas = 0
+    con_subparcelas = 0
+    total_uf = 0
+    total_cocheras = 0
+    session_invalida = False
+    prev_partidas: Optional[list] = None
+
+    with httpx.Client(follow_redirects=True) as client:
+        # Inicializar sesión
+        client.get(f"{CARTO_BASE}/", timeout=15)
+        client.cookies.set("JSESSIONID", jsessionid, domain="carto.arba.gov.ar")
+
+        with engine.begin() as conn:
+            for row in parcelas_db:
+                parcela_id, lat, lng = row[0], row[1], row[2]
+                if lat is None or lng is None:
+                    continue
+
+                # Geocodificación
+                calle, numero, fuente_dir = _geocodificar(client, lat, lng)
+
+                # getInfo desde carto
+                data = _get_info(client, lng, lat)
+                procesadas += 1
+
+                if data is None:
+                    # Puede ser sesión inválida
+                    session_invalida = True
+                    break
+
+                domicilio, nomencla, rows = _parsear_subparcelas(data)
+
+                # Detectar duplicados (click cayó en parcela anterior)
+                partidas_actuales = [r["partida"] for r in rows]
+                if partidas_actuales and partidas_actuales == prev_partidas:
+                    logger.debug(f"Parcela {parcela_id[:8]}… duplicada — skip")
+                    time.sleep(input.delay_ms / 1000)
+                    continue
+                prev_partidas = partidas_actuales if partidas_actuales else prev_partidas
+
+                cocheras = sum(1 for r in rows if 0 < r["s_m2"] < COCHERA_M2)
+                uf       = sum(1 for r in rows if r["s_m2"] >= COCHERA_M2)
+
+                if rows:
+                    con_subparcelas += 1
+                    total_uf += uf
+                    total_cocheras += cocheras
+
+                _update_parcela(conn, parcela_id, calle, numero,
+                                fuente_dir, domicilio, uf, cocheras, nomencla)
+
+                logger.debug(
+                    f"✓ {parcela_id[:8]}… → dir=[{fuente_dir}] {calle} {numero} "
+                    f"| UF={uf} cocheras={cocheras}"
+                )
+                time.sleep(input.delay_ms / 1000)
+
+    if session_invalida:
+        # Borrar sesión guardada para forzar nuevo handshake
+        if ARBA_SESSION_FILE.exists():
+            ARBA_SESSION_FILE.unlink()
+        return ARBACartoOutput(
+            ok=False,
+            parcelas_procesadas=procesadas,
+            needs_cookies=True,
+            cookie_instructions="Sesión expirada.\n\n" + COOKIE_INSTRUCTIONS,
+            error="JSESSIONID expirado"
+        )
+
+    return ARBACartoOutput(
+        ok=True,
+        parcelas_procesadas=procesadas,
+        parcelas_con_subparcelas=con_subparcelas,
+        total_uf=total_uf,
+        total_cocheras=total_cocheras,
+        fuentes=["arba_carto_getInfo", "google_maps" if os.environ.get("GOOGLE_MAPS_API_KEY") else "nominatim"],
+    )
