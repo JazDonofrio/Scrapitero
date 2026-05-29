@@ -1,7 +1,7 @@
 ---
 name: relevar-manzana-ar
-description: "Relevamiento catastral de manzanas en Argentina (Buenos Aires Province). Activar cuando el usuario menciona Partido, Circunscripción, Sección, Manzana, Ituzaingó, ARBA, o cualquier localidad argentina. USA ARBA + OSM + Google Maps."
-version: 1.0.0
+description: "Relevamiento catastral de manzanas en Argentina (Buenos Aires Province). Activar cuando el usuario menciona Partido, Circunscripción, Sección, Manzana, Ituzaingó, ARBA, o cualquier localidad argentina."
+version: 2.0.0
 author: Scrapitero
 platforms: [linux]
 metadata:
@@ -12,25 +12,17 @@ metadata:
 
 # Relevar Manzana Argentina
 
-Ejecuta el pipeline de relevamiento para una manzana del catastro de Buenos Aires Province.
-El LLM **no procesa datos** — solo lee JSONs y decide qué agente correr.
+Pipeline de relevamiento catastral para manzanas de Buenos Aires Province.
 
-## Cuándo usar
-Cuando el usuario menciona:
-- "relevá la manzana X"
-- "partido 136, circunscripción 2, sección C, manzana 184"
-- "relevá Ituzaingó"
-- Cualquier combinación de Partido/Circunscripción/Sección/Manzana
-
-## IMPORTANTE
+## REGLAS OBLIGATORIAS
 - **Nunca instalar paquetes.** El venv ya está listo.
-- Siempre cargar el .env: `env $(cat /opt/scrapitero/.env | xargs)`
-- Siempre pasar PYTHONPATH: `PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src`
-- Responder siempre en español.
+- Siempre usar: `env $(cat /opt/scrapitero/.env | xargs) PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src python3`
+- **SIEMPRE pedir el JSESSIONID antes de correr `arba_carto_fetcher`.** Ver Paso 2.
 
-## Pipeline completo
+---
 
-### Paso 1 — Crear survey
+## Paso 1 — Crear survey
+
 ```bash
 env $(cat /opt/scrapitero/.env | xargs) \
 PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
@@ -45,33 +37,51 @@ with get_engine().begin() as conn:
 print(survey_id)
 "
 ```
-Guardar el `survey_id` para los pasos siguientes.
+Guardar el `survey_id`.
 
-### Paso 2 — Cargar parcelas ARBA
+---
 
-Intentar primero con el WFS público (no requiere autenticación):
+## Paso 2 — PEDIR JSESSIONID AL USUARIO (OBLIGATORIO antes de continuar)
+
+**SIEMPRE enviar este mensaje al usuario antes de correr arba_carto_fetcher:**
+
+> Necesito el cookie de sesión de carto.arba.gov.ar para obtener los datos catastrales.
+>
+> **Pasos:**
+> 1. Abrí Chrome → https://carto.arba.gov.ar/cartoArba/
+> 2. Presioná F12 → pestaña **Application** → Storage → Cookies → carto.arba.gov.ar
+> 3. Copiame el valor completo de la fila **JSESSIONID**
+>
+> O si preferís: F12 → Network → hacé una búsqueda en el mapa → click en cualquier request a `getInfo` → Headers → Request Headers → copiame el header **Cookie:**
+
+**Esperar la respuesta del usuario.** No continuar hasta recibir el JSESSIONID.
+
+---
+
+## Paso 3 — Cargar parcelas + datos catastrales
+
+Con el JSESSIONID recibido, correr `arba_carto_fetcher` (descarga IDERA + enriquece carto en un solo paso):
+
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
-  python3 -m scrapitero.rpc.arba_cadastral_fetcher
-```
-
-**Si el WFS falla o devuelve 0 parcelas**, usar el portal Carto (requiere sesión):
-```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"<CIRC>","seccion":"<SECC>","manzana":"<MZA>","cookie_header":"<COOKIE_DEL_USUARIO>"}' | \
   env $(cat /opt/scrapitero/.env | xargs) \
   PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
   python3 -m scrapitero.rpc.arba_carto_fetcher
 ```
 
-**Si el output del Carto tiene `"needs_cookies": true`:**
-Usar el skill `arba-carto-fetcher` — contiene el protocolo completo para pedir
-el JSESSIONID al usuario por Telegram y reintentar.
+### Si el output tiene `"needs_cookies": true`:
+La sesión expiró. Enviar al usuario:
+> La sesión de ARBA expiró. Necesito un JSESSIONID nuevo — seguí los mismos pasos de antes en Chrome.
 
-Ajustar partido_id, circunscripcion, seccion y manzana según lo que pidió el usuario.
+Esperar nuevo JSESSIONID y reintentar.
 
-### Paso 3 — Ver estado
+### Si el output tiene `"ok": false` con otro error:
+Reportar el error exacto al usuario y detener.
+
+---
+
+## Paso 4 — Verificar estado
+
 ```bash
 echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
   env $(cat /opt/scrapitero/.env | xargs) \
@@ -79,35 +89,13 @@ echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
   python3 -m scrapitero.rpc.coverage_reporter
 ```
 
-### Paso 4 — Cargar edificios OSM
-Si `parcelas > 0` y `footprints == 0`:
-```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
-  python3 -m scrapitero.rpc.osm_building_fetcher
-```
+---
 
-### Paso 5 — Resolver direcciones
-Si `parcelas_con_direccion / max(parcelas,1) < 0.90`:
-```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","batch_size":100}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
-  python3 -m scrapitero.rpc.address_resolver
-```
+## Paso 5 — Reportar al usuario
 
-### Paso 6 — Verificar cobertura final
-Repetir el `coverage_reporter` del Paso 3 y reportar al usuario:
-- Parcelas relevadas
-- Edificios encontrados
-- Cobertura de dirección (%)
-- Cualquier error
+Informar:
+- Parcelas relevadas y con nomenclatura
+- Total de UF
+- Cualquier parcela sin datos de carto (si `parcelas_con_subparcelas < total_parcelas`)
 
-## Tabla de decisión
-| Condición en CoverageReport | Acción |
-|-----------------------------|--------|
-| `parcelas == 0` | Correr `arba-cadastral-fetcher`; si falla → `arba-carto-fetcher` |
-| `footprints == 0` | Correr `osm-building-fetcher` |
-| `parcelas_con_direccion / max(parcelas,1) < 0.90` | Correr `address-resolver` |
-| `parcelas_con_direccion / max(parcelas,1) >= 0.90` | Reportar éxito al usuario |
+Ofrecer generar el PDF con el skill `relevamiento-pdf`.

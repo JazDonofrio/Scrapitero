@@ -24,7 +24,18 @@ Después de `arba-cadastral-fetcher`, para enriquecer las parcelas con:
 
 ## FLUJO — leer completo
 
-### Paso 1 — Intentar con sesión guardada
+### Paso 0 — PEDIR JSESSIONID AL USUARIO SIEMPRE ANTES DE CONTINUAR
+
+**Antes de correr el comando, enviar al usuario:**
+
+> Necesito el cookie de sesión de carto.arba.gov.ar.
+> 1. Abrí Chrome → https://carto.arba.gov.ar/cartoArba/
+> 2. F12 → Application → Storage → Cookies → carto.arba.gov.ar
+> 3. Copiame el valor de **JSESSIONID** (o el header Cookie: completo desde Network)
+
+**Esperar respuesta antes de continuar.**
+
+### Paso 1 — Correr con el JSESSIONID recibido
 
 ```bash
 echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
