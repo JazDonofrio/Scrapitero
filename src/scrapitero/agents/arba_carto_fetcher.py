@@ -268,7 +268,8 @@ def _geocodificar(client: httpx.Client, lat: float, lon: float) -> tuple[str, st
 
 def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
                     fuente_dir: str, domicilio_carto: str,
-                    n_uf: int, n_cocheras: int, nomencla: str) -> None:
+                    n_uf: int, n_cocheras: int, nomencla: str,
+                    partida: str = "") -> None:
     # Dirección: preferir carto (datos registrales) sobre geocoding
     calle_final  = domicilio_carto.split()[0] if domicilio_carto else calle
     numero_final = ""
@@ -280,17 +281,21 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
 
     conn.execute(text("""
         UPDATE parcelas SET
-            calle                       = :calle,
-            numero                      = :numero,
-            direccion_source            = :src,
+            calle                          = :calle,
+            numero                         = :numero,
+            direccion_source               = :src,
             unidades_funcionales_estimadas = :n_uf,
-            fuente_parcela              = 'arba_carto'
+            nomenclatura_catastral         = :nomencla,
+            partida_inmobiliaria           = :partida,
+            fuente_parcela                 = 'arba_carto'
         WHERE parcela_id = :pid
     """), {
         "calle": calle_final or None,
         "numero": numero_final or None,
         "src": "arba_carto" if domicilio_carto else fuente_dir,
         "n_uf": n_uf,
+        "nomencla": nomencla or None,
+        "partida": partida or None,
         "pid": parcela_id,
     })
 
@@ -431,12 +436,14 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                     total_uf += uf
                     total_cocheras += cocheras
 
+                partida_principal = rows[0]["partida"] if rows else ""
                 _update_parcela(conn, parcela_id, calle, numero,
-                                fuente_dir, domicilio, uf, cocheras, nomencla)
+                                fuente_dir, domicilio, uf, cocheras,
+                                nomencla, partida_principal)
 
                 logger.debug(
                     f"✓ {parcela_id[:8]}… → dir=[{fuente_dir}] {calle} {numero} "
-                    f"| UF={uf} cocheras={cocheras}"
+                    f"| UF={uf} cocheras={cocheras} nomencla={nomencla!r}"
                 )
                 time.sleep(input.delay_ms / 1000)
 

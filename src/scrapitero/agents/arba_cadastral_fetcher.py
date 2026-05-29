@@ -154,9 +154,10 @@ def _upsert_parcelas(features: list[dict], region_id: str,
                 conn.execute(text("""
                     UPDATE parcelas SET
                         geometry = ST_GeomFromText(:geom, 4326),
-                        area_m2_terreno = :area
+                        area_m2_terreno = :area,
+                        cca_code = :cca
                     WHERE parcela_id = :pid
-                """), {"geom": geom_wkt, "area": area, "pid": str(existing[0])})
+                """), {"geom": geom_wkt, "area": area, "cca": cca or None, "pid": str(existing[0])})
                 actualizadas += 1
             else:
                 new_id = uuid.uuid4()
@@ -164,14 +165,15 @@ def _upsert_parcelas(features: list[dict], region_id: str,
                     INSERT INTO parcelas
                         (parcela_id, survey_id, region_id,
                          geometry, centroid_lat, centroid_lng,
-                         area_m2_terreno, fuente_parcela)
+                         area_m2_terreno, fuente_parcela, cca_code)
                     VALUES
                         (:pid, :sid, :region,
                          ST_GeomFromText(:geom, 4326), :lat, :lng,
-                         :area, 'arba_idera')
+                         :area, 'arba_idera', :cca)
                 """), {
                     "pid": str(new_id), "sid": survey_id, "region": region_id,
                     "geom": geom_wkt, "lat": lat, "lng": lng, "area": area,
+                    "cca": cca or None,
                 })
                 insertadas += 1
 
