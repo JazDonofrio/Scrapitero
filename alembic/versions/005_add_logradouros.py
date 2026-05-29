@@ -1,7 +1,7 @@
-"""003 — tabla logradouros (segmentos de calle IBGE Faces de Logradouros 2022)
+"""005 — tabla logradouros (segmentos de calle IBGE Faces de Logradouros 2022)
 
-Revision ID: 003
-Revises: 002
+Revision ID: 005
+Revises: 004
 Create Date: 2026-05-29
 """
 
@@ -10,8 +10,8 @@ from alembic import op
 import sqlalchemy as sa
 import geoalchemy2
 
-revision: str = "003"
-down_revision: Union[str, None] = "002"
+revision: str = "005"
+down_revision: Union[str, None] = "004"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
