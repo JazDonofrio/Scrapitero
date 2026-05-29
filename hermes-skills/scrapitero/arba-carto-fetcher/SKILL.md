@@ -52,14 +52,23 @@ Enviar este mensaje:
 
 ### Paso 3 — Reintentar con el JSESSIONID recibido
 
+**Si el usuario mandó solo el valor del JSESSIONID** (ej: `ABC123XYZ`):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","jsessionid":"<VALOR_DEL_USUARIO>"}' | \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","jsessionid":"<VALOR>"}' | \
   env $(cat /opt/scrapitero/.env | xargs) \
   PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
   python3 -m scrapitero.rpc.arba_carto_fetcher
 ```
 
-Si el usuario mandó el header Cookie completo, usar `cookie_header` en lugar de `jsessionid`.
+**Si el usuario mandó el header Cookie completo** (ej: `JSESSIONID=ABC123; TS01x=yyy` o `Cookie: JSESSIONID=ABC123`):
+```bash
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","cookie_header":"<STRING_COMPLETO>"}' | \
+  env $(cat /opt/scrapitero/.env | xargs) \
+  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+  python3 -m scrapitero.rpc.arba_carto_fetcher
+```
+
+**IMPORTANTE:** no inventar ni modificar el valor del cookie. Usarlo exactamente como lo mandó el usuario.
 
 ## Output esperado (éxito)
 ```json

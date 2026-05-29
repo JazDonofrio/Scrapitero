@@ -95,7 +95,9 @@ def _save_session(jsessionid: str) -> None:
 
 
 def _extract_jsessionid(cookie_header: str) -> Optional[str]:
-    for part in cookie_header.split(";"):
+    # Eliminar prefijo "Cookie:" si el usuario copió el header completo
+    value = re.sub(r"(?i)^cookie\s*:\s*", "", cookie_header.strip())
+    for part in value.split(";"):
         if part.strip().upper().startswith("JSESSIONID="):
             return part.split("=", 1)[1].strip()
     return None
@@ -309,10 +311,14 @@ def _insert_unidades(conn, parcela_id: str, rows: list[dict]) -> None:
 def run(input: ARBACartoInput) -> ARBACartoOutput:
     # Resolver JSESSIONID
     jsessionid = input.jsessionid
+    # Si jsessionid tiene formato cookie completo, extraer solo el valor
+    if jsessionid and ("=" in jsessionid and ";" in jsessionid or jsessionid.upper().startswith("JSESSIONID=")):
+        jsessionid = _extract_jsessionid(jsessionid) or jsessionid
     if not jsessionid and input.cookie_header:
         jsessionid = _extract_jsessionid(input.cookie_header)
     if not jsessionid:
         jsessionid = _load_session()
+    logger.info(f"JSESSIONID resuelto: {'OK (' + jsessionid[:8] + '...)' if jsessionid else 'NONE'}")
 
     if not jsessionid:
         return ARBACartoOutput(

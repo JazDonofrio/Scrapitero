@@ -19,14 +19,23 @@ Siempre usá los agentes RPC y leé solo sus outputs resumidos (JSON).
 ## Patrón de invocación de todos los agentes
 
 **IMPORTANTE: el venv ya está instalado. NUNCA corras pip install ni uv install.**
-Usar siempre este patrón exacto (el PYTHONPATH doble es obligatorio):
 
+### Desde el container Hermes (Python 3.13) — patrón estándar:
 ```bash
 echo '<JSON_INPUT>' | \
   env $(cat /opt/scrapitero/.env | xargs) \
   PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
   python3 -m scrapitero.rpc.<nombre_agente>
 ```
+
+### Desde el VPS directamente (Python 3.12 del venv):
+```bash
+echo '<JSON_INPUT>' | \
+  env $(cat /opt/scrapitero/.env | xargs) DB_HOST=localhost \
+  PYTHONPATH=/opt/scrapitero/src \
+  /opt/scrapitero/.venv/bin/python3 -m scrapitero.rpc.<nombre_agente>
+```
+> Nota: NO incluir `.hermes-packages` en el PYTHONPATH del VPS — `pydantic_core` ahí está compilado para Python 3.13 y falla en 3.12.
 
 ## Idioma
 Siempre responder en español. Todos los mensajes, reportes y notificaciones en español.
