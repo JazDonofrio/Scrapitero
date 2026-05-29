@@ -22,6 +22,7 @@ echo '<JSON_INPUT>' | python -m scrapitero.rpc.<nombre_agente>
 | AddressResolver | `scrapitero.rpc.address_resolver` | Cuando `parcelas_con_direccion / footprints < 0.90` |
 | ARBACadastralFetcher | `scrapitero.rpc.arba_cadastral_fetcher` | Parcelas de Buenos Aires Province via WFS público |
 | ARBACartoFetcher | `scrapitero.rpc.arba_carto_fetcher` | Parcelas de ARBA Carto (requiere JSESSIONID) |
+| IBGELogradourosFetcher | `scrapitero.rpc.ibge_logradouros_fetcher` | Cargar Faces de Logradouros IBGE 2022 (Brasil) — correr antes de AddressResolver para geocoding gratis |
 | OSMBuildingFetcher | `scrapitero.rpc.osm_building_fetcher` | Footprints de edificios OSM (cualquier país) |
 
 ## Flujo correcto

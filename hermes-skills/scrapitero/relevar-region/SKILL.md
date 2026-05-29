@@ -67,6 +67,7 @@ echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}' | python -m scrapitero
 | Condición en CoverageReport | Agente a correr |
 |-----------------------------|----------------|
 | `setores == 0` | `ibge-census-fetcher` |
+| `logradouros_count == 0` (o ausente) | `ibge-logradouros-fetcher` (correr antes de address-resolver) |
 | `footprints == 0` | `building-footprint-fetcher` *(próximamente)* |
 | `footprints_con_setor / footprints < 0.95` | `spatial-joiner` *(próximamente)* |
 | `parcelas_con_direccion / max(footprints,1) < 0.90` | `address-resolver` |
@@ -103,5 +104,5 @@ Al terminar (cobertura alcanzada o límite de steps), reportar:
 
 ## Notas importantes
 - Los agentes marcados como "próximamente" aún no están implementados
-- Agentes disponibles: `ibge-census-fetcher`, `address-resolver`
+- Agentes disponibles: `ibge-census-fetcher`, `ibge-logradouros-fetcher`, `address-resolver`
 - Cada vez que se corre un agente, **siempre** verificar con `coverage-reporter` después

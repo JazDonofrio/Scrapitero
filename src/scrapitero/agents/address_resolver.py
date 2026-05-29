@@ -1,10 +1,14 @@
-"""AddressResolver — reverse geocoding de parcelas sin dirección via Google Maps API.
+"""AddressResolver — resuelve direcciones de parcelas sin dirección.
 
-Para cada parcela que tenga coordenadas (centroid_lat/lng) pero no tenga dirección
-(calle IS NULL), llama a la Geocoding API de Google Maps y persiste la dirección
-descompuesta en la tabla `parcelas`.
+Estrategia (en orden de preferencia, de menor a mayor costo):
+  1. Interpolación por Faces de Logradouros IBGE (gratis, solo Brasil)
+     Busca el segmento de calle más cercano en la tabla `logradouros` e
+     interpola el número según la posición del centroide a lo largo del eje.
+  2. Google Maps Geocoding API (USD 0.005/llamada, cualquier país)
+     Fallback cuando no hay logradouros en DB o la interpolación falla.
 
-Requiere variable de entorno: GOOGLE_MAPS_API_KEY
+Requiere variable de entorno (para fallback Google):
+  GOOGLE_MAPS_API_KEY
 """
 
 from __future__ import annotations
@@ -33,9 +37,11 @@ class AddressResolverInput(BaseModel):
 class AddressResolverOutput(BaseModel):
     ok: bool
     parcelas_procesadas: int               # total encontradas sin dirección
-    parcelas_resueltas: int                # con dirección encontrada por Google
-    parcelas_sin_resultado: int            # sin resultado en Google
-    costo_estimado_usd: float              # ~0.005 USD por llamada (SKU: Geocoding)
+    parcelas_resueltas: int                # con dirección encontrada (cualquier fuente)
+    parcelas_resueltas_logradouros: int = 0  # resueltas gratis por interpolación IBGE
+    parcelas_resueltas_google: int = 0    # resueltas por Google Maps API
+    parcelas_sin_resultado: int            # sin resultado en ninguna fuente
+    costo_estimado_usd: float              # ~0.005 USD por llamada Google (SKU: Geocoding)
     error: Optional[str] = None
 
 
@@ -93,6 +99,79 @@ def _reverse_geocode(lat: float, lng: float, api_key: str) -> Optional[dict]:
         return None
 
 
+# ── Estrategia 1: interpolación por Logradouros IBGE ─────────────────────────
+
+def _resolve_from_logradouros(engine, lat: float, lng: float, region_id: str) -> Optional[dict]:
+    """
+    Busca el segmento de calle más cercano en la tabla `logradouros` e interpola
+    el número de puerta según la posición del centroide a lo largo del eje.
+
+    Devuelve un dict con calle, numero, cep (si disponible) o None si no hay
+    logradouros en DB o el segmento está a más de 100 m.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT
+                logradouro_id,
+                nome_logradouro,
+                tipo_logradouro,
+                titulo_logradouro,
+                nro_inicial_esq, nro_final_esq,
+                nro_inicial_dir, nro_final_dir,
+                cep_esq, cep_dir,
+                nom_municipio,
+                ST_Distance(
+                    geometry::geography,
+                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
+                ) AS dist_m,
+                ST_LineLocatePoint(
+                    geometry,
+                    ST_ClosestPoint(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
+                ) AS frac
+            FROM logradouros
+            WHERE region_id = :region
+              AND nome_logradouro IS NOT NULL
+            ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)
+            LIMIT 1
+        """), {"lat": lat, "lng": lng, "region": region_id}).fetchone()
+
+    if row is None:
+        return None
+
+    dist_m = row[11]
+    if dist_m > 100:  # más de 100 m → no es confiable
+        return None
+
+    frac = row[12]  # 0.0 = inicio, 1.0 = fin del segmento
+
+    # Interpolar número según fracción a lo largo del segmento
+    # Usamos lado izquierdo como primario; si no hay, lado derecho
+    ini_e, fin_e = row[4], row[5]
+    ini_d, fin_d = row[6], row[7]
+
+    numero: Optional[int] = None
+    if ini_e is not None and fin_e is not None and ini_e > 0 and fin_e > 0:
+        numero = int(round(ini_e + frac * (fin_e - ini_e)))
+    elif ini_d is not None and fin_d is not None and ini_d > 0 and fin_d > 0:
+        numero = int(round(ini_d + frac * (fin_d - ini_d)))
+
+    nome = row[1] or ""
+    tipo = row[2] or ""
+    titulo = row[3] or ""
+    calle_parts = [p for p in [tipo, titulo, nome] if p]
+    calle = " ".join(calle_parts).strip() or None
+
+    cep = row[8] or row[9]  # cep_esq o cep_dir
+
+    return {
+        "calle":       calle,
+        "numero":      str(numero) if numero else None,
+        "municipio":   row[10],
+        "codigo_postal": cep,
+        "source":      "ibge_logradouros",
+    }
+
+
 # ── Consulta y actualización en DB ────────────────────────────────────────────
 
 def _fetch_parcelas_sin_direccion(
@@ -121,6 +200,8 @@ def _fetch_parcelas_sin_direccion(
 
 def _update_parcela_direccion(conn, parcela_id: str, addr: dict) -> None:
     """Actualiza los campos de dirección de una parcela."""
+    source = addr.get("source", "google_maps")
+    confidence = 0.80 if source == "ibge_logradouros" else 0.85
     conn.execute(text("""
         UPDATE parcelas SET
             calle              = :calle,
@@ -130,8 +211,8 @@ def _update_parcela_direccion(conn, parcela_id: str, addr: dict) -> None:
             estado_provincia   = :estado,
             pais               = :pais,
             codigo_postal      = :cp,
-            direccion_source   = 'google_maps',
-            direccion_confidence = 0.85
+            direccion_source   = :source,
+            direccion_confidence = :conf
         WHERE parcela_id = :pid
     """), {
         "calle":   addr.get("calle"),
@@ -141,6 +222,8 @@ def _update_parcela_direccion(conn, parcela_id: str, addr: dict) -> None:
         "estado":  addr.get("estado_provincia"),
         "pais":    addr.get("pais"),
         "cp":      addr.get("codigo_postal"),
+        "source":  source,
+        "conf":    confidence,
         "pid":     parcela_id,
     })
 
@@ -150,11 +233,7 @@ def _update_parcela_direccion(conn, parcela_id: str, addr: dict) -> None:
 def run(input: AddressResolverInput) -> AddressResolverOutput:
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
     if not api_key:
-        return AddressResolverOutput(
-            ok=False, parcelas_procesadas=0, parcelas_resueltas=0,
-            parcelas_sin_resultado=0, costo_estimado_usd=0.0,
-            error="Variable GOOGLE_MAPS_API_KEY no configurada en .env"
-        )
+        logger.warning("GOOGLE_MAPS_API_KEY no configurada — usando solo interpolación IBGE")
 
     engine = get_engine()
 
@@ -164,24 +243,42 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
         )
         logger.info(f"Parcelas sin dirección encontradas: {len(parcelas)}")
 
-        resueltas = 0
+        resueltas_logr = 0
+        resueltas_google = 0
         sin_resultado = 0
+        google_calls = 0
 
         with engine.begin() as conn:
             for p in parcelas:
+                # ── Estrategia 1: interpolación IBGE (gratis) ──────────────
+                addr = _resolve_from_logradouros(engine, p["lat"], p["lng"], input.region_id)
+                if addr and addr.get("calle"):
+                    _update_parcela_direccion(conn, p["parcela_id"], addr)
+                    resueltas_logr += 1
+                    logger.debug(
+                        f"✓ IBGE {p['parcela_id'][:8]}… → "
+                        f"{addr.get('calle', '')} {addr.get('numero', '')}"
+                    )
+                    continue
+
+                # ── Estrategia 2: Google Maps API (fallback de pago) ───────
+                if not api_key:
+                    sin_resultado += 1
+                    continue
+
                 resultado = _reverse_geocode(p["lat"], p["lng"], api_key)
+                google_calls += 1
 
                 if resultado:
-                    addr = _parse_components(resultado.get("address_components", []))
-                    if addr.get("calle"):
-                        _update_parcela_direccion(conn, p["parcela_id"], addr)
-                        resueltas += 1
+                    addr_g = _parse_components(resultado.get("address_components", []))
+                    if addr_g.get("calle"):
+                        _update_parcela_direccion(conn, p["parcela_id"], addr_g)
+                        resueltas_google += 1
                         logger.debug(
-                            f"✓ {p['parcela_id'][:8]}… → "
-                            f"{addr.get('calle', '')} {addr.get('numero', '')}"
+                            f"✓ Google {p['parcela_id'][:8]}… → "
+                            f"{addr_g.get('calle', '')} {addr_g.get('numero', '')}"
                         )
                     else:
-                        # Resultado existe pero no tiene nombre de calle (ej: zona rural)
                         sin_resultado += 1
                 else:
                     sin_resultado += 1
@@ -189,17 +286,21 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
                 if input.delay_ms > 0:
                     time.sleep(input.delay_ms / 1000)
 
-        costo = len(parcelas) * 0.005  # USD por llamada Geocoding API
+        resueltas = resueltas_logr + resueltas_google
+        costo = google_calls * 0.005  # USD por llamada Geocoding API
 
         logger.info(
-            f"AddressResolver: {resueltas} resueltas, {sin_resultado} sin resultado. "
-            f"Costo estimado: USD {costo:.2f}"
+            f"AddressResolver: {resueltas} resueltas "
+            f"({resueltas_logr} IBGE gratis, {resueltas_google} Google), "
+            f"{sin_resultado} sin resultado. Costo estimado: USD {costo:.2f}"
         )
 
         return AddressResolverOutput(
             ok=True,
             parcelas_procesadas=len(parcelas),
             parcelas_resueltas=resueltas,
+            parcelas_resueltas_logradouros=resueltas_logr,
+            parcelas_resueltas_google=resueltas_google,
             parcelas_sin_resultado=sin_resultado,
             costo_estimado_usd=round(costo, 4),
         )
@@ -208,6 +309,7 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
         logger.exception("AddressResolver falló")
         return AddressResolverOutput(
             ok=False, parcelas_procesadas=0, parcelas_resueltas=0,
+            parcelas_resueltas_logradouros=0, parcelas_resueltas_google=0,
             parcelas_sin_resultado=0, costo_estimado_usd=0.0,
             error=str(e)
         )
