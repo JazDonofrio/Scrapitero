@@ -33,8 +33,8 @@ USER_AGENT = (
 BASE_URL = "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55"
 
 # Rango numérico de IDs a consultar
-START_ID = 36100
-END_ID = 36200
+START_ID = 30000
+END_ID = 36099
 
 # Carpeta destino para descargas de PDF
 PDF_DIR = "pdf_downloads"
@@ -42,12 +42,12 @@ PDF_DIR = "pdf_downloads"
 # Parámetros de simulación humana (Stealth Mode)
 # Rango de retraso aleatorio (en segundos) después de cada consulta exitosa
 MIN_DELAY_SECS = 45
-MAX_DELAY_SECS = 150
+MAX_DELAY_SECS = 350
 
 # Frecuencia de pausas largas (simulación de descansos del operador)
-PAUSA_CADA_N_DESCARGAS = 12
+PAUSA_CADA_N_DESCARGAS = 19
 PAUSA_MIN_MINUTOS = 5
-PAUSA_MAX_MINUTOS = 15
+PAUSA_MAX_MINUTOS = 20
 
 # Archivo de salida CSV de registro
 OUTPUT_CSV = "resultado_catastro_registro.csv"
