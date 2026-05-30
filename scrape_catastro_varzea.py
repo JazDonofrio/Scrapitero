@@ -95,6 +95,9 @@ PDF_DIR = _config["PDF_DIR"]
 OUTPUT_CSV = _config["OUTPUT_CSV"]
 NO_EXISTENTE_CSV = _config["NO_EXISTENTE_CSV"]
 
+CSV_HEADERS = ["Inscripción", "Tipo de Inmueble", "Logradouro", "Bairro", "Unidade", "CEP"]
+
+
 # --- SELECTORES DEL DOM (Modificar para adaptar al portal real) ---
 # Campo de texto donde se ingresa la identificación catastral
 SELECTOR_INPUT_ID = "#vCONTRIBUINTEINSCRICAO"
