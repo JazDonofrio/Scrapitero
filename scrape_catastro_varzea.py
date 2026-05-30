@@ -43,13 +43,13 @@ PDF_DIR = "pdf_downloads"
 
 # Parámetros de simulación humana (Stealth Mode)
 # Rango de retraso aleatorio (en segundos) después de cada consulta exitosa
-MIN_DELAY_SECS = 45
+MIN_DELAY_SECS = 0
 MAX_DELAY_SECS = 90
 
 # Frecuencia de pausas largas (simulación de descansos del operador)
 PAUSA_CADA_N_DESCARGAS = 19
-PAUSA_MIN_MINUTOS = 3
-PAUSA_MAX_MINUTOS = 7
+PAUSA_MIN_MINUTOS = 0
+PAUSA_MAX_MINUTOS = 4
 
 # Archivo de salida CSV de registro
 OUTPUT_CSV = "resultado_catastro_registro.csv"
