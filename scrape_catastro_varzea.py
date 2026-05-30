@@ -11,6 +11,7 @@ manejando resiliencia, CAPTCHAs, rate limiting y guardando incrementalmente en C
 import asyncio
 import csv
 import os
+import random
 import sys
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -35,8 +36,21 @@ BASE_URL = "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55"
 START_ID = 36100
 END_ID = 36200
 
-# Archivo de salida CSV
-OUTPUT_CSV = "resultado_catastro_secuencial.csv"
+# Carpeta destino para descargas de PDF
+PDF_DIR = "pdf_downloads"
+
+# Parámetros de simulación humana (Stealth Mode)
+# Rango de retraso aleatorio (en segundos) después de cada consulta exitosa
+MIN_DELAY_SECS = 45
+MAX_DELAY_SECS = 150
+
+# Frecuencia de pausas largas (simulación de descansos del operador)
+PAUSA_CADA_N_DESCARGAS = 12
+PAUSA_MIN_MINUTOS = 5
+PAUSA_MAX_MINUTOS = 15
+
+# Archivo de salida CSV de registro
+OUTPUT_CSV = "resultado_catastro_registro.csv"
 CSV_HEADERS = ["Inscripción", "Tipo de Inmueble", "Logradouro", "Bairro", "Unidade", "CEP"]
 
 # --- SELECTORES DEL DOM (Modificar para adaptar al portal real) ---
@@ -154,10 +168,19 @@ async def detectar_bloqueos(page) -> bool:
 # ==============================================================================
 
 async def main():
+    # Asegurar la existencia de la carpeta de descargas
+    os.makedirs(PDF_DIR, exist_ok=True)
+
+    # Generar y barajar la lista de IDs para evitar accesos secuenciales
+    id_list = list(range(START_ID, END_ID + 1))
+    random.shuffle(id_list)
+
     print("=" * 80)
-    print("INICIANDO EXTRACCIÓN CATASTRAL SECUENCIAL CON PLAYWRIGHT")
-    print(f"Rango de IDs: {START_ID} a {END_ID}")
+    print("INICIANDO EXTRACCIÓN CATASTRAL CON SIMULACIÓN HUMANA (STEALTH MODE)")
+    print(f"Total de IDs a evaluar: {len(id_list)} (Barajados en orden aleatorio)")
     print(f"Modo Headless: {HEADLESS}")
+    print(f"Carpeta de descargas: {PDF_DIR}")
+    print(f"Rango de delay aleatorio: {MIN_DELAY_SECS} a {MAX_DELAY_SECS} segundos")
     print(f"Archivo de salida: {OUTPUT_CSV}")
     print("=" * 80)
 
@@ -172,7 +195,7 @@ async def main():
             ]
         )
         
-        # Crear un contexto de navegación con el User-Agent simulado y viewport por defecto
+        # Contexto con User-Agent residencial
         context = await browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1280, "height": 800}
@@ -189,14 +212,14 @@ async def main():
         # Registrar mensajes de la consola del navegador
         page.on("console", lambda msg: print(f"    [console] {msg.type}: {msg.text}"))
         
-        # Definir variable de seguimiento para cierres (closures) de eventos
+        # Definir variable de seguimiento para cierres (closures) de eventos y control de descargas
         current_id = START_ID
         estado_descarga = {"pdf_descargado": False}
         
         # Registrar descargas en el contexto (captura descargas de cualquier pestaña)
         async def handle_download(download):
             filename = f"reporte_{current_id}.pdf"
-            filepath = os.path.join(os.getcwd(), filename)
+            filepath = os.path.join(PDF_DIR, filename)
             print(f"    [descarga] Se detectó descarga del archivo: {download.suggested_filename}")
             await download.save_as(filepath)
             print(f"    [descarga] Archivo guardado con éxito en: {filepath}")
@@ -210,10 +233,10 @@ async def main():
                 if "application/pdf" in ct or "pdf" in response.url.lower():
                     print(f"    [debug] Interceptada respuesta PDF en: {response.url}")
                     pdf_bytes = await response.body()
-                    filename = f"reporte_{current_id}.pdf"
+                    filename = os.path.join(PDF_DIR, f"reporte_{current_id}.pdf")
                     with open(filename, "wb") as f:
                         f.write(pdf_bytes)
-                    print(f"    [debug] PDF inline guardado con éxito como '{filename}'")
+                    print(f"    [debug] PDF inline guardado con éxito en: {filename}")
                     estado_descarga["pdf_descargado"] = True
             except Exception:
                 pass
@@ -226,7 +249,15 @@ async def main():
             "navigator.__proto__ = newProto;"
         )
 
-        for current_id in range(START_ID, END_ID + 1):
+        descargas_exitosas = 0
+
+        for current_id in id_list:
+            # 1. Comprobar si el archivo PDF ya existe en la carpeta de descargas
+            filename_check = os.path.join(PDF_DIR, f"reporte_{current_id}.pdf")
+            if os.path.exists(filename_check):
+                print(f"[-] Saltando ID {current_id} (Ya fue descargado: {filename_check})")
+                continue
+
             # Reiniciar estado de descarga para este ID
             estado_descarga["pdf_descargado"] = False
             
@@ -328,10 +359,21 @@ async def main():
                     }
                     guardar_en_csv(datos_pdf)
                     
+                    descargas_exitosas += 1
+                    
                     if is_new_tab:
                         await active_page.close()
-                    # Retraso de cortesía controlado
-                    await asyncio.sleep(1.5)
+                        
+                    # --- LÓGICA DE PAUSA HUMANA ALEATORIA ---
+                    if descargas_exitosas % PAUSA_CADA_N_DESCARGAS == 0:
+                        pausa_minutos = random.randint(PAUSA_MIN_MINUTOS, PAUSA_MAX_MINUTOS)
+                        print(f"\n[i] Simulación Humana: Se completaron {descargas_exitosas} descargas.")
+                        print(f"[i] Tomando un descanso de {pausa_minutos} minutos antes de continuar...")
+                        await asyncio.sleep(pausa_minutos * 60)
+                    else:
+                        delay_actual = random.uniform(MIN_DELAY_SECS, MAX_DELAY_SECS)
+                        print(f"    [i] Espera aleatoria de cortesía: {delay_actual:.2f} segundos...")
+                        await asyncio.sleep(delay_actual)
                     continue
                 
                 # 1. Comprobar presencia de CAPTCHA
@@ -356,6 +398,10 @@ async def main():
                     print(f"    [-] ID {current_id} no encontrado en el sistema ('Imóvel não encontrado').")
                     if is_new_tab:
                         await active_page.close()
+                    # Retraso aleatorio corto para simular búsqueda humana fallida
+                    delay_fallido = random.uniform(10, 30)
+                    print(f"    [i] Espera aleatoria por ID no encontrado: {delay_fallido:.2f} segundos...")
+                    await asyncio.sleep(delay_fallido)
                     continue
 
                 # 3. Esperar la carga de la tabla/reporte de resultados
@@ -368,6 +414,9 @@ async def main():
                         print(f"    [-] ID {current_id} no encontrado (Timeout en contenedor).")
                         if is_new_tab:
                             await active_page.close()
+                        # Retraso por búsqueda fallida
+                        delay_fallido = random.uniform(10, 30)
+                        await asyncio.sleep(delay_fallido)
                         continue
                     else:
                         raise PlaywrightTimeoutError("El contenedor de resultados no apareció dentro del tiempo estimado.")
@@ -393,13 +442,20 @@ async def main():
                     await active_page.close()
 
                 # --- CORTESÍA DEL SERVIDOR (Rate Limiting) ---
-                # Retraso controlado para ser respetuosos con la infraestructura origen
-                await asyncio.sleep(1.5)
+                delay_actual = random.uniform(MIN_DELAY_SECS, MAX_DELAY_SECS)
+                print(f"    [i] Espera aleatoria de cortesía: {delay_actual:.2f} segundos...")
+                await asyncio.sleep(delay_actual)
 
             except PlaywrightTimeoutError:
                 print(f"    [!] Timeout al procesar ID {current_id}. El servidor tarda en responder o cambió la estructura.")
+                delay_err = random.uniform(20, 60)
+                print(f"    [i] Espera aleatoria tras error de timeout: {delay_err:.2f} segundos...")
+                await asyncio.sleep(delay_err)
             except Exception as e:
                 print(f"    [!] Error inesperado al procesar ID {current_id}: {str(e)}")
+                delay_err = random.uniform(20, 60)
+                print(f"    [i] Espera aleatoria tras error: {delay_err:.2f} segundos...")
+                await asyncio.sleep(delay_err)
 
         print("\n" + "=" * 80)
         print(f"PROCESO FINALIZADO. Resultados almacenados en '{OUTPUT_CSV}'.")
