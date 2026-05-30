@@ -13,6 +13,8 @@ import csv
 import os
 import random
 import sys
+import time
+from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ==============================================================================
@@ -53,6 +55,9 @@ PAUSA_MAX_MINUTOS = 20
 OUTPUT_CSV = "resultado_catastro_registro.csv"
 CSV_HEADERS = ["Inscripción", "Tipo de Inmueble", "Logradouro", "Bairro", "Unidade", "CEP"]
 
+# Archivo de registro para números inexistentes
+NO_EXISTENTE_CSV = "nroInscripcionNoExistente.csv"
+
 # --- SELECTORES DEL DOM (Modificar para adaptar al portal real) ---
 # Campo de texto donde se ingresa la identificación catastral
 SELECTOR_INPUT_ID = "#vCONTRIBUINTEINSCRICAO"
@@ -88,6 +93,18 @@ def guardar_en_csv(registro: dict):
         if not archivo_existe:
             writer.writeheader()
         writer.writerow(registro)
+
+
+def guardar_inexistente_en_csv(formatted_id: str):
+    """
+    Guarda incrementalmente un ID no encontrado en el archivo de registro de no existentes.
+    """
+    archivo_existe = os.path.exists(NO_EXISTENTE_CSV)
+    with open(NO_EXISTENTE_CSV, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not archivo_existe:
+            writer.writerow(["Inscripción"])
+        writer.writerow([formatted_id])
 
 
 async def extraer_por_etiqueta(page, label: str) -> str:
@@ -164,6 +181,153 @@ async def detectar_bloqueos(page) -> bool:
 
 
 # ==============================================================================
+# ESTADO DE PROCESAMIENTO Y ESTIMACIONES (MONITOR CON TAIL)
+# ==============================================================================
+
+ESTADO_TXT = "scrape_catastro_varzea_estado.txt"
+
+def actualizar_archivo_estado(current_id: int, status_action: str, 
+                             procesados_esta_sesion: int, descargas_esta_sesion: int, 
+                             inexistentes_esta_sesion: int, errores_esta_sesion: int,
+                             start_time: float, start_datetime: datetime,
+                             total_rango_size: int, ids_ya_procesados_inicial: int):
+    """
+    Calcula métricas y escribe el estado actual en el archivo scrape_catastro_varzea_estado.txt.
+    """
+    now = datetime.now()
+    
+    # Calcular cantidades generales históricas
+    # PDFs descargados
+    total_pdfs_descargados = 0
+    if os.path.exists(PDF_DIR):
+        total_pdfs_descargados = len([f for f in os.listdir(PDF_DIR) if f.startswith("reporte_") and f.endswith(".pdf")])
+        
+    # Inexistentes
+    total_inexistentes = 0
+    if os.path.exists(NO_EXISTENTE_CSV):
+        try:
+            with open(NO_EXISTENTE_CSV, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Omitir cabecera
+                total_inexistentes = sum(1 for row in reader if row)
+        except Exception:
+            pass
+            
+    total_procesados_historico = total_pdfs_descargados + total_inexistentes
+    pct_general = (total_procesados_historico / total_rango_size) * 100 if total_rango_size > 0 else 0
+    pendientes_restantes = max(0, total_rango_size - total_procesados_historico)
+    
+    # Calcular tiempo esta sesión
+    elapsed_secs = time.time() - start_time
+    # Formatear tiempo transcurrido
+    et_hours, remainder = divmod(int(elapsed_secs), 3600)
+    et_minutes, et_seconds = divmod(remainder, 60)
+    tiempo_transcurrido = f"{et_hours:02d}:{et_minutes:02d}:{et_seconds:02d}"
+    
+    # Calcular tiempo promedio por ID
+    if procesados_esta_sesion > 0:
+        avg_time_per_id = elapsed_secs / procesados_esta_sesion
+    else:
+        # Estimación inicial basada en las pausas configuradas (delay promedio + tiempo de carga)
+        avg_time_per_id = (MIN_DELAY_SECS + MAX_DELAY_SECS) / 2 + 15
+        
+    avg_time_per_id_min = avg_time_per_id / 60
+    
+    # Estimar tiempo restante
+    tiempo_restante_secs = pendientes_restantes * avg_time_per_id
+    
+    # Formatear tiempo restante
+    tr_days, tr_rem = divmod(int(tiempo_restante_secs), 86400)
+    tr_hours, tr_rem2 = divmod(tr_rem, 3600)
+    tr_minutes, tr_seconds = divmod(tr_rem2, 60)
+    
+    if tr_days > 0:
+        tiempo_restante_legible = f"{tr_days} días, {tr_hours} horas, {tr_minutes} mins"
+    else:
+        tiempo_restante_legible = f"{tr_hours} horas, {tr_minutes} mins"
+        
+    # Calcular fecha estimada de fin
+    fecha_estimada_fin_dt = now + timedelta(seconds=tiempo_restante_secs)
+    fecha_estimada_fin = fecha_estimada_fin_dt.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Formatear salida
+    lines = [
+        "================================================================================",
+        "SCRAPITERO - ESTADO DE EXTRACCIÓN (VÁRZEA GRANDE)",
+        f"Actualizado: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        "================================================================================",
+        f"RANGO CONFIGURADO: {START_ID} a {END_ID} (Total: {total_rango_size} IDs)",
+        "--------------------------------------------------------------------------------",
+        "PROGRESO GENERAL:",
+        f"- Total IDs Procesados Históricamente: {total_procesados_historico}/{total_rango_size} ({pct_general:.2f}%)",
+        f"  * PDFs Descargados (Éxitos): {total_pdfs_descargados}",
+        f"  * IDs Inexistentes: {total_inexistentes}",
+        f"- IDs Pendientes Restantes: {pendientes_restantes}",
+        "--------------------------------------------------------------------------------",
+        f"ESTA SESIÓN (Iniciada a las {start_datetime.strftime('%H:%M:%S')}):",
+        f"- IDs Evaluados en esta sesión: {procesados_esta_sesion}",
+        f"  * Descargas Exitosas: {descargas_esta_sesion}",
+        f"  * Inexistentes Registrados: {inexistentes_esta_sesion}",
+        f"  * Errores/Timeouts Temporales: {errores_esta_sesion}",
+        f"- Tiempo Transcurrido: {tiempo_transcurrido}",
+        "--------------------------------------------------------------------------------",
+        "RENDIMIENTO Y ESTIMACIONES:",
+        f"- Tiempo promedio por ID: {avg_time_per_id:.2f} segs (~{avg_time_per_id_min:.2f} mins)",
+        f"- Tiempo restante estimado: {tiempo_restante_legible}",
+        f"- Fecha/Hora estimada de fin: {fecha_estimada_fin}",
+        "================================================================================",
+        f"ÚLTIMA ACCIÓN: [{now.strftime('%H:%M:%S')}] ID {current_id} -> {status_action}",
+        "================================================================================"
+    ]
+    
+    try:
+        with open(ESTADO_TXT, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        print(f"[!] Error al actualizar el archivo de estado {ESTADO_TXT}: {e}")
+
+
+# ==============================================================================
+# AUXILIARES DE CONTROL DE PROCESADOS
+# ==============================================================================
+
+def obtener_ids_procesados() -> set:
+    """
+    Escanea la carpeta de PDFs y lee el archivo de inexistentes
+    para recopilar todos los IDs que ya fueron procesados.
+    Esto actúa como un checkpoint persistente y evita duplicar consultas.
+    """
+    procesados = set()
+    
+    # 1. Escanear PDFs existentes en disco (exitosos)
+    if os.path.exists(PDF_DIR):
+        for file in os.listdir(PDF_DIR):
+            if file.startswith("reporte_") and file.endswith(".pdf"):
+                try:
+                    num_id = int(file.replace("reporte_", "").replace(".pdf", ""))
+                    procesados.add(num_id)
+                except ValueError:
+                    pass
+                    
+    # 2. Escanear el archivo de inexistentes para detectar IDs que fallaron
+    if os.path.exists(NO_EXISTENTE_CSV):
+        try:
+            with open(NO_EXISTENTE_CSV, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Omitir cabecera
+                for row in reader:
+                    if row:
+                        try:
+                            procesados.add(int(row[0]))
+                        except ValueError:
+                            pass
+        except Exception as e:
+            print(f"[!] Advertencia al leer {NO_EXISTENTE_CSV}: {e}")
+            
+    return procesados
+
+
+# ==============================================================================
 # FLUJO PRINCIPAL DE SCRAPING ASÍNCRONO
 # ==============================================================================
 
@@ -171,13 +335,43 @@ async def main():
     # Asegurar la existencia de la carpeta de descargas
     os.makedirs(PDF_DIR, exist_ok=True)
 
-    # Generar y barajar la lista de IDs para evitar accesos secuenciales
-    id_list = list(range(START_ID, END_ID + 1))
+    # Cargar IDs ya procesados y filtrar la lista total
+    ids_ya_procesados = obtener_ids_procesados()
+    total_rango = list(range(START_ID, END_ID + 1))
+    id_list = [id_val for id_val in total_rango if id_val not in ids_ya_procesados]
+    
+    # Barajar la lista filtrada para evitar accesos secuenciales
     random.shuffle(id_list)
+
+    # Inicializar métricas y tiempos de sesión
+    start_time = time.time()
+    start_datetime = datetime.now()
+    procesados_esta_sesion = 0
+    descargas_esta_sesion = 0
+    inexistentes_esta_sesion = 0
+    errores_esta_sesion = 0
+    total_rango_size = len(total_rango)
+    ids_ya_procesados_inicial = len(ids_ya_procesados)
+
+    # Actualizar archivo de estado por primera vez
+    actualizar_archivo_estado(
+        current_id=0,
+        status_action="Iniciando el script e inicializando navegador...",
+        procesados_esta_sesion=0,
+        descargas_esta_sesion=0,
+        inexistentes_esta_sesion=0,
+        errores_esta_sesion=0,
+        start_time=start_time,
+        start_datetime=start_datetime,
+        total_rango_size=total_rango_size,
+        ids_ya_procesados_inicial=ids_ya_procesados_inicial
+    )
 
     print("=" * 80)
     print("INICIANDO EXTRACCIÓN CATASTRAL CON SIMULACIÓN HUMANA (STEALTH MODE)")
-    print(f"Total de IDs a evaluar: {len(id_list)} (Barajados en orden aleatorio)")
+    print(f"Rango de IDs solicitado: {START_ID} a {END_ID} (Total: {len(total_rango)})")
+    print(f"IDs ya procesados (omitidos): {len(ids_ya_procesados)}")
+    print(f"IDs pendientes a evaluar: {len(id_list)} (Barajados en orden aleatorio)")
     print(f"Modo Headless: {HEADLESS}")
     print(f"Carpeta de descargas: {PDF_DIR}")
     print(f"Rango de delay aleatorio: {MIN_DELAY_SECS} a {MAX_DELAY_SECS} segundos")
@@ -264,6 +458,20 @@ async def main():
             # Formatear el entero como string estricto de 15 caracteres rellenado con ceros a la izquierda
             formatted_id = f"{current_id:015d}"
             print(f"\n[+] Procesando ID {current_id:5d} -> '{formatted_id}'")
+
+            # Escribir estado inicial de procesamiento de este ID
+            actualizar_archivo_estado(
+                current_id=current_id,
+                status_action=f"Cargando formulario para ID {formatted_id}",
+                procesados_esta_sesion=procesados_esta_sesion,
+                descargas_esta_sesion=descargas_esta_sesion,
+                inexistentes_esta_sesion=inexistentes_esta_sesion,
+                errores_esta_sesion=errores_esta_sesion,
+                start_time=start_time,
+                start_datetime=start_datetime,
+                total_rango_size=total_rango_size,
+                ids_ya_procesados_inicial=ids_ya_procesados_inicial
+            )
 
             try:
                 # Navegar a la URL del formulario
@@ -361,6 +569,21 @@ async def main():
                     
                     descargas_exitosas += 1
                     
+                    descargas_esta_sesion += 1
+                    procesados_esta_sesion += 1
+                    actualizar_archivo_estado(
+                        current_id=current_id,
+                        status_action="Reporte PDF descargado con éxito",
+                        procesados_esta_sesion=procesados_esta_sesion,
+                        descargas_esta_sesion=descargas_esta_sesion,
+                        inexistentes_esta_sesion=inexistentes_esta_sesion,
+                        errores_esta_sesion=errores_esta_sesion,
+                        start_time=start_time,
+                        start_datetime=start_datetime,
+                        total_rango_size=total_rango_size,
+                        ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                    )
+                    
                     if is_new_tab:
                         await active_page.close()
                         
@@ -396,6 +619,25 @@ async def main():
                 error_not_found = await active_page.query_selector(SELECTOR_ERROR_NOT_FOUND)
                 if error_not_found and await error_not_found.is_visible():
                     print(f"    [-] ID {current_id} no encontrado en el sistema ('Imóvel não encontrado').")
+                    
+                    # Registrar en el archivo de inexistentes para evitar volver a consultarlo
+                    guardar_inexistente_en_csv(formatted_id)
+                    
+                    inexistentes_esta_sesion += 1
+                    procesados_esta_sesion += 1
+                    actualizar_archivo_estado(
+                        current_id=current_id,
+                        status_action="Inmueble inexistente registrado",
+                        procesados_esta_sesion=procesados_esta_sesion,
+                        descargas_esta_sesion=descargas_esta_sesion,
+                        inexistentes_esta_sesion=inexistentes_esta_sesion,
+                        errores_esta_sesion=errores_esta_sesion,
+                        start_time=start_time,
+                        start_datetime=start_datetime,
+                        total_rango_size=total_rango_size,
+                        ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                    )
+                    
                     if is_new_tab:
                         await active_page.close()
                     # Retraso aleatorio corto para simular búsqueda humana fallida
@@ -412,6 +654,25 @@ async def main():
                     error_check = await active_page.query_selector(SELECTOR_ERROR_NOT_FOUND)
                     if error_check and await error_check.is_visible():
                         print(f"    [-] ID {current_id} no encontrado (Timeout en contenedor).")
+                        
+                        # Registrar en el archivo de inexistentes para evitar volver a consultarlo
+                        guardar_inexistente_en_csv(formatted_id)
+                        
+                        inexistentes_esta_sesion += 1
+                        procesados_esta_sesion += 1
+                        actualizar_archivo_estado(
+                            current_id=current_id,
+                            status_action="Inmueble inexistente registrado (Timeout en contenedor)",
+                            procesados_esta_sesion=procesados_esta_sesion,
+                            descargas_esta_sesion=descargas_esta_sesion,
+                            inexistentes_esta_sesion=inexistentes_esta_sesion,
+                            errores_esta_sesion=errores_esta_sesion,
+                            start_time=start_time,
+                            start_datetime=start_datetime,
+                            total_rango_size=total_rango_size,
+                            ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                        )
+                        
                         if is_new_tab:
                             await active_page.close()
                         # Retraso por búsqueda fallida
@@ -434,8 +695,38 @@ async def main():
                         
                     guardar_en_csv(datos)
                     print(f"    [✓] Registro guardado con éxito: {datos['Logradouro']} - {datos['Bairro']}")
+                    
+                    descargas_esta_sesion += 1
+                    procesados_esta_sesion += 1
+                    actualizar_archivo_estado(
+                        current_id=current_id,
+                        status_action="Datos extraídos del HTML con éxito",
+                        procesados_esta_sesion=procesados_esta_sesion,
+                        descargas_esta_sesion=descargas_esta_sesion,
+                        inexistentes_esta_sesion=inexistentes_esta_sesion,
+                        errores_esta_sesion=errores_esta_sesion,
+                        start_time=start_time,
+                        start_datetime=start_datetime,
+                        total_rango_size=total_rango_size,
+                        ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                    )
                 else:
                     print(f"    [!] ID {current_id} cargó reporte pero los datos están vacíos o no estructurados.")
+                    
+                    procesados_esta_sesion += 1
+                    errores_esta_sesion += 1
+                    actualizar_archivo_estado(
+                        current_id=current_id,
+                        status_action="Reporte vacío o no estructurado",
+                        procesados_esta_sesion=procesados_esta_sesion,
+                        descargas_esta_sesion=descargas_esta_sesion,
+                        inexistentes_esta_sesion=inexistentes_esta_sesion,
+                        errores_esta_sesion=errores_esta_sesion,
+                        start_time=start_time,
+                        start_datetime=start_datetime,
+                        total_rango_size=total_rango_size,
+                        ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                    )
 
                 # Cerrar la pestaña si era una nueva
                 if is_new_tab:
@@ -448,11 +739,43 @@ async def main():
 
             except PlaywrightTimeoutError:
                 print(f"    [!] Timeout al procesar ID {current_id}. El servidor tarda en responder o cambió la estructura.")
+                
+                errores_esta_sesion += 1
+                procesados_esta_sesion += 1
+                actualizar_archivo_estado(
+                    current_id=current_id,
+                    status_action="Error de Timeout (se reintentará)",
+                    procesados_esta_sesion=procesados_esta_sesion,
+                    descargas_esta_sesion=descargas_esta_sesion,
+                    inexistentes_esta_sesion=inexistentes_esta_sesion,
+                    errores_esta_sesion=errores_esta_sesion,
+                    start_time=start_time,
+                    start_datetime=start_datetime,
+                    total_rango_size=total_rango_size,
+                    ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                )
+                
                 delay_err = random.uniform(20, 60)
                 print(f"    [i] Espera aleatoria tras error de timeout: {delay_err:.2f} segundos...")
                 await asyncio.sleep(delay_err)
             except Exception as e:
                 print(f"    [!] Error inesperado al procesar ID {current_id}: {str(e)}")
+                
+                errores_esta_sesion += 1
+                procesados_esta_sesion += 1
+                actualizar_archivo_estado(
+                    current_id=current_id,
+                    status_action=f"Error inesperado: {type(e).__name__}",
+                    procesados_esta_sesion=procesados_esta_sesion,
+                    descargas_esta_sesion=descargas_esta_sesion,
+                    inexistentes_esta_sesion=inexistentes_esta_sesion,
+                    errores_esta_sesion=errores_esta_sesion,
+                    start_time=start_time,
+                    start_datetime=start_datetime,
+                    total_rango_size=total_rango_size,
+                    ids_ya_procesados_inicial=ids_ya_procesados_inicial
+                )
+                
                 delay_err = random.uniform(20, 60)
                 print(f"    [i] Espera aleatoria tras error: {delay_err:.2f} segundos...")
                 await asyncio.sleep(delay_err)
