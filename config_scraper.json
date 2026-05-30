@@ -1,0 +1,13 @@
+{
+    "HEADLESS": true,
+    "START_ID": 30000,
+    "END_ID": 36099,
+    "MIN_DELAY_SECS": 0,
+    "MAX_DELAY_SECS": 40,
+    "PAUSA_CADA_N_DESCARGAS": 19,
+    "PAUSA_MIN_MINUTOS": 0,
+    "PAUSA_MAX_MINUTOS": 4,
+    "PDF_DIR": "pdf_downloads",
+    "OUTPUT_CSV": "resultado_catastro_registro.csv",
+    "NO_EXISTENTE_CSV": "nroInscripcionNoExistente.csv"
+}
