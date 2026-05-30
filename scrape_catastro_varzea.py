@@ -17,46 +17,83 @@ import time
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+import json
+
 # ==============================================================================
-# CONFIGURACIÓN GENERAL Y VARIABLES DE ENTORNO
+# CONFIGURACIÓN GENERAL Y VARIABLES DE ENTORNO (DESDE JSON)
 # ==============================================================================
 
-# Cambiar a False para ver el navegador en modo visual durante la depuración
-HEADLESS = True
+CONFIG_FILE = "config_scraper.json"
 
-# User-Agent residencial realista para evitar bloqueos por firmas automatizadas
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+DEFAULT_CONFIG = {
+    "HEADLESS": True,
+    "USER_AGENT": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "BASE_URL": "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55",
+    "START_ID": 30000,
+    "END_ID": 36099,
+    "PDF_DIR": "pdf_downloads",
+    "MIN_DELAY_SECS": 0,
+    "MAX_DELAY_SECS": 40,
+    "PAUSA_CADA_N_DESCARGAS": 19,
+    "PAUSA_MIN_MINUTOS": 0,
+    "PAUSA_MAX_MINUTOS": 4,
+    "OUTPUT_CSV": "resultado_catastro_registro.csv",
+    "NO_EXISTENTE_CSV": "nroInscripcionNoExistente.csv"
+}
 
-# URL base del formulario público de catastro
-BASE_URL = "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55"
+def inicializar_y_cargar_config() -> dict:
+    """
+    Crea el archivo config_scraper.json si no existe y carga la configuración.
+    """
+    if not os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=4, ensure_ascii=False)
+            print(f"[i] Creado archivo de configuración por defecto: {CONFIG_FILE}")
+        except Exception as e:
+            print(f"[!] Error al crear {CONFIG_FILE}: {e}")
+            return DEFAULT_CONFIG
+            
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            # Asegurar que todas las claves requeridas existan
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in config:
+                    config[k] = v
+            return config
+    except Exception as e:
+        print(f"[!] Error al leer {CONFIG_FILE}, usando valores por defecto: {e}")
+        return DEFAULT_CONFIG
 
-# Rango numérico de IDs a consultar
-START_ID = 30000
-END_ID = 36099
+def obtener_settings_dinamicos() -> tuple[float, float, int, int, int]:
+    """
+    Recarga el archivo JSON en plena ejecución para obtener los valores actualizados de tiempos y descansos.
+    """
+    config = inicializar_y_cargar_config()
+    return (
+        float(config.get("MIN_DELAY_SECS", 0)),
+        float(config.get("MAX_DELAY_SECS", 40)),
+        int(config.get("PAUSA_CADA_N_DESCARGAS", 19)),
+        int(config.get("PAUSA_MIN_MINUTOS", 0)),
+        int(config.get("PAUSA_MAX_MINUTOS", 4))
+    )
 
-# Carpeta destino para descargas de PDF
-PDF_DIR = "pdf_downloads"
+# Cargar configuraciones iniciales
+_config = inicializar_y_cargar_config()
 
-# Parámetros de simulación humana (Stealth Mode)
-# Rango de retraso aleatorio (en segundos) después de cada consulta exitosa
-MIN_DELAY_SECS = 0
-MAX_DELAY_SECS = 90
-
-# Frecuencia de pausas largas (simulación de descansos del operador)
-PAUSA_CADA_N_DESCARGAS = 19
-PAUSA_MIN_MINUTOS = 0
-PAUSA_MAX_MINUTOS = 4
-
-# Archivo de salida CSV de registro
-OUTPUT_CSV = "resultado_catastro_registro.csv"
-CSV_HEADERS = ["Inscripción", "Tipo de Inmueble", "Logradouro", "Bairro", "Unidade", "CEP"]
-
-# Archivo de registro para números inexistentes
-NO_EXISTENTE_CSV = "nroInscripcionNoExistente.csv"
+HEADLESS = _config["HEADLESS"]
+USER_AGENT = _config["USER_AGENT"]
+BASE_URL = _config["BASE_URL"]
+START_ID = _config["START_ID"]
+END_ID = _config["END_ID"]
+PDF_DIR = _config["PDF_DIR"]
+OUTPUT_CSV = _config["OUTPUT_CSV"]
+NO_EXISTENTE_CSV = _config["NO_EXISTENTE_CSV"]
 
 # --- SELECTORES DEL DOM (Modificar para adaptar al portal real) ---
 # Campo de texto donde se ingresa la identificación catastral
@@ -229,7 +266,8 @@ def actualizar_archivo_estado(current_id: int, status_action: str,
         avg_time_per_id = elapsed_secs / procesados_esta_sesion
     else:
         # Estimación inicial basada en las pausas configuradas (delay promedio + tiempo de carga)
-        avg_time_per_id = (MIN_DELAY_SECS + MAX_DELAY_SECS) / 2 + 15
+        min_d, max_d, _, _, _ = obtener_settings_dinamicos()
+        avg_time_per_id = (min_d + max_d) / 2 + 15
         
     avg_time_per_id_min = avg_time_per_id / 60
     
@@ -374,7 +412,8 @@ async def main():
     print(f"IDs pendientes a evaluar: {len(id_list)} (Barajados en orden aleatorio)")
     print(f"Modo Headless: {HEADLESS}")
     print(f"Carpeta de descargas: {PDF_DIR}")
-    print(f"Rango de delay aleatorio: {MIN_DELAY_SECS} a {MAX_DELAY_SECS} segundos")
+    min_d, max_d, _, _, _ = obtener_settings_dinamicos()
+    print(f"Rango de delay aleatorio: {min_d} a {max_d} segundos")
     print(f"Archivo de salida: {OUTPUT_CSV}")
     print("=" * 80)
 
@@ -588,13 +627,14 @@ async def main():
                         await active_page.close()
                         
                     # --- LÓGICA DE PAUSA HUMANA ALEATORIA ---
-                    if descargas_exitosas % PAUSA_CADA_N_DESCARGAS == 0:
-                        pausa_minutos = random.randint(PAUSA_MIN_MINUTOS, PAUSA_MAX_MINUTOS)
+                    min_d, max_d, pausa_n, pausa_min, pausa_max = obtener_settings_dinamicos()
+                    if descargas_exitosas % pausa_n == 0:
+                        pausa_minutos = random.randint(pausa_min, pausa_max)
                         print(f"\n[i] Simulación Humana: Se completaron {descargas_exitosas} descargas.")
                         print(f"[i] Tomando un descanso de {pausa_minutos} minutos antes de continuar...")
                         await asyncio.sleep(pausa_minutos * 60)
                     else:
-                        delay_actual = random.uniform(MIN_DELAY_SECS, MAX_DELAY_SECS)
+                        delay_actual = random.uniform(min_d, max_d)
                         print(f"    [i] Espera aleatoria de cortesía: {delay_actual:.2f} segundos...")
                         await asyncio.sleep(delay_actual)
                     continue
@@ -733,7 +773,8 @@ async def main():
                     await active_page.close()
 
                 # --- CORTESÍA DEL SERVIDOR (Rate Limiting) ---
-                delay_actual = random.uniform(MIN_DELAY_SECS, MAX_DELAY_SECS)
+                min_d, max_d, _, _, _ = obtener_settings_dinamicos()
+                delay_actual = random.uniform(min_d, max_d)
                 print(f"    [i] Espera aleatoria de cortesía: {delay_actual:.2f} segundos...")
                 await asyncio.sleep(delay_actual)
 
