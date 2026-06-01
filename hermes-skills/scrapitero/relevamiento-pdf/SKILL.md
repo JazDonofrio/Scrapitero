@@ -23,17 +23,15 @@ Genera un PDF con el reporte completo del relevamiento y lo envía como archivo 
 
 ### Paso 1 — Generar el PDF
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
+
   python3 -m scrapitero.rpc.relevamiento_pdf
 ```
 
 Sin survey_id (usa el más reciente):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar"}' |
+
   python3 -m scrapitero.rpc.relevamiento_pdf
 ```
 

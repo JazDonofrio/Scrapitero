@@ -28,17 +28,15 @@ Cuando `coverage-reporter` devuelve `parcelas == 0` para una región argentina.
 
 Para una manzana específica (recomendado para tests):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' |
+
   python3 -m scrapitero.rpc.arba_cadastral_fetcher
 ```
 
 Para todo el partido:
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136"}' |
+
   python3 -m scrapitero.rpc.arba_cadastral_fetcher
 ```
 

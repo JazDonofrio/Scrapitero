@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scrapitero</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #222; }
+
+    header { background: #0f172a; color: white; padding: 0.9rem 1.5rem; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+    header h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: -.5px; }
+    header h1 span { color: #38bdf8; }
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+    #status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; }
+    #status-dot.loading { background: #f59e0b; }
+
+    .btn { padding: .5rem 1.1rem; border: none; border-radius: 7px; cursor: pointer; font-size: .875rem; font-weight: 600; transition: opacity .15s, transform .1s; white-space: nowrap; }
+    .btn:hover { opacity: .88; }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: #38bdf8; color: #0f172a; }
+    .btn-ghost { background: rgba(255,255,255,.1); color: white; border: 1px solid rgba(255,255,255,.15); }
+    .btn-sm { padding: .3rem .75rem; font-size: .8rem; }
+    .btn-outline { background: white; border: 1px solid #d1d5db; color: #444; }
+    .btn-green { background: #22c55e; color: white; }
+    .btn-green:hover { background: #16a34a; opacity: 1; }
+
+    main { max-width: 1080px; margin: 0 auto; padding: 1.5rem; }
+
+    /* Form */
+    #form-wrapper { background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.1); margin-bottom: 1.5rem; overflow: hidden; display: none; }
+    #form-wrapper.visible { display: block; }
+    .form-header { background: #0f172a; color: white; padding: .9rem 1.2rem; display: flex; align-items: center; justify-content: space-between; }
+    .form-header h2 { font-size: 1rem; font-weight: 600; }
+    .form-body { padding: 1.2rem; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    .form-group label { display: block; font-size: .75rem; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .6px; margin-bottom: .35rem; }
+    .form-group input, .form-group select { width: 100%; padding: .6rem .8rem; border: 1.5px solid #e5e7eb; border-radius: 8px; font-size: .95rem; }
+    .form-group input:focus, .form-group select:focus { outline: none; border-color: #38bdf8; }
+    .form-hint { font-size: .78rem; color: #9ca3af; margin-top: .3rem; }
+    .form-actions { display: flex; gap: .75rem; justify-content: flex-end; }
+    #form-msg { margin-top: .75rem; padding: .6rem .9rem; border-radius: 7px; font-size: .875rem; display: none; }
+    #form-msg.ok { background: #dcfce7; color: #166534; }
+    #form-msg.err { background: #fee2e2; color: #991b1b; }
+
+    /* Survey list */
+    .section-title { font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: #9ca3af; margin-bottom: .8rem; }
+    .surveys-list { display: flex; flex-direction: column; gap: .9rem; }
+    .empty-state { text-align: center; padding: 4rem 2rem; color: #9ca3af; background: white; border-radius: 12px; }
+    .empty-state p:first-child { font-size: 1.1rem; font-weight: 600; margin-bottom: .5rem; }
+
+    /* Card */
+    .survey-card { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.07); overflow: hidden; transition: box-shadow .2s; }
+    .survey-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.1); }
+    .card-top { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.2rem; }
+    .card-expand { flex: 1; cursor: pointer; display: flex; align-items: center; gap: .75rem; min-width: 0; }
+    .card-expand:hover .card-name { color: #38bdf8; }
+    .card-info { flex: 1; min-width: 0; }
+    .card-name { font-size: 1rem; font-weight: 700; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color .15s; }
+    .card-meta { font-size: .78rem; color: #9ca3af; margin-top: .1rem; }
+    .card-kpis { display: flex; gap: 1.5rem; }
+    .kpi { text-align: right; }
+    .kpi-val { font-size: 1.15rem; font-weight: 800; color: #0f172a; line-height: 1; }
+    .kpi-lbl { font-size: .65rem; text-transform: uppercase; letter-spacing: .5px; color: #9ca3af; margin-top: .15rem; }
+    .status-pill { padding: .25rem .65rem; border-radius: 20px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
+    .s-running  { background: #fef3c7; color: #92400e; }
+    .s-stopping { background: #ffedd5; color: #9a3412; }
+    .s-partial  { background: #dbeafe; color: #1e40af; }
+    .s-completed { background: #dcfce7; color: #166534; }
+    .s-failed   { background: #fee2e2; color: #991b1b; }
+    .s-stopped  { background: #f3f4f6; color: #6b7280; }
+    .chevron { color: #d1d5db; font-size: 1rem; transition: transform .2s; flex-shrink: 0; cursor: pointer; }
+    .chevron.open { transform: rotate(180deg); }
+
+    /* Card detail */
+    .card-detail { display: none; border-top: 1px solid #f3f4f6; }
+    .card-detail.open { display: flex; }
+    .detail-map { width: 400px; min-width: 400px; height: 340px; flex-shrink: 0; position: relative; }
+    .detail-body { flex: 1; padding: 1.1rem 1.2rem; overflow: auto; }
+
+    /* Botón fullscreen y contador sobre el mapa */
+    .map-fs-btn {
+      position: absolute; top: 8px; right: 8px; z-index: 1000;
+      background: rgba(15,23,42,.75); color: #e2e8f0; border: none;
+      border-radius: 6px; width: 28px; height: 28px; font-size: .95rem;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background .15s;
+    }
+    .map-fs-btn:hover { background: rgba(15,23,42,1); }
+    .map-parcel-count {
+      position: absolute; bottom: 8px; right: 8px; z-index: 1000;
+      background: rgba(15,23,42,.75); color: #bae6fd;
+      border-radius: 5px; padding: 3px 8px; font-size: .7rem; font-weight: 700;
+      pointer-events: none; display: none;
+    }
+
+    /* Leyenda del mapa */
+    .map-legend {
+      background: rgba(15,23,42,.82); border-radius: 7px;
+      padding: 6px 10px; font-size: .7rem; color: #e2e8f0; line-height: 1.8;
+      pointer-events: none;
+    }
+    .map-legend-dot {
+      display: inline-block; width: 9px; height: 9px;
+      border-radius: 50%; margin-right: 5px; vertical-align: middle;
+    }
+
+    /* Mapa en fullscreen (sobre el wrapper) */
+    #mapwrap-*:-webkit-full-screen,
+    .detail-map:-webkit-full-screen { width: 100vw !important; height: 100vh !important; }
+    .detail-map:fullscreen           { width: 100vw !important; height: 100vh !important; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+    .detail-kpi { background: #f8fafc; border-radius: 9px; padding: .85rem 1rem; }
+    .detail-kpi-val { font-size: 1.6rem; font-weight: 800; color: #0f172a; line-height: 1; }
+    .detail-kpi-lbl { font-size: .72rem; color: #6b7280; margin-top: .25rem; }
+    .progress-row { margin-top: .75rem; }
+    .progress-label { display: flex; justify-content: space-between; font-size: .8rem; color: #6b7280; margin-bottom: .3rem; }
+    .progress-bar-bg { background: #e5e7eb; border-radius: 4px; height: 7px; }
+    .progress-bar { background: #38bdf8; height: 7px; border-radius: 4px; transition: width .3s; }
+
+    /* Pipeline steps */
+    .pipeline-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f3f4f6; }
+    .pipeline-title { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: #9ca3af; margin-bottom: .6rem; }
+    .pipeline-steps { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    .pipeline-step { display: flex; align-items: center; gap: .3rem; padding: .3rem .65rem; border-radius: 6px; font-size: .78rem; font-weight: 600; }
+    .step-done  { background: #dcfce7; color: #166534; }
+    .step-run   { background: #fef3c7; color: #92400e; }
+    .step-fail  { background: #fee2e2; color: #991b1b; }
+    .step-idle  { background: #f3f4f6; color: #9ca3af; }
+    .step-arrow { color: #d1d5db; font-size: .8rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { display: inline-block; animation: spin .8s linear infinite; }
+
+    .detail-footer { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+
+    /* ── Activity bar ── */
+    #activity-bar {
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 0 1.2rem;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      font-family: 'SF Mono', 'Fira Mono', 'Cascadia Code', monospace;
+      font-size: .78rem;
+      color: #64748b;
+      overflow: hidden;
+      position: sticky;
+      top: 50px; /* below header */
+      z-index: 90;
+      transition: color .3s;
+    }
+    #activity-bar.active { color: #94a3b8; }
+    #activity-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #334155;
+      flex-shrink: 0;
+      transition: background .3s;
+    }
+    #activity-bar.active #activity-dot { background: #22c55e; }
+    #activity-bar.active.warn #activity-dot { background: #f59e0b; }
+    #activity-bar.active.err #activity-dot { background: #ef4444; }
+    @keyframes pulse-dot {
+      0%,100% { opacity: 1; }
+      50%      { opacity: .3; }
+    }
+    #activity-bar.pulsing #activity-dot { animation: pulse-dot .8s ease-in-out infinite; }
+    #activity-text {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #activity-ts { color: #475569; flex-shrink: 0; }
+
+    /* Activity log por survey */
+    .actlog-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f3f4f6; }
+    .actlog-lines {
+      background: #0f172a;
+      border-radius: 8px;
+      padding: .55rem .8rem;
+      font-family: 'SF Mono', 'Fira Mono', 'Cascadia Code', monospace;
+      font-size: .71rem;
+      line-height: 1.55;
+      height: 158px;   /* ~10 líneas */
+      overflow-y: auto;
+      color: #94a3b8;
+      scroll-behavior: smooth;
+    }
+    .actlog-lines::-webkit-scrollbar { width: 4px; }
+    .actlog-lines::-webkit-scrollbar-track { background: transparent; }
+    .actlog-lines::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+    .alog-line { display: flex; gap: 0; word-break: break-word; }
+    .alog-msg  { flex: 1; white-space: pre-wrap; }
+    .alog-ts { color: #64748b; margin-right: .5rem; user-select: none; flex-shrink: 0; }
+    .alog-err  { color: #fca5a5; }
+    .alog-warn { color: #fcd34d; }
+    .alog-info { color: #bae6fd; }
+    .alog-synth { color: #94a3b8; }
+    .alog-empty { color: #64748b; font-style: italic; }
+
+    @media (max-width: 720px) {
+      .card-detail.open { flex-direction: column; }
+      .detail-map { width: 100%; min-width: 0; height: 260px; }
+      .form-grid { grid-template-columns: 1fr; }
+      .card-kpis { gap: .75rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Scrapi<span>tero</span></h1>
+  <div class="header-right">
+    <span id="status-dot" title="DB conectada"></span>
+    <button class="btn btn-ghost" onclick="toggleForm()">+ Nuevo relevamiento</button>
+  </div>
+</header>
+
+<div id="activity-bar">
+  <span id="activity-dot"></span>
+  <span id="activity-ts"></span>
+  <span id="activity-text">Sin actividad reciente</span>
+</div>
+
+<main>
+  <div id="form-wrapper">
+    <div class="form-header">
+      <h2>Nueva zona de relevamiento</h2>
+      <button class="btn btn-ghost btn-sm" onclick="toggleForm()">✕ Cerrar</button>
+    </div>
+    <div class="form-body">
+      <form id="nueva-form" onsubmit="submitForm(event)">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nombre del relevamiento</label>
+            <input type="text" id="f-nombre" placeholder="Ej: Barrio Centro, Villa Sur…" required>
+          </div>
+          <div class="form-group">
+            <label>País</label>
+            <select id="f-country">
+              <option value="BRA">Brasil</option>
+              <option value="ARG">Argentina</option>
+            </select>
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label>Área GeoJSON</label>
+            <input type="file" id="f-geojson" accept=".geojson,.json" required>
+            <p class="form-hint">
+              Usá <a href="https://geojson.io" target="_blank" rel="noopener" style="color:#38bdf8">geojson.io</a> para dibujar el área y exportar el archivo.
+              <br>
+              <strong style="color:#fbbf24">⚠ En geojson.io usá siempre la herramienta de <u>Polígono</u> (ícono de pentágono), no la de Línea.</strong>
+              Si usás la herramienta de línea el contorno no cierra correctamente y algunas parcelas del borde quedan excluidas del relevamiento.
+            </p>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit">Crear relevamiento</button>
+        </div>
+      </form>
+      <div id="form-msg"></div>
+    </div>
+  </div>
+
+  <p class="section-title">Relevamientos</p>
+  <div id="list-container"><p class="empty-state"><span>Cargando…</span></p></div>
+</main>
+
+<script>
+const maps = {};
+const zoneData = {};
+const surveyCache = {}; // sid → objeto survey completo (pipeline, status, etc.)
+
+/* ── Utils ─────────────────────────────────────────────────────── */
+const fmt = n => (n == null || n === '') ? '—' : Number(n).toLocaleString('es-AR');
+const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('es-AR', {day:'2-digit',month:'short',year:'numeric'}) : '';
+const statusLabel = s => ({running:'En curso',stopping:'Deteniendo…',stopped:'Detenido',partial:'Parcial',completed:'Completado',failed:'Error'}[s] || s);
+
+/* ── Form ──────────────────────────────────────────────────────── */
+function toggleForm() {
+  document.getElementById('form-wrapper').classList.toggle('visible');
+}
+
+async function submitForm(e) {
+  e.preventDefault();
+  const btn = document.getElementById('btn-submit');
+  const msg = document.getElementById('form-msg');
+  const file = document.getElementById('f-geojson').files[0];
+  if (!file) return;
+  btn.disabled = true; btn.textContent = 'Creando…';
+  msg.style.display = 'none';
+  const fd = new FormData();
+  fd.append('nombre', document.getElementById('f-nombre').value.trim());
+  fd.append('country_code', document.getElementById('f-country').value);
+  fd.append('geojson_file', file);
+  try {
+    const res = await fetch('/api/surveys', {method:'POST', body:fd});
+    const data = await res.json();
+    if (data.ok) {
+      msg.textContent = 'Relevamiento creado. Descargando edificios OSM…'; msg.className = 'ok'; msg.style.display = 'block';
+      setTimeout(() => { toggleForm(); document.getElementById('nueva-form').reset(); msg.style.display='none'; btn.disabled=false; btn.textContent='Crear relevamiento'; loadSurveys(); }, 2200);
+    } else {
+      msg.textContent = `Error: ${data.error||'desconocido'}`; msg.className = 'err'; msg.style.display = 'block';
+      btn.disabled = false; btn.textContent = 'Crear relevamiento';
+    }
+  } catch(err) {
+    msg.textContent = `Error de red: ${err.message}`; msg.className = 'err'; msg.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Crear relevamiento';
+  }
+}
+
+/* ── Pipeline step display ─────────────────────────────────────── */
+function renderPipelineSteps(pipeline, status, countryCode) {
+  if (!pipeline || Object.keys(pipeline).length === 0) return '';
+  const actual = pipeline.paso_actual || '';
+  const pasos = pipeline.pasos || {};
+
+  function stepHtml(key, label) {
+    const r = pasos[key];
+    let cls, icon;
+    if (actual === key && status === 'running') {
+      cls = 'step-run'; icon = '<span class="spinner">⟳</span>';
+    } else if (r && r.saltado) {
+      cls = 'step-done'; icon = '↷';  // saltado
+    } else if (r && r.ok === true) {
+      cls = 'step-done'; icon = '✓';
+    } else if (r && r.ok === false) {
+      cls = 'step-fail'; icon = '✗';
+    } else if (actual === key) {
+      cls = 'step-run'; icon = '<span class="spinner">⟳</span>';
+    } else {
+      cls = 'step-idle'; icon = '·';
+    }
+    let detail = '';
+    if (r) {
+      if (key === 'smartgis') {
+        const cnt = r.parcelas_insertadas != null ? r.parcelas_insertadas : r.parcelas_existentes;
+        detail = cnt != null ? ` (${fmt(cnt)} parc)` : '';
+      }
+      if (key === 'bci') detail = r.pdfs_descargados != null ? ` (${fmt(r.pdfs_descargados)} PDF)` : '';
+      if (key === 'osm') detail = '';
+    }
+    return `<span class="pipeline-step ${cls}">${icon} ${label}${detail}</span>`;
+  }
+
+  countryCode = countryCode || 'BRA';
+  const stepsConfig = countryCode === 'BRA'
+    ? [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']]
+    : [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
+
+  let html = '<div class="pipeline-section"><p class="pipeline-title">Pipeline</p><div class="pipeline-steps">';
+  stepsConfig.forEach(([key, label], i) => {
+    if (i > 0) html += '<span class="step-arrow">→</span>';
+    html += stepHtml(key, label);
+  });
+  if (actual === 'completado') html += '<span class="step-arrow">→</span><span class="pipeline-step step-done">✓ Completo</span>';
+  if (actual === 'error') html += '<span class="step-arrow">→</span><span class="pipeline-step step-fail">✗ Error</span>';
+  if (actual === 'sin_pipeline') html += '<span class="step-arrow">→</span><span class="pipeline-step step-idle">Sin pipeline</span>';
+  html += '</div></div>';
+  return html;
+}
+
+/* ── Iniciar / Re-escanear relevamiento ────────────────────────── */
+async function iniciarRelevamiento(surveyId, btn, rescan = false) {
+  const msg = rescan
+    ? '¿Re-escanear el área?\nBuscará parcelas nuevas y actualizará las existentes.\nPuede tardar varios minutos.'
+    : '¿Iniciar el pipeline completo? (SmartGIS → descarga BCIs)\nEsto puede tardar varios minutos.';
+  if (!confirm(msg)) return;
+  const labelOrig = btn.textContent;
+  btn.disabled = true; btn.textContent = rescan ? '↺ Escaneando…' : '▶ Iniciando…';
+  const url = `/api/surveys/${surveyId}/iniciar${rescan ? '?rescan=true' : ''}`;
+  try {
+    const res = await fetch(url, {method:'POST'});
+    const data = await res.json();
+    if (data.ok) { scheduleRefresh(1500); }
+    else { alert(`Error: ${data.error||'desconocido'}`); btn.disabled=false; btn.textContent=labelOrig; }
+  } catch(err) { alert(`Error de red: ${err.message}`); btn.disabled=false; btn.textContent=labelOrig; }
+}
+
+async function pararRelevamiento(surveyId, btn) {
+  btn.disabled = true; btn.textContent = '⏹ Parando…';
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}/parar`, {method:'POST'});
+    const data = await res.json();
+    if (data.ok) { scheduleRefresh(1000); }
+    else { alert(`Error: ${data.error||'desconocido'}`); btn.disabled=false; btn.textContent='⏹ Parar'; }
+  } catch(err) { alert(`Error de red: ${err.message}`); btn.disabled=false; btn.textContent='⏹ Parar'; }
+}
+
+async function eliminarSurvey(surveyId, nombre) {
+  if (!confirm(`¿Eliminar el relevamiento "${nombre}"?\nSe borrarán todas las parcelas, edificios y datos asociados.\nEsta acción no se puede deshacer.`)) return;
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}`, {method:'DELETE'});
+    const data = await res.json();
+    if (data.ok) { loadSurveys(); }
+    else { alert(`Error: ${data.error||'desconocido'}`); }
+  } catch(err) { alert(`Error de red: ${err.message}`); }
+}
+
+/* ── Card render ───────────────────────────────────────────────── */
+function renderCard(s) {
+  const sid = s.survey_id;
+  const mapId = 'map-' + sid.replace(/-/g,'');
+  const pct = s.total_parcelas > 0 ? Math.round(s.con_direccion / s.total_parcelas * 100) : 0;
+  const areaKm = s.area_total_m2 ? (s.area_total_m2/1e6).toFixed(2)+' km²' : '—';
+  const isRunning = s.status === 'running';
+  const isStopping = s.status === 'stopping';
+  const flag = s.country_code === 'BRA' ? '🇧🇷' : s.country_code === 'ARG' ? '🇦🇷' : '';
+
+  const yaEscaneado = s.total_parcelas > 0;
+  const estadoFinal = ['completed', 'partial', 'stopped', 'failed'].includes(s.status);
+
+  let btnAccion;
+  if (isRunning) {
+    btnAccion = `<button class="btn btn-sm" style="background:#fee2e2;color:#991b1b;padding:.25rem .6rem;font-size:.72rem"
+       onclick="pararRelevamiento('${sid}', this)" title="Detener pipeline">⏹ Parar</button>`;
+  } else if (isStopping) {
+    btnAccion = `<button class="btn btn-sm" style="background:#ffedd5;color:#9a3412;padding:.25rem .6rem;font-size:.72rem" disabled>
+       <span class="spinner">⟳</span> Deteniendo</button>`;
+  } else if (yaEscaneado && estadoFinal) {
+    btnAccion = `<button class="btn btn-sm" style="background:#e0f2fe;color:#0369a1;padding:.25rem .6rem;font-size:.72rem;border:1px solid #bae6fd"
+       onclick="iniciarRelevamiento('${sid}', this, true)" title="Volver a escanear el área buscando parcelas nuevas">↺ Re-escanear</button>`;
+  } else {
+    btnAccion = `<button class="btn btn-sm btn-green" style="padding:.25rem .6rem;font-size:.72rem"
+       onclick="iniciarRelevamiento('${sid}', this)" title="Iniciar pipeline completo">▶ Iniciar</button>`;
+  }
+
+  const btnEliminar = (isRunning || isStopping)
+    ? `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem;color:#9ca3af" disabled title="Detené el pipeline primero">🗑</button>`
+    : `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
+         onclick="eliminarSurvey('${sid}', '${s.region_nombre}')" title="Eliminar relevamiento">🗑</button>`;
+
+  const pasoActual = s.pipeline && s.pipeline.paso_actual;
+  const pasoLabel = {
+    diagnostico_inicial: 'Evaluando estado…',
+    smartgis: 'SmartGIS: descargando parcelas…',
+    bci: 'BCI: descargando PDFs…',
+    parser: 'Parser: extrayendo datos…',
+    completado: 'Completado',
+    detenido: 'Detenido',
+    error: 'Error',
+  }[pasoActual] || (pasoActual ? pasoActual + '…' : '');
+
+  const runningBanner = isRunning && pasoLabel ? `
+    <div style="background:#0f172a;color:#38bdf8;font-size:.72rem;padding:.3rem .75rem;
+                display:flex;align-items:center;gap:.4rem;border-bottom:1px solid #1e293b">
+      <span class="spinner" style="display:inline-block">⟳</span>
+      <span>${pasoLabel}</span>
+      ${s.total_parcelas > 0 ? `<span style="margin-left:auto;color:#94a3b8">${fmt(s.total_parcelas)} parcelas</span>` : ''}
+    </div>` : '';
+
+  return `
+    <div class="survey-card" id="card-${sid}" data-status="${s.status}">
+      ${runningBanner}
+      <div class="card-top">
+        <div class="card-expand" onclick="toggleDetail('${sid}')">
+          <div class="card-info">
+            <div class="card-name">${flag} ${s.region_nombre}</div>
+            <div class="card-meta">${fmtDate(s.started_at)} &nbsp;·&nbsp; ${s.region_id}</div>
+          </div>
+          <div class="card-kpis">
+            <div class="kpi"><div class="kpi-val">${fmt(s.total_edificios)}</div><div class="kpi-lbl">Edificios</div></div>
+            <div class="kpi"><div class="kpi-val">${fmt(s.total_parcelas)}</div><div class="kpi-lbl">Parcelas</div></div>
+            <div class="kpi"><div class="kpi-val">${fmt(s.con_inscripcion)}</div><div class="kpi-lbl">Inscripciones</div></div>
+          </div>
+        </div>
+        ${btnAccion}
+        ${btnEliminar}
+        <span class="status-pill s-${s.status}">${statusLabel(s.status)}</span>
+        <span class="chevron" id="chev-${sid}" onclick="toggleDetail('${sid}')">▾</span>
+      </div>
+
+      <div class="card-detail" id="detail-${sid}">
+        <div class="detail-map" id="mapwrap-${sid}">
+          <div id="${mapId}" style="width:100%;height:100%"></div>
+          <button class="map-fs-btn" title="Pantalla completa" onclick="toggleMapFullscreen('${sid}')">⛶</button>
+          <div class="map-parcel-count" id="mcount-${sid}"></div>
+        </div>
+        <div class="detail-body">
+          <div class="detail-grid">
+            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_edificios)}</div><div class="detail-kpi-lbl">Edificios OSM</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_parcelas)}</div><div class="detail-kpi-lbl">Parcelas</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.con_inscripcion)}</div><div class="detail-kpi-lbl">Con inscripción (BCI)</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_uf_vivienda)}</div><div class="detail-kpi-lbl">UF Vivienda</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_uf_comercio)}</div><div class="detail-kpi-lbl">UF Comercio</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val">${areaKm}</div><div class="detail-kpi-lbl">Área relevada</div></div>
+          </div>
+
+          <div class="progress-row">
+            <div class="progress-label"><span>Con dirección</span><span>${fmt(s.con_direccion)} / ${fmt(s.total_parcelas)} (${pct}%)</span></div>
+            <div class="progress-bar-bg"><div class="progress-bar" style="width:${pct}%"></div></div>
+          </div>
+
+          ${renderPipelineSteps(s.pipeline, s.status, s.country_code)}
+
+          <div class="actlog-section">
+            <p class="pipeline-title">Actividad</p>
+            <div class="actlog-lines" id="actlog-${sid}">
+              <span class="alog-empty">Abrí el detalle para cargar el historial…</span>
+            </div>
+          </div>
+
+          <div class="detail-footer">
+            <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">↻ Actualizar</button>
+            <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/csv" download
+               style="text-decoration:none" title="Descargar CSV con todas las parcelas">⬇ CSV</a>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ── Map ───────────────────────────────────────────────────────── */
+const activeMarkers = {};    // sid → array de L.circleMarker en el mapa
+const mapPollTimers = {};    // sid → setInterval para live update de marcadores
+
+const USO_COLOR = {
+  residencial: '#60a5fa',
+  comercial:   '#fb923c',
+  mixto:       '#a78bfa',
+  industrial:  '#94a3b8',
+  vacante:     '#4ade80',
+};
+const USO_DEFAULT = '#f8d347';  // amarillo claro para "sin clasificar" — visible en satélite
+
+function initMap(sid) {
+  const mapId = 'map-' + sid.replace(/-/g, '');
+  const el = document.getElementById(mapId);
+  if (!el) return;
+
+  // Si ya existe un mapa para este sid, solo invalidar tamaño
+  if (maps[sid]) { maps[sid].invalidateSize(); return; }
+
+  const map = L.map(el, {zoomControl: true});   // usar el elemento directamente
+
+  const satellite = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {attribution: 'Tiles © Esri', maxZoom: 20}
+  );
+  const labels = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom: 20, opacity: 0.8}
+  );
+  const osm = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {attribution: '© OpenStreetMap', maxZoom: 19}
+  );
+
+  satellite.addTo(map);
+  labels.addTo(map);
+  L.control.layers({'🛰 Satélite': satellite, '🗺 Mapa': osm}, {'Etiquetas': labels}, {position: 'topleft'}).addTo(map);
+
+  const geoStr = zoneData[sid];
+  if (geoStr) {
+    try {
+      const layer = L.geoJSON(JSON.parse(geoStr), {
+        style: {color: '#38bdf8', weight: 2, fillOpacity: .07, fillColor: '#38bdf8', dashArray: '5 4'}
+      }).addTo(map);
+      map.fitBounds(layer.getBounds(), {padding: [16, 16]});
+    } catch(_) { map.setView([-15.65, -56.134], 15); }
+  } else {
+    map.setView([-20, -50], 5);
+  }
+
+  maps[sid] = map;
+  loadParcelasMap(sid);   // carga inicial
+}
+
+async function loadParcelasMap(sid) {
+  // Capturar referencia al mapa ANTES del await
+  const map = maps[sid];
+  if (!map) return;
+
+  let parcelas;
+  try {
+    const res = await fetch('/api/surveys/' + sid + '/parcelas');
+    if (!res.ok) return;
+    parcelas = await res.json();
+  } catch(_) { return; }
+
+  // Post-await: verificar que el mapa sea el mismo (no fue reemplazado)
+  if (maps[sid] !== map) return;
+  if (!parcelas || !parcelas.length) return;
+
+  // Borrar marcadores anteriores de este mapa
+  if (activeMarkers[sid]) {
+    activeMarkers[sid].forEach(m => { try { map.removeLayer(m); } catch(_) {} });
+  }
+  if (map._leyenda) { try { map.removeControl(map._leyenda); } catch(_) {} delete map._leyenda; }
+
+  const counts = {};
+  const markers = [];
+
+  for (const p of parcelas) {
+    const uso = p.uso || 'sin clasificar';
+    counts[uso] = (counts[uso] || 0) + 1;
+    const color = USO_COLOR[p.uso] || USO_DEFAULT;
+
+    const m = L.circleMarker([p.lat, p.lng], {
+      radius: 7, fillColor: color,
+      color: '#0f172a', weight: 1.5, fillOpacity: 0.9,
+    });
+
+    const addr = [p.calle, p.numero].filter(Boolean).join(' ') || '—';
+    const ufLine = (p.uf_viv > 0 || p.uf_com > 0)
+      ? 'Viv: <b>' + p.uf_viv + '</b> &nbsp; Com: <b>' + p.uf_com + '</b>'
+      : 'UF: <b>' + (p.uf_total || '—') + '</b>';
+    m.bindPopup(
+      '<div style="font-size:.83rem;line-height:1.8;min-width:165px">' +
+      '<b>' + escHtml(addr) + '</b>' +
+      (p.barrio ? '<br><span style="color:#9ca3af">' + escHtml(p.barrio) + '</span>' : '') +
+      '<br><span style="color:' + color + ';font-weight:700;text-transform:capitalize">' + escHtml(uso) + '</span>' +
+      '<br>' + ufLine +
+      (p.area_t ? '<br><span style="color:#9ca3af">' + p.area_t + ' m² terreno</span>' : '') +
+      (p.cca ? '<br><span style="color:#6b7280;font-size:.72rem">Insc: ' + escHtml(p.cca) + '</span>' : '') +
+      '</div>',
+      {maxWidth: 210}
+    );
+    m.addTo(map);
+    markers.push(m);
+  }
+
+  activeMarkers[sid] = markers;
+
+  // Contador visible en el mapa
+  const cntEl = document.getElementById('mcount-' + sid);
+  if (cntEl) { cntEl.textContent = markers.length + ' parcelas'; cntEl.style.display = 'block'; }
+
+  // Leyenda
+  const usoEntries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const ley = L.control({position: 'bottomleft'});
+  ley.onAdd = function() {
+    const d = L.DomUtil.create('div', 'map-legend');
+    d.innerHTML = usoEntries.map(([uso, n]) => {
+      const c = USO_COLOR[uso] || USO_DEFAULT;
+      return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(uso) + ' <b>(' + n + ')</b></div>';
+    }).join('');
+    return d;
+  };
+  ley.addTo(map);
+  map._leyenda = ley;
+}
+
+function startMapPolling(sid) {
+  stopMapPolling(sid);
+  mapPollTimers[sid] = setInterval(() => {
+    if (maps[sid]) loadParcelasMap(sid);
+    else stopMapPolling(sid);
+  }, 4000);
+}
+
+function stopMapPolling(sid) {
+  if (mapPollTimers[sid]) { clearInterval(mapPollTimers[sid]); delete mapPollTimers[sid]; }
+}
+
+/* ── Fullscreen ─────────────────────────────────────────────────── */
+function toggleMapFullscreen(sid) {
+  const el = document.getElementById('mapwrap-' + sid);
+  if (!el) return;
+  if (document.fullscreenElement) document.exitFullscreen();
+  else el.requestFullscreen().catch(() => {});
+}
+
+document.addEventListener('fullscreenchange', () => {
+  setTimeout(() => { Object.values(maps).forEach(m => { try { m.invalidateSize(); } catch(_) {} }); }, 150);
+  if (!document.fullscreenElement) scheduleRefresh(800); // al salir, recuperar updates pendientes
+});
+
+/* ── Activity log por survey ───────────────────────────────────── */
+const actlogState = {}; // sid → {entries:[], lastId:0, timer:null}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderActlog(sid) {
+  const el = document.getElementById('actlog-' + sid);
+  if (!el) return;
+  const st = actlogState[sid];
+  if (!st || st.entries.length === 0) {
+    el.innerHTML = '<span class="alog-empty">Sin actividad registrada para este relevamiento.</span>';
+    return;
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  el.innerHTML = st.entries.slice(-10).map(e => {
+    const live = e.id >= 0;
+    const cls = e.lvl === 'ERROR' ? 'alog-err' : e.lvl === 'WARNING' ? 'alog-warn' : live ? 'alog-info' : 'alog-synth';
+    return `<div class="alog-line ${cls}"><span class="alog-ts">${e.ts}</span><span class="alog-msg">${escHtml(e.msg)}</span></div>`;
+  }).join('');
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function syntheticActlog(sid) {
+  /* Sintetiza entradas desde las notas del pipeline (guardadas en DB, siempre disponibles). */
+  const s = surveyCache[sid];
+  if (!s) return [];
+  const pasos = (s.pipeline || {}).pasos || {};
+  const paso_actual = (s.pipeline || {}).paso_actual || '';
+  const entries = [];
+  let seq = -9000;
+
+  if (pasos.smartgis) {
+    const p = pasos.smartgis;
+    const msg = p.saltado
+      ? `SmartGIS: saltado — ya había ${p.parcelas_existentes || 0} parcelas`
+      : p.ok
+        ? `SmartGIS: ${p.parcelas_insertadas || 0} insertadas, ${p.parcelas_actualizadas || 0} actualizadas`
+        : `SmartGIS: error — ${p.error || 'desconocido'}`;
+    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
+  }
+  if (pasos.bci) {
+    const p = pasos.bci;
+    const msg = p.ok
+      ? `BCI: ${p.pdfs_descargados || 0} descargados, ${p.pdfs_ya_existentes || 0} ya existían, ${p.pdfs_fallidos || 0} fallidos`
+      : `BCI: error — ${p.error || 'desconocido'}`;
+    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
+  }
+  if (pasos.parser) {
+    const p = pasos.parser;
+    const msg = p.saltado
+      ? 'Parser: saltado — todas las parcelas ya tienen uso'
+      : p.ok ? `Parser: ${p.actualizadas || 0} actualizadas` : 'Parser: error';
+    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
+  }
+
+  const finalMsg = {
+    completado:    '✓ Pipeline completado',
+    error:         '✗ Pipeline terminó con error',
+    detenido:      '⏹ Pipeline detenido manualmente',
+    sin_pipeline:  '— Pipeline no definido para este país',
+  }[paso_actual];
+  if (finalMsg) entries.push({id: seq++, ts: '·', lvl: paso_actual === 'completado' ? 'INFO' : 'WARNING', msg: finalMsg});
+
+  return entries;
+}
+
+async function fetchActlog(sid) {
+  if (!actlogState[sid]) actlogState[sid] = {entries: [], lastId: 0, timer: null};
+  const st = actlogState[sid];
+  try {
+    const res = await fetch(`/api/surveys/${sid}/activity?since=${st.lastId}`);
+    const data = await res.json();
+    if (data.entries.length > 0) {
+      // Actividad en vivo — descartar sintéticos si los había
+      if (st.entries.length > 0 && st.entries[0].id < 0) st.entries = [];
+      st.entries.push(...data.entries);
+      st.lastId = data.last_id;
+    } else if (st.entries.length === 0) {
+      // Sin actividad en vivo — sintetizar desde notas del pipeline
+      st.entries = syntheticActlog(sid);
+    }
+  } catch(_) {}
+  renderActlog(sid);
+}
+
+function startActlogPolling(sid) {
+  if (actlogState[sid]?.timer) return;
+  if (!actlogState[sid]) actlogState[sid] = {entries: [], lastId: 0, timer: null};
+  fetchActlog(sid);
+  actlogState[sid].timer = setInterval(() => fetchActlog(sid), 2000);
+}
+
+function stopActlogPolling(sid) {
+  if (actlogState[sid]?.timer) {
+    clearInterval(actlogState[sid].timer);
+    actlogState[sid].timer = null;
+  }
+}
+
+function toggleDetail(sid) {
+  const detail = document.getElementById('detail-'+sid);
+  const chev   = document.getElementById('chev-'+sid);
+  if (detail.classList.contains('open')) {
+    detail.classList.remove('open'); chev.classList.remove('open');
+    stopActlogPolling(sid);
+    stopMapPolling(sid);
+  } else {
+    detail.classList.add('open'); chev.classList.add('open');
+    const status = document.getElementById('card-'+sid)?.dataset.status;
+    const isActive = status === 'running' || status === 'stopping';
+    setTimeout(() => {
+      if (maps[sid]) {
+        maps[sid].invalidateSize();
+        loadParcelasMap(sid);
+      } else {
+        initMap(sid);
+      }
+      if (isActive) startMapPolling(sid);
+    }, 80);
+    if (isActive) startActlogPolling(sid);
+    else fetchActlog(sid);
+  }
+}
+
+/* ── Load / refresh ────────────────────────────────────────────── */
+async function loadSurveys() {
+  if (document.fullscreenElement) { scheduleRefresh(5000); return; }
+  document.getElementById('status-dot').className = 'loading';
+  try {
+    const list = await fetch('/api/surveys').then(r => r.json());
+    document.getElementById('status-dot').className = '';
+    const container = document.getElementById('list-container');
+    const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));
+
+    if (!list.length) {
+      container.innerHTML = '<div class="empty-state"><p>No hay relevamientos aún</p><p style="font-size:.9rem">Creá el primero con el botón de arriba.</p></div>';
+      return;
+    }
+
+    list.forEach(s => {
+      if (s.zone_geojson) zoneData[s.survey_id] = s.zone_geojson;
+      surveyCache[s.survey_id] = s;
+      // Auto-abrir tarjetas de relevamientos activos
+      if (s.status === 'running' || s.status === 'stopping') openCards.add(s.survey_id);
+    });
+    container.innerHTML = `<div class="surveys-list">${list.map(renderCard).join('')}</div>`;
+
+    openCards.forEach(sid => {
+      const detail = document.getElementById('detail-'+sid);
+      const chev = document.getElementById('chev-'+sid);
+      if (detail) {
+        detail.classList.add('open');
+        chev && chev.classList.add('open');
+        if (maps[sid]) { maps[sid].remove(); delete maps[sid]; }
+        if (activeMarkers[sid]) { delete activeMarkers[sid]; }
+        stopMapPolling(sid);
+        const sv = list.find(s => s.survey_id === sid);
+        const isActive = sv && (sv.status === 'running' || sv.status === 'stopping');
+        setTimeout(() => { initMap(sid); if (isActive) startMapPolling(sid); }, 80);
+        // Re-renderizar log desde estado en memoria
+        renderActlog(sid);
+        // Sincronizar polling según status actual
+        const survey = list.find(s => s.survey_id === sid);
+        if (survey && (survey.status === 'running' || survey.status === 'stopping')) {
+          startActlogPolling(sid);
+        } else {
+          stopActlogPolling(sid);
+        }
+      }
+    });
+
+    const anyRunning = list.some(s => s.status === 'running');
+    scheduleRefresh(anyRunning ? 5000 : 30000);
+  } catch(err) {
+    document.getElementById('status-dot').className = 'loading';
+    document.getElementById('list-container').innerHTML = `<div class="empty-state"><p>Error cargando datos</p><p>${err.message}</p></div>`;
+    scheduleRefresh(10000);
+  }
+}
+
+async function refreshCard(sid) {
+  if (maps[sid]) { maps[sid].remove(); delete maps[sid]; }
+  await loadSurveys();
+}
+
+let refreshTimer = null;
+function scheduleRefresh(ms) { clearTimeout(refreshTimer); refreshTimer = setTimeout(loadSurveys, ms); }
+
+loadSurveys();
+
+/* ── Activity bar (SSE) ─────────────────────────────────────── */
+(function initActivityBar() {
+  const bar = document.getElementById('activity-bar');
+  const ts  = document.getElementById('activity-ts');
+  const txt = document.getElementById('activity-text');
+  let idleTimer = null;
+
+  function setIdle() {
+    bar.className = '';
+    ts.textContent = '';
+    txt.textContent = 'Sin actividad reciente';
+  }
+
+  function showEntry(entry) {
+    clearTimeout(idleTimer);
+    const lvl = entry.lvl || 'INFO';
+    bar.className = 'active pulsing' + (lvl === 'WARNING' ? ' warn' : lvl === 'ERROR' ? ' err' : '');
+    ts.textContent = entry.ts;
+    txt.textContent = entry.msg;
+    // Quitar pulso 2s después del último mensaje
+    idleTimer = setTimeout(() => {
+      bar.classList.remove('pulsing');
+      setTimeout(setIdle, 13000);
+    }, 2000);
+    // Si el mensaje indica completado, refrescar lista
+    if (/completad|completo|inseridas|insertadas|descargado|fallido|error/i.test(entry.msg)) {
+      scheduleRefresh(1500);
+    }
+  }
+
+  function connect() {
+    const es = new EventSource('/api/activity/stream');
+    es.onmessage = e => {
+      try { showEntry(JSON.parse(e.data)); } catch(_) {}
+    };
+    es.onerror = () => { es.close(); setTimeout(connect, 4000); };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

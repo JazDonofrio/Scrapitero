@@ -25,8 +25,34 @@ from scrapitero.db.engine import get_engine
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_MIRRORS = [
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+TOR_SOCKS5 = "socks5://127.0.0.1:9050"
+# Mirrors que funcionan via Tor cuando la IP directa está bloqueada
+OVERPASS_MIRRORS_TOR = [
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
 OVERPASS_TIMEOUT = 120  # segundos
+
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ScrapiteroResearch/1.0; +https://github.com/scrapitero)",
+    "Accept": "*/*",
+}
+
+
+def _tor_available() -> bool:
+    import socket
+    try:
+        s = socket.create_connection(("127.0.0.1", 9050), timeout=2)
+        s.close()
+        return True
+    except OSError:
+        return False
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -91,12 +117,44 @@ out geom;
 """
 
 
+def _try_mirrors(query: str, mirrors: list, proxy: str = None) -> dict:
+    last_error = ""
+    kwargs = {"proxies": proxy} if proxy else {}
+    for mirror in mirrors:
+        try:
+            with httpx.Client(follow_redirects=True, timeout=OVERPASS_TIMEOUT + 10, **kwargs) as client:
+                r = client.post(mirror, data={"data": query}, headers=_HEADERS)
+            if r.status_code == 200:
+                via = f" via Tor" if proxy else ""
+                logger.info(f"Overpass OK{via} — {mirror}")
+                return r.json()
+            last_error = f"HTTP {r.status_code} ({mirror})"
+            logger.warning(f"Overpass {last_error}")
+        except httpx.HTTPError as exc:
+            last_error = f"HTTPError ({mirror}): {exc}"
+            logger.warning(f"Overpass {last_error}")
+    return None, last_error
+
+
 def _fetch_overpass(query: str) -> dict:
     logger.info("Consultando Overpass API...")
-    with httpx.Client(timeout=OVERPASS_TIMEOUT + 10) as client:
-        r = client.post(OVERPASS_URL, data={"data": query})
-        r.raise_for_status()
-    return r.json()
+
+    # Intento 1: mirrors directos
+    result = _try_mirrors(query, OVERPASS_MIRRORS)
+    if result and not isinstance(result, tuple):
+        return result
+
+    # Intento 2: via Tor (si está disponible)
+    if _tor_available():
+        logger.info("Mirrors directos fallaron — reintentando via Tor...")
+        result = _try_mirrors(query, OVERPASS_MIRRORS_TOR, proxy=TOR_SOCKS5)
+        if result and not isinstance(result, tuple):
+            return result
+        _, last_error = result
+    else:
+        _, last_error = result
+
+    raise RuntimeError(f"Todos los mirrors fallaron (con y sin Tor). Último: {last_error}")
 
 
 # ── Parseo de geometría OSM ───────────────────────────────────────────────────

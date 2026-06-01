@@ -25,7 +25,7 @@ Pipeline de relevamiento catastral para manzanas de Buenos Aires Province.
 
 ```bash
 env $(cat /opt/scrapitero/.env | xargs) \
-PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src
 python3 -c "
 import uuid
 from sqlalchemy import text
@@ -63,9 +63,8 @@ Guardar el `survey_id`.
 Con el JSESSIONID recibido, correr `arba_carto_fetcher` (descarga IDERA + enriquece carto en un solo paso):
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"<CIRC>","seccion":"<SECC>","manzana":"<MZA>","cookie_header":"<COOKIE_DEL_USUARIO>"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"<CIRC>","seccion":"<SECC>","manzana":"<MZA>","cookie_header":"<COOKIE_DEL_USUARIO>"}' |
+
   python3 -m scrapitero.rpc.arba_carto_fetcher
 ```
 
@@ -83,9 +82,8 @@ Reportar el error exacto al usuario y detener.
 ## Paso 4 — Verificar estado
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
+
   python3 -m scrapitero.rpc.coverage_reporter
 ```
 

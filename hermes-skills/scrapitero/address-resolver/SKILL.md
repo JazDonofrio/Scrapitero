@@ -24,17 +24,15 @@ La variable `GOOGLE_MAPS_API_KEY` debe estar en `/opt/scrapitero/.env`.
 ## Comando
 **No instalar nada. El venv ya está listo.**
 ```bash
-echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>","batch_size":100}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>","batch_size":100}' |
+
   python3 -m scrapitero.rpc.address_resolver
 ```
 
 Para procesar toda la región sin filtrar por survey:
 ```bash
-echo '{"region_id":"vg-mt-br"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"vg-mt-br"}' |
+
   python3 -m scrapitero.rpc.address_resolver
 ```
 

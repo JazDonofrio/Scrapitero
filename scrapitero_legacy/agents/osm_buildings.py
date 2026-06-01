@@ -27,15 +27,31 @@ from pydantic import BaseModel, Field
 log = logging.getLogger(__name__)
 
 OVERPASS_MIRRORS = [
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.fr/api/interpreter",
+]
+TOR_SOCKS5 = "socks5://127.0.0.1:9050"
+OVERPASS_MIRRORS_TOR = [
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
 ]
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ScrapiteroResearch/1.0; +https://github.com/scrapitero)",
     "Accept": "*/*",
 }
+
+
+def _tor_available() -> bool:
+    import socket
+    try:
+        s = socket.create_connection(("127.0.0.1", 9050), timeout=2)
+        s.close()
+        return True
+    except OSError:
+        return False
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────
@@ -164,24 +180,42 @@ def fetch(
     try:
         r = None
         last_error = ""
+
+        # Intento 1: mirrors directos
         for mirror in OVERPASS_MIRRORS:
             try:
-                r = client.post(
-                    mirror,
-                    data={"data": query},
-                    timeout=input.timeout_seconds,
-                    headers=_HEADERS,
-                )
+                r = client.post(mirror, data={"data": query},
+                                timeout=input.timeout_seconds, headers=_HEADERS)
                 if r.status_code == 200:
                     log.info("OSMBuildingsFetcher: mirror OK — %s", mirror)
                     break
-                last_error = f"overpass_http_{r.status_code} ({mirror}): {r.text[:200]!r}"
+                last_error = f"overpass_http_{r.status_code} ({mirror})"
                 log.warning("OSMBuildingsFetcher: %s", last_error)
                 r = None
             except httpx.HTTPError as exc:
                 last_error = f"http_error ({mirror}): {exc}"
                 log.warning("OSMBuildingsFetcher: %s", last_error)
                 r = None
+
+        # Intento 2: via Tor si directos fallaron
+        if r is None and _tor_available():
+            log.info("OSMBuildingsFetcher: reintentando via Tor...")
+            for mirror in OVERPASS_MIRRORS_TOR:
+                try:
+                    tor_client = httpx.Client(proxies=TOR_SOCKS5, follow_redirects=True)
+                    r = tor_client.post(mirror, data={"data": query},
+                                        timeout=input.timeout_seconds, headers=_HEADERS)
+                    tor_client.close()
+                    if r.status_code == 200:
+                        log.info("OSMBuildingsFetcher: Tor OK — %s", mirror)
+                        break
+                    last_error = f"tor_http_{r.status_code} ({mirror})"
+                    log.warning("OSMBuildingsFetcher: %s", last_error)
+                    r = None
+                except httpx.HTTPError as exc:
+                    last_error = f"tor_error ({mirror}): {exc}"
+                    log.warning("OSMBuildingsFetcher: %s", last_error)
+                    r = None
 
         if r is None:
             return OSMFetchOutput.empty(input.bbox, last_error)

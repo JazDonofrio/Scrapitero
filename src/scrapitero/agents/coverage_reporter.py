@@ -23,17 +23,20 @@ class CoverageReport(BaseModel):
     survey_id: str
     region_id: str
     step: int
-    # Conteos
+    # Conteos Brasil (edificios OSM como unidad principal)
     setores: int
     pop_total_ibge: int
-    footprints: int
+    logradouros_count: int
+    footprints: int                  # edificios OSM descargados
     footprints_con_setor: int
+    edificios_con_direccion: int     # edificios con dirección resuelta
+    # Conteos Argentina (parcelas catastrales)
     parcelas: int
     parcelas_con_direccion: int
     parcelas_con_habitantes: int
     # Ratios
     cobertura_footprints_pct: float
-    cobertura_direccion_pct: float
+    cobertura_direccion_pct: float   # sobre edificios (BR) o parcelas (AR)
     cobertura_habitantes_pct: float
     # Validación
     suma_hab_vs_ibge_delta_pct: float
@@ -59,9 +62,9 @@ def run(input: CoverageInput) -> CoverageReport:
                 # No hay survey — devolver reporte vacío
                 return CoverageReport(
                     survey_id="none", region_id=input.region_id, step=0,
-                    setores=0, pop_total_ibge=0, footprints=0,
-                    footprints_con_setor=0, parcelas=0,
-                    parcelas_con_direccion=0, parcelas_con_habitantes=0,
+                    setores=0, pop_total_ibge=0, logradouros_count=0,
+                    footprints=0, footprints_con_setor=0, edificios_con_direccion=0,
+                    parcelas=0, parcelas_con_direccion=0, parcelas_con_habitantes=0,
                     cobertura_footprints_pct=0.0, cobertura_direccion_pct=0.0,
                     cobertura_habitantes_pct=0.0,
                     suma_hab_vs_ibge_delta_pct=0.0, errores=["no_survey_found"]
@@ -77,7 +80,12 @@ def run(input: CoverageInput) -> CoverageReport:
             "SELECT COALESCE(SUM(pop_total), 0) FROM setores_censitarios WHERE region_id = :rid"
         ), {"rid": input.region_id}).scalar() or 0
 
-        # Edificios / footprints
+        # Logradouros (Brasil)
+        logradouros_count = conn.execute(text(
+            "SELECT COUNT(*) FROM logradouros WHERE region_id = :rid"
+        ), {"rid": input.region_id}).scalar() or 0
+
+        # Edificios / footprints (Brasil)
         footprints = conn.execute(text(
             "SELECT COUNT(*) FROM edificios WHERE survey_id = :sid"
         ), {"sid": survey_id}).scalar() or 0
@@ -86,7 +94,10 @@ def run(input: CoverageInput) -> CoverageReport:
             "SELECT COUNT(*) FROM edificios WHERE survey_id = :sid AND setor_censitario_id IS NOT NULL"
         ), {"sid": survey_id}).scalar() or 0
 
-        # Parcelas
+        # TODO: cuando address_resolver soporte edificios, agregar columna endereco a la tabla
+        edificios_con_direccion = 0
+
+        # Parcelas (Argentina)
         parcelas = conn.execute(text(
             "SELECT COUNT(*) FROM parcelas WHERE survey_id = :sid"
         ), {"sid": survey_id}).scalar() or 0
@@ -110,9 +121,14 @@ def run(input: CoverageInput) -> CoverageReport:
         ), {"sid": survey_id}).scalar() or 0
 
     # Calcular ratios
-    base = max(footprints, 1)
-    cobertura_footprints_pct = round(footprints_con_setor / base, 4) if footprints > 0 else 0.0
-    cobertura_direccion_pct = round(parcelas_con_direccion / max(parcelas, 1), 4) if parcelas > 0 else 0.0
+    cobertura_footprints_pct = round(footprints_con_setor / max(footprints, 1), 4) if footprints > 0 else 0.0
+    # Dirección: usar edificios para Brasil (parcelas==0), parcelas para Argentina
+    if parcelas > 0:
+        cobertura_direccion_pct = round(parcelas_con_direccion / parcelas, 4)
+    elif footprints > 0:
+        cobertura_direccion_pct = round(edificios_con_direccion / footprints, 4)
+    else:
+        cobertura_direccion_pct = 0.0
     cobertura_habitantes_pct = round(parcelas_con_habitantes / max(parcelas, 1), 4) if parcelas > 0 else 0.0
 
     ibge_base = max(pop_total_ibge, 1)
@@ -124,8 +140,10 @@ def run(input: CoverageInput) -> CoverageReport:
         step=int(step),
         setores=int(setores),
         pop_total_ibge=int(pop_total_ibge),
+        logradouros_count=int(logradouros_count),
         footprints=int(footprints),
         footprints_con_setor=int(footprints_con_setor),
+        edificios_con_direccion=int(edificios_con_direccion),
         parcelas=int(parcelas),
         parcelas_con_direccion=int(parcelas_con_direccion),
         parcelas_con_habitantes=int(parcelas_con_habitantes),

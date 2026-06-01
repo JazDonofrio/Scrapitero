@@ -29,6 +29,7 @@ class Region(Base):
     state_code: Mapped[Optional[str]] = mapped_column(String(10))
     municipio_codigo: Mapped[Optional[str]] = mapped_column(String(20))  # IBGE/INDEC
     bbox_wkt: Mapped[Optional[str]] = mapped_column(Text)  # POLYGON WGS84
+    zone_geojson: Mapped[Optional[str]] = mapped_column(Text)  # GeoJSON subido por el usuario
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

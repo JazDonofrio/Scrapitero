@@ -24,17 +24,15 @@ Cuando `coverage-reporter` devuelve `footprints == 0` y ya hay parcelas en la DB
 
 Derivando bbox automáticamente de las parcelas (recomendado):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
+
   python3 -m scrapitero.rpc.osm_building_fetcher
 ```
 
 Con bbox explícita:
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","bbox_south":-34.67,"bbox_west":-58.68,"bbox_north":-34.66,"bbox_east":-58.67}' | \
-  env $(cat /opt/scrapitero/.env | xargs) \
-  PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapitero/src \
+echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","bbox_south":-34.67,"bbox_west":-58.68,"bbox_north":-34.66,"bbox_east":-58.67}' |
+
   python3 -m scrapitero.rpc.osm_building_fetcher
 ```
 

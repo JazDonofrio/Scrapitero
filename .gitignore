@@ -51,6 +51,17 @@ data/
 # === Docker volumes locales ===
 data/postgres/
 
+# === PDFs descargados (datos, no código) ===
+pdf_downloads/
+
+# === Paquetes pre-compilados para Hermes container ===
+.hermes-packages/
+
+# === Artefactos de debug / desarrollo ===
+page_*.html
+page_*.png
+scrape_*_estado.txt
+
 # === Logs ===
 *.log
 logs/

@@ -40,10 +40,10 @@ BASE_URL = (
 
 # Mapeo de columnas del SHP (puede variar entre versiones; intentar en orden)
 COL_MAP = {
-    "cod_face":     ["cod_face", "COD_FACE", "id"],
-    "tipo_logr":    ["tipo_logr", "TIPO_LOGR", "tipo"],
-    "tit_logr":     ["tit_logr", "TIT_LOGR", "titulo"],
-    "nom_logr":     ["nom_logr", "NOM_LOGR", "nome_logr", "nome"],
+    "cod_face":     ["CD_FACE", "cod_face", "COD_FACE", "id"],
+    "tipo_logr":    ["NM_TIP_LOG", "tipo_logr", "TIPO_LOGR", "tipo"],
+    "tit_logr":     ["NM_TIT_LOG", "tit_logr", "TIT_LOGR", "titulo"],
+    "nom_logr":     ["NM_LOG", "nom_logr", "NOM_LOGR", "nome_logr", "nome"],
     "nro_ini_e":    ["nro_ini_e", "NRO_INI_E", "num_ini_e"],
     "nro_fin_e":    ["nro_fin_e", "NRO_FIN_E", "num_fin_e"],
     "nro_ini_d":    ["nro_ini_d", "NRO_INI_D", "num_ini_d"],
@@ -52,7 +52,7 @@ COL_MAP = {
     "cep_d":        ["cep_d", "CEP_D"],
     "cod_munic":    ["cod_munic", "COD_MUNIC", "cod_ibge"],
     "nom_munic":    ["nom_munic", "NOM_MUNIC", "municipio"],
-    "cod_setor":    ["cod_setor", "COD_SETOR"],
+    "cod_setor":    ["CD_SETOR", "cod_setor", "COD_SETOR"],
 }
 
 
@@ -123,25 +123,23 @@ def _download(estado_uf: str, cache_dir: Path) -> Path:
     return shp_dir
 
 
-def _load_shp(shp_dir: Path) -> gpd.GeoDataFrame:
-    shp_files = list(shp_dir.rglob("*.shp"))
-    if not shp_files:
-        raise FileNotFoundError(f"No se encontró .shp en {shp_dir}")
-    logger.info(f"Leyendo SHP: {shp_files[0]}")
-    gdf = gpd.read_file(shp_files[0], engine="pyogrio")
+def _load_shp(shp_dir: Path, municipio_codigo: str) -> gpd.GeoDataFrame:
+    # Cada municipio tiene su propio SHP nombrado con el código IBGE
+    shp_file = next(shp_dir.rglob(f"{municipio_codigo}_*.shp"), None)
+    if not shp_file:
+        # Fallback: buscar cualquier SHP cuyo nombre empiece con el código
+        candidates = [f for f in shp_dir.rglob("*.shp")
+                      if f.stem.startswith(municipio_codigo)]
+        shp_file = candidates[0] if candidates else None
+    if not shp_file:
+        raise FileNotFoundError(
+            f"No se encontró SHP para municipio {municipio_codigo} en {shp_dir}"
+        )
+    logger.info(f"Leyendo SHP: {shp_file}")
+    gdf = gpd.read_file(shp_file, engine="pyogrio")
     if gdf.crs and gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(epsg=4326)
-    logger.info(f"Total logradouros en estado: {len(gdf)}")
-    return gdf
-
-
-def _filter_municipio(gdf: gpd.GeoDataFrame, municipio_codigo: str) -> gpd.GeoDataFrame:
-    col = _col(gdf, "cod_munic")
-    if col:
-        filtered = gdf[gdf[col].astype(str).str.startswith(municipio_codigo)]
-        logger.info(f"Logradouros en municipio {municipio_codigo}: {len(filtered)}")
-        return filtered
-    logger.warning("No se pudo filtrar por municipio — cargando todo el estado")
+    logger.info(f"Logradouros en municipio {municipio_codigo}: {len(gdf)}")
     return gdf
 
 
@@ -168,18 +166,33 @@ def _upsert(gdf: gpd.GeoDataFrame, region_id: str) -> tuple[int, int]:
 
     logger.info(f"Insertando {len(gdf)} logradouros en DB...")
 
+    # Pre-cargar setores válidos para evitar FK violations
+    with engine.connect() as conn:
+        valid_setores = {
+            r[0] for r in conn.execute(
+                text("SELECT setor_id FROM setores_censitarios WHERE region_id = :rid"),
+                {"rid": region_id}
+            ).fetchall()
+        }
+
     with engine.begin() as conn:
-        for _, row in gdf.iterrows():
+        for idx, row in gdf.iterrows():
             geom = row.geometry
             if geom is None or geom.is_empty:
                 continue
 
             lid = _safe_str(row[c_id]) if c_id else None
+            # Fallback: CD_FACE puede venir NaN en el SHP 2022 → usar setor+índice
             if not lid:
-                continue
+                setor_val = _safe_str(row[c_setor], 20) if c_setor else "X"
+                lid = f"{setor_val or 'X'}_{idx}"
 
             geom_wkt = geom.wkt
-            setor_id = _safe_str(row[c_setor], 20) if c_setor else None
+            # El SHP puede traer sufijos como "P" en el cod_setor → stripear no-numéricos
+            setor_raw = _safe_str(row[c_setor], 20) if c_setor else None
+            setor_id = setor_raw.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ") if setor_raw else None
+            if setor_id and setor_id not in valid_setores:
+                setor_id = None
 
             existing = conn.execute(
                 text("SELECT logradouro_id FROM logradouros WHERE logradouro_id = :lid"),
@@ -246,8 +259,7 @@ def run(input: LogradourosInput) -> LogradourosOutput:
 
     try:
         shp_dir = _download(input.estado_uf, cache_dir)
-        gdf = _load_shp(shp_dir)
-        gdf = _filter_municipio(gdf, input.municipio_codigo)
+        gdf = _load_shp(shp_dir, input.municipio_codigo)
 
         if gdf.empty:
             return LogradourosOutput(
