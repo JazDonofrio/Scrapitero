@@ -75,7 +75,7 @@ PYTHONPATH y credenciales DB ya están configuradas en el entorno. Usar `<<<` (h
 | `osm-building-fetcher` | `footprints == 0` — footprints de edificios OSM (cualquier país) |
 | `ibge-census-fetcher` | `setores == 0` en Brasil — descarga setores censitários IBGE 2022 |
 | `ibge-logradouros-fetcher` | Brasil, antes de `address-resolver` — geocoding gratis por interpolación |
-| `address-resolver` | `parcelas_con_direccion / parcelas < 0.90` — reverse geocoding (IBGE → Google Maps fallback) |
+| `address-resolver` | Cuando falta `calle` O `numero` en parcelas — Google Maps reverse geocoding para cualquier país. Idioma automático según region_id. Brasil: intenta IBGE gratis primero. |
 | `uso-classifier` | Clasificar `uso_principal` por parcela (residencial/comercial/mixto) |
 
 ### Creación de zonas

@@ -51,7 +51,7 @@ echo '<JSON_INPUT>' | PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapiter
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
 | OSMBuildingFetcher | `osm_building_fetcher` | Footprints de edificios OSM (cualquier país) cuando `footprints == 0` |
-| AddressResolver | `address_resolver` | Cuando `parcelas_con_direccion / parcelas < 0.90` |
+| AddressResolver | `address_resolver` | Cuando falta `calle` OR `numero` en parcelas. Cualquier país. Idioma automático. Brasil: IBGE gratis primero, Google Maps fallback. ARG: directo a Google (`es-AR`) |
 | UsoClassifier | `uso_classifier` | Clasificar `uso_principal` (residencial/comercial/mixto) por parcela |
 
 ### Creación de zonas

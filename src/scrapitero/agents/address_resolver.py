@@ -1,4 +1,4 @@
-"""AddressResolver — resuelve direcciones de parcelas sin dirección.
+"""AddressResolver — resuelve direcciones de parcelas sin dirección o incompletas.
 
 Estrategia (en orden de preferencia, de menor a mayor costo):
   1. Interpolación por Faces de Logradouros IBGE (gratis, solo Brasil)
@@ -6,8 +6,14 @@ Estrategia (en orden de preferencia, de menor a mayor costo):
      interpola el número según la posición del centroide a lo largo del eje.
   2. Google Maps Geocoding API (USD 0.005/llamada, cualquier país)
      Fallback cuando no hay logradouros en DB o la interpolación falla.
+     También rellena parcelas donde la calle existe pero falta el número.
 
-Requiere variable de entorno (para fallback Google):
+El idioma de respuesta se detecta automáticamente desde region_id:
+  - termina en -br  → pt-BR
+  - termina en -ar  → es-AR
+  - otro            → es
+
+Requiere variable de entorno:
   GOOGLE_MAPS_API_KEY
 """
 
@@ -28,15 +34,16 @@ from scrapitero.db.engine import get_engine
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
 class AddressResolverInput(BaseModel):
-    region_id: str                          # "vg-mt-br"
+    region_id: str                          # "vg-mt-br", "ituzaingo-ba-ar", etc.
     survey_id: Optional[str] = None        # UUID — si se omite procesa toda la región
     batch_size: int = 100                  # máximo de parcelas por corrida
     delay_ms: int = 50                     # delay entre llamadas para no superar quota
+    fill_partial: bool = True              # también rellenar parcelas con calle pero sin numero
 
 
 class AddressResolverOutput(BaseModel):
     ok: bool
-    parcelas_procesadas: int               # total encontradas sin dirección
+    parcelas_procesadas: int               # total encontradas sin dirección completa
     parcelas_resueltas: int                # con dirección encontrada (cualquier fuente)
     parcelas_resueltas_logradouros: int = 0  # resueltas gratis por interpolación IBGE
     parcelas_resueltas_google: int = 0    # resueltas por Google Maps API
@@ -71,17 +78,27 @@ def _parse_components(components: list[dict]) -> dict:
     return result
 
 
-def _reverse_geocode(lat: float, lng: float, api_key: str) -> Optional[dict]:
+def _detect_language(region_id: str) -> str:
+    """Detecta el idioma de respuesta de Google Maps según el region_id."""
+    rid = region_id.lower()
+    if rid.endswith("-br") or "-br-" in rid:
+        return "pt-BR"
+    if rid.endswith("-ar") or "-ar-" in rid:
+        return "es-AR"
+    return "es"
+
+
+def _reverse_geocode(lat: float, lng: float, api_key: str, language: str = "es") -> Optional[dict]:
     """
     Llama a Google Maps Geocoding API con lat/lng.
     Devuelve el primer resultado o None si no hay resultados.
-    Usa language=pt-BR para nombres en portugués (contexto Brasil).
+    El idioma de respuesta es configurable (pt-BR, es-AR, es, etc.).
     """
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {
         "latlng": f"{lat},{lng}",
         "key": api_key,
-        "language": "pt-BR",
+        "language": language,
         "result_type": "street_address|premise|subpremise",
     }
     try:
@@ -175,57 +192,98 @@ def _resolve_from_logradouros(engine, lat: float, lng: float, region_id: str) ->
 # ── Consulta y actualización en DB ────────────────────────────────────────────
 
 def _fetch_parcelas_sin_direccion(
-    engine, region_id: str, survey_id: Optional[str], batch_size: int
+    engine, region_id: str, survey_id: Optional[str], batch_size: int, fill_partial: bool
 ) -> list[dict]:
-    """Devuelve parcelas con coordenadas pero sin calle asignada."""
+    """Devuelve parcelas con coordenadas pero sin calle o sin número.
+
+    Cada fila incluye `calle_existente` para saber si la calle ya está y solo
+    hay que completar el número (dirección parcial).
+    """
     with engine.connect() as conn:
-        q = """
-            SELECT parcela_id::text, centroid_lat, centroid_lng
+        base = """
+            SELECT parcela_id::text, centroid_lat, centroid_lng, calle
             FROM parcelas
             WHERE region_id = :region
               AND centroid_lat IS NOT NULL
               AND centroid_lng IS NOT NULL
-              AND (calle IS NULL OR calle = '')
         """
         params: dict = {"region": region_id}
+
+        if fill_partial:
+            # Sin calle O con calle pero sin número
+            base += " AND (calle IS NULL OR calle = '' OR numero IS NULL OR numero = '')"
+        else:
+            base += " AND (calle IS NULL OR calle = '')"
+
         if survey_id:
-            q += " AND survey_id = :survey_id"
+            base += " AND survey_id = :survey_id"
             params["survey_id"] = survey_id
-        q += " LIMIT :batch"
+        base += " LIMIT :batch"
         params["batch"] = batch_size
 
-        rows = conn.execute(text(q), params).fetchall()
-        return [{"parcela_id": r[0], "lat": r[1], "lng": r[2]} for r in rows]
+        rows = conn.execute(text(base), params).fetchall()
+        return [
+            {
+                "parcela_id":      r[0],
+                "lat":             r[1],
+                "lng":             r[2],
+                "calle_existente": r[3],   # None si no hay calle, str si hay calle pero falta numero
+            }
+            for r in rows
+        ]
 
 
-def _update_parcela_direccion(conn, parcela_id: str, addr: dict) -> None:
-    """Actualiza los campos de dirección de una parcela."""
+def _update_parcela_direccion(conn, parcela_id: str, addr: dict, preserve_calle: bool = False) -> None:
+    """Actualiza los campos de dirección de una parcela.
+
+    Si `preserve_calle=True` (calle ya estaba en DB), no sobreescribe `calle` ni campos
+    de localidad — solo actualiza `numero`, `barrio` y `codigo_postal`.
+    """
     source = addr.get("source", "google_maps")
     confidence = 0.80 if source == "ibge_logradouros" else 0.85
-    conn.execute(text("""
-        UPDATE parcelas SET
-            calle              = :calle,
-            numero             = :numero,
-            barrio             = :barrio,
-            municipio          = :municipio,
-            estado_provincia   = :estado,
-            pais               = :pais,
-            codigo_postal      = :cp,
-            direccion_source   = :source,
-            direccion_confidence = :conf
-        WHERE parcela_id = :pid
-    """), {
-        "calle":   addr.get("calle"),
-        "numero":  addr.get("numero"),
-        "barrio":  addr.get("barrio"),
-        "municipio": addr.get("municipio"),
-        "estado":  addr.get("estado_provincia"),
-        "pais":    addr.get("pais"),
-        "cp":      addr.get("codigo_postal"),
-        "source":  source,
-        "conf":    confidence,
-        "pid":     parcela_id,
-    })
+
+    if preserve_calle:
+        conn.execute(text("""
+            UPDATE parcelas SET
+                numero             = COALESCE(:numero, numero),
+                barrio             = COALESCE(:barrio, barrio),
+                codigo_postal      = COALESCE(:cp, codigo_postal),
+                direccion_source   = :source,
+                direccion_confidence = :conf
+            WHERE parcela_id = :pid
+        """), {
+            "numero": addr.get("numero"),
+            "barrio": addr.get("barrio"),
+            "cp":     addr.get("codigo_postal"),
+            "source": source,
+            "conf":   confidence,
+            "pid":    parcela_id,
+        })
+    else:
+        conn.execute(text("""
+            UPDATE parcelas SET
+                calle              = :calle,
+                numero             = :numero,
+                barrio             = :barrio,
+                municipio          = :municipio,
+                estado_provincia   = :estado,
+                pais               = :pais,
+                codigo_postal      = :cp,
+                direccion_source   = :source,
+                direccion_confidence = :conf
+            WHERE parcela_id = :pid
+        """), {
+            "calle":     addr.get("calle"),
+            "numero":    addr.get("numero"),
+            "barrio":    addr.get("barrio"),
+            "municipio": addr.get("municipio"),
+            "estado":    addr.get("estado_provincia"),
+            "pais":      addr.get("pais"),
+            "cp":        addr.get("codigo_postal"),
+            "source":    source,
+            "conf":      confidence,
+            "pid":       parcela_id,
+        })
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -235,13 +293,17 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
     if not api_key:
         logger.warning("GOOGLE_MAPS_API_KEY no configurada — usando solo interpolación IBGE")
 
+    language = _detect_language(input.region_id)
     engine = get_engine()
 
     try:
         parcelas = _fetch_parcelas_sin_direccion(
-            engine, input.region_id, input.survey_id, input.batch_size
+            engine, input.region_id, input.survey_id, input.batch_size, input.fill_partial
         )
-        logger.info(f"Parcelas sin dirección encontradas: {len(parcelas)}")
+        logger.info(
+            f"AddressResolver [{input.region_id}] lang={language}: "
+            f"{len(parcelas)} parcelas a resolver"
+        )
 
         resueltas_logr = 0
         resueltas_google = 0
@@ -250,33 +312,40 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
 
         with engine.begin() as conn:
             for p in parcelas:
-                # ── Estrategia 1: interpolación IBGE (gratis) ──────────────
-                addr = _resolve_from_logradouros(engine, p["lat"], p["lng"], input.region_id)
-                if addr and addr.get("calle"):
-                    _update_parcela_direccion(conn, p["parcela_id"], addr)
-                    resueltas_logr += 1
-                    logger.debug(
-                        f"✓ IBGE {p['parcela_id'][:8]}… → "
-                        f"{addr.get('calle', '')} {addr.get('numero', '')}"
-                    )
-                    continue
+                preserve_calle = bool(p["calle_existente"])  # True = solo completar numero
 
-                # ── Estrategia 2: Google Maps API (fallback de pago) ───────
+                # ── Estrategia 1: interpolación IBGE (gratis, solo si no hay calle) ──
+                if not preserve_calle:
+                    addr = _resolve_from_logradouros(engine, p["lat"], p["lng"], input.region_id)
+                    if addr and addr.get("calle"):
+                        _update_parcela_direccion(conn, p["parcela_id"], addr, preserve_calle=False)
+                        resueltas_logr += 1
+                        logger.debug(
+                            f"✓ IBGE {p['parcela_id'][:8]}… → "
+                            f"{addr.get('calle', '')} {addr.get('numero', '')}"
+                        )
+                        continue
+
+                # ── Estrategia 2: Google Maps API ──────────────────────────
                 if not api_key:
                     sin_resultado += 1
                     continue
 
-                resultado = _reverse_geocode(p["lat"], p["lng"], api_key)
+                resultado = _reverse_geocode(p["lat"], p["lng"], api_key, language)
                 google_calls += 1
 
                 if resultado:
                     addr_g = _parse_components(resultado.get("address_components", []))
-                    if addr_g.get("calle"):
-                        _update_parcela_direccion(conn, p["parcela_id"], addr_g)
+                    # Para parciales: basta con encontrar numero; para completas: necesitamos calle
+                    useful = addr_g.get("numero") if preserve_calle else addr_g.get("calle")
+                    if useful:
+                        _update_parcela_direccion(conn, p["parcela_id"], addr_g, preserve_calle)
                         resueltas_google += 1
                         logger.debug(
-                            f"✓ Google {p['parcela_id'][:8]}… → "
-                            f"{addr_g.get('calle', '')} {addr_g.get('numero', '')}"
+                            f"✓ Google {'[parcial] ' if preserve_calle else ''}"
+                            f"{p['parcela_id'][:8]}… → "
+                            f"{p.get('calle_existente') or addr_g.get('calle', '')} "
+                            f"{addr_g.get('numero', '')}"
                         )
                     else:
                         sin_resultado += 1

@@ -1,64 +1,79 @@
 ---
 name: address-resolver
-description: "Resuelve direcciones faltantes en parcelas usando reverse geocoding de Google Maps API. Usar cuando parcelas_con_direccion / max(footprints,1) < 0.90 en el CoverageReport."
-version: 1.0.0
+description: "Resuelve direcciones faltantes o incompletas en parcelas de cualquier país usando Google Maps Geocoding API. Rellena calle y/o número a partir de las coordenadas. Funciona para Argentina, Brasil y cualquier otra zona. El idioma de respuesta se detecta automáticamente del region_id."
+version: 2.0.0
 author: Scrapitero
 platforms: [linux]
 metadata:
   hermes:
-    tags: [scrapitero, direcciones, geocoding, google-maps, catastro]
+    tags: [scrapitero, direcciones, geocoding, google-maps, catastro, argentina, brasil]
     category: scrapitero
 ---
 
-# Address Resolver
+# Address Resolver — Geocoding inverso para cualquier país
 
-Toma parcelas que tienen coordenadas pero no tienen dirección y las resuelve
-usando la API de Geocoding de Google Maps (reverse geocoding).
+Toma parcelas que tienen coordenadas pero sin dirección completa y las resuelve
+usando Google Maps Geocoding API (reverse geocoding).
+
+Cubre dos casos:
+- **Sin calle:** resuelve dirección completa (calle + número + barrio + municipio + CP)
+- **Con calle pero sin número:** solo completa el número y barrio (no sobreescribe la calle)
+
+El idioma de respuesta es automático según el `region_id`:
+- Termina en `-br` → `pt-BR`
+- Termina en `-ar` → `es-AR`
+- Otro → `es`
+
+Para Brasil, intenta primero interpolación IBGE (gratis) antes de llamar a Google.
 
 ## Cuándo usar
-Cuando `coverage-reporter` devuelve `parcelas_con_direccion / max(footprints,1) < 0.90`.
+- Cuando `coverage-reporter` devuelve `parcelas_con_direccion / parcelas < 0.90`
+- Cuando hay parcelas con calle pero sin número (dirección parcial)
+- Para cualquier país — no requiere datasets locales previos
 
 ## Requisito
 La variable `GOOGLE_MAPS_API_KEY` debe estar en `/opt/scrapitero/.env`.
+Costo: USD 0.005 por llamada (Google SKU: Geocoding).
 
 ## Comando
-**No instalar nada. El venv ya está listo.**
 ```bash
-echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>","batch_size":100}' |
-
-  python3 -m scrapitero.rpc.address_resolver
+python3 -m scrapitero.rpc.address_resolver <<< '{"region_id":"<REGION_ID>"}'
 ```
 
-Para procesar toda la región sin filtrar por survey:
+Con parámetros completos:
 ```bash
-echo '{"region_id":"vg-mt-br"}' |
-
-  python3 -m scrapitero.rpc.address_resolver
+python3 -m scrapitero.rpc.address_resolver <<< '{
+  "region_id": "ituzaingo-ba-ar",
+  "batch_size": 200,
+  "delay_ms": 50,
+  "fill_partial": true
+}'
 ```
 
 ## Output esperado
 ```json
 {
   "ok": true,
-  "parcelas_procesadas": 100,
-  "parcelas_resueltas": 93,
-  "parcelas_sin_resultado": 7,
-  "costo_estimado_usd": 0.5,
+  "parcelas_procesadas": 150,
+  "parcelas_resueltas": 138,
+  "parcelas_resueltas_logradouros": 40,
+  "parcelas_resueltas_google": 98,
+  "parcelas_sin_resultado": 12,
+  "costo_estimado_usd": 0.49,
   "error": null
 }
 ```
 
-## Parámetros opcionales
-- `batch_size` (default: 100): cantidad de parcelas a procesar por corrida
-- `delay_ms` (default: 50): milisegundos entre llamadas (evita superar quota)
+## Parámetros
+| Campo | Default | Descripción |
+|-------|---------|-------------|
+| `region_id` | ✅ | ID de la región |
+| `survey_id` | null | Filtrar por survey específico |
+| `batch_size` | 100 | Parcelas a procesar por corrida |
+| `delay_ms` | 50 | Milisegundos entre llamadas (evita quota) |
+| `fill_partial` | true | También rellenar parcelas con calle pero sin número |
 
 ## Si falla
-- `ok: false` con mensaje en `error`
-- Si el error menciona `GOOGLE_MAPS_API_KEY`: agregar la key a `/opt/scrapitero/.env`
-- Si el error es de quota: reducir `batch_size` o aumentar `delay_ms`
-- Si `parcelas_procesadas == 0`: verificar que existan parcelas con coordenadas pero sin dirección
-
-## Importante
-- Después de correr, verificar con `coverage-reporter` que `parcelas_con_direccion` aumentó
-- Costo aproximado: USD 0.005 por llamada (Google SKU: Geocoding)
-- Las direcciones se guardan en portugués (language=pt-BR) por estar en Brasil
+- `GOOGLE_MAPS_API_KEY` no definida → agregar a `/opt/scrapitero/.env`
+- Quota excedida → reducir `batch_size` o aumentar `delay_ms`
+- `parcelas_procesadas == 0` → no hay parcelas con coordenadas y dirección incompleta
