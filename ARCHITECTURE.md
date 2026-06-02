@@ -129,6 +129,41 @@ Todos en `src/scrapitero/agents/`. Interfaz: `run(input: XInput) -> XOutput`. RP
 **Output:** `parcelas_insertadas`
 **Cuándo:** parcelas de Buenos Aires Province via WFS público (sin autenticación)
 
+### SaltaCatastroFetcher
+**Input:** `region_id`, `survey_id?`, `fuente` ("auto"|"capital"|"provincia"), `batch_size`, `delay_ms`
+**Output:** `parcelas_insertadas`, `parcelas_actualizadas`, `fuente_usada`, `bbox_usado`
+**Cuándo:** primer agente del flujo Salta. Detecta fuente por centroide de la zona.
+**Capital:** WFS IDEMSA (geocloud.municipalidadsalta.gob.ar) → `public:catastros_Ene2025`, ~125k parcelas
+**Provincial:** WFS IDESA (geoportal.idesa.gob.ar) → `geonode:fc_parcelas_v20`
+**Sin autenticación.** Mapea VINCULACIO→nomenclatura_catastral, CATASTRO→cca_code, área vía pyproj UTM20S.
+
+### SaltaZonificacionFetcher
+**Input:** `region_id`, `survey_id?`, `overwrite`
+**Output:** `parcelas_clasificadas`, `parcelas_sin_cobertura`, `distribucion`
+**Cuándo:** clasifica `uso_principal` urbano por zona CPUA 2019 (IDEMSA WFS, 178 polígonos). Solo Capital.
+**Cómo:** STRtree espacial centroide-en-polígono. R*→residencial, NC*→comercial, M*/AC*→mixto, PI→industrial, AGR→vacante, AE*→equipamiento.
+
+### SaltaRegistroFetcher
+**Input:** `region_id`, `survey_id?`, `overwrite`, `batch_size`
+**Output:** `parcelas_clasificadas`, `distribucion_tipo`, `distribucion_uso`, `sin_match`
+**Cuándo:** registro parcelario SIGSA (ArcGIS REST público, toda la provincia). Query por VINCULACION.
+**Cómo:** TIPO RURAL→vacante, CLUB DE CAMPO→residencial, URBANO→defer. SSLContext con OP_LEGACY_SERVER_CONNECT.
+**Complementa CPUA:** única señal de uso para el interior provincial.
+
+### SaltaRentasFetcher
+**Input:** `region_id`, `survey_id?`, `overwrite`, `delay_ms`, `batch_size`, `headless`
+**Output:** `baldios_detectados`, `edificados`, `sin_match`, `errores`
+**Cuándo:** detectar baldíos en Capital. DGRM rentas, vía Playwright (reCAPTCHA v3, site key `6LcO31Ep...`).
+**Cómo:** POST `/api/inmobiliario/login-inmobiliario` por cca_code. `valorEdificado`<1 → uso='vacante'. Throttle + Telegram.
+**Autoritativo para baldíos:** corrige al CPUA (que clasifica por zona, no detecta lotes vacíos).
+
+> **Fuentes uso/UF investigadas (jun 2026) — ver memoria `project_salta_fuentes_uso_uf`:**
+> Uso+UF exactos por parcela solo en inmuebles.gov.ar (suscripción paga presencial) o SIGSA
+> Extranet (creds Enterprise, signup cerrado). Credenciales ArcGIS Online del usuario son de
+> otra org, no federan. OVI Inmuebles del SIGSA tiene los campos pero solo ~45 puntos útiles
+> en toda la provincia. Gratuito y con cobertura: CPUA (uso urbano por zona, Capital) +
+> registro SIGSA (TIPO provincial).
+
 ### ARBACartoFetcher
 **Input:** `region_id`, `survey_id`, `jsessionid`, `bbox?`
 **Output:** `parcelas_insertadas`, `parcelas_actualizadas`

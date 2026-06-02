@@ -46,6 +46,10 @@ echo '<JSON_INPUT>' | PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapiter
 |--------|-----|---------------|
 | ARBACartoFetcher | `arba_carto_fetcher` | **PBA: SIEMPRE primero.** Requiere JSESSIONID. Si falla login → Telegram al usuario |
 | ARBACadastralFetcher | `arba_cadastral_fetcher` | PBA alternativo: WFS público de ARBA, sin autenticación |
+| SaltaCatastroFetcher | `salta_catastro_fetcher` | **Salta: SIEMPRE primero.** WFS público sin autenticación. Capital → IDEMSA (~125k parcelas). Interior → IDESA provincial. Selección automática por centroide de zona. |
+| SaltaZonificacionFetcher | `salta_zonificacion_fetcher` | Después de SaltaCatastroFetcher. Clasifica uso_principal por CPUA 2019 (residencial/comercial/mixto/industrial/equipamiento/vacante). Cubre ciudad de Salta Capital. |
+| SaltaRegistroFetcher | `salta_registro_fetcher` | Después de SaltaCatastroFetcher. Registro SIGSA público (toda la provincia). TIPO: RURAL→vacante, CLUB DE CAMPO→residencial, URBANO→defer a CPUA. Única señal de uso para el interior. |
+| SaltaRentasFetcher | `salta_rentas_fetcher` | Después de SaltaZonificacionFetcher. DGRM rentas (Capital, vía Playwright por reCAPTCHA). valorEdificado≈0 → vacante. Detecta baldíos por parcela; corrige al CPUA. Lento + Telegram. |
 
 ### Enriquecimiento y resolución
 | Agente | RPC | Cuándo usarlo |
@@ -78,6 +82,36 @@ echo '<JSON_INPUT>' | PYTHONPATH=/opt/scrapitero/.hermes-packages:/opt/scrapiter
 ```
 
 **Regla VG:** SmartGISFetcher SIEMPRE primero. El `CODIGO_IMOVEL_AGRUPADO` de SmartGIS = `cca_code` en DB = número para descargar BCI en `vg.abaco.com.br`. La zona se respeta automáticamente desde `regions.zone_geojson`.
+
+## Flujo para Salta (Argentina)
+
+```
+1. GeoJSONZoneFetcher           → crear región con zone_geojson (Web UI o RPC)
+2. SaltaCatastroFetcher         → parcelas con geometría desde WFS público (capital o interior)
+3. OSMBuildingFetcher           → footprints de edificios
+4. AddressResolver              → completar direcciones (directo Google Maps, es-AR)
+5. SaltaRegistroFetcher         → TIPO provincial (rural/club de campo → uso)
+6. SaltaZonificacionFetcher     → clasificar uso_principal urbano por CPUA 2019 (Capital)
+7. SaltaRentasFetcher           → corregir baldíos por valorEdificado (Capital)
+8. RelevamientoCSV              → exportar resultado
+```
+
+**UF mínimas por uso (Salta):** al clasificar se computa `unidades_funcionales_estimadas`:
+residencial → mínimo 1 UF (una vivienda mínima por parcela habitada); vacante/baldío → 0 UF
+(terreno vacío, sin unidad). Lo aplica SaltaZonificacionFetcher; SaltaRentasFetcher lo
+corrige a 0 cuando detecta baldío por `valorEdificado`.
+
+**Uso/UF exactos por parcela:** no hay fuente gratuita con cobertura completa. Ver
+memoria `project_salta_fuentes_uso_uf`. Lo gratuito: uso por zona (CPUA) + TIPO
+provincial (registro SIGSA) + baldío/edificado por parcela (rentas DGRM).
+**Número de UF/PH: ninguna fuente gratuita lo da** — el catastro modela cada UF como
+clave independiente; el agrupamiento solo está en la cédula paga de inmuebles.gov.ar.
+
+**Regla Salta:** SaltaCatastroFetcher detecta automáticamente la fuente según el centroide de la zona:
+- Ciudad de Salta Capital → IDEMSA (geocloud.municipalidadsalta.gob.ar), ~125k parcelas, EPSG:4326, sin auth
+- Interior provincial → IDESA (geoportal.idesa.gob.ar), cobertura provincial, puede ser más lento
+
+---
 
 ## Flujo para Buenos Aires Province (Argentina)
 

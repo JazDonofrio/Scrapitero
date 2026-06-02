@@ -38,7 +38,11 @@ Con el output decidís qué ejecutar:
 | Condición | Skill a usar |
 |---|---|
 | `parcelas == 0` y país BRA | `smartgis-fetcher` |
-| `parcelas == 0` y país AR | `arba-carto-fetcher` (si JSESSIONID disponible) o `arba-cadastral-fetcher` |
+| `parcelas == 0` y país AR y provincia Buenos Aires | `arba-carto-fetcher` (si JSESSIONID disponible) o `arba-cadastral-fetcher` |
+| `parcelas == 0` y país AR y provincia Salta | `salta-catastro-fetcher` |
+| `parcelas > 0` y Salta interior y `uso_principal` null | `salta-registro-fetcher` (marca rural/club de campo) |
+| `parcelas > 0` y Salta Capital y `uso_principal` null | `salta-zonificacion-fetcher` (uso urbano por CPUA) |
+| `parcelas > 0` y Salta Capital, detectar baldíos | `salta-rentas-fetcher` (valorEdificado≈0 → vacante) |
 | `parcelas == 0` y otro país | `osm-building-fetcher` |
 | `parcelas > 0` y hay cca_codes sin PDF | `varzea-bci-fetcher` |
 | PDFs descargados pero parcelas sin `uso_principal` | `bci-parser` |
@@ -89,6 +93,10 @@ Skills disponibles:
 - `scrapitero.rpc.osm_building_fetcher` → `{"region_id":"...","survey_id":"...","bbox_south":...,"bbox_west":...,"bbox_north":...,"bbox_east":...}`
 - `scrapitero.rpc.arba_carto_fetcher` → ver skill arba-carto-fetcher
 - `scrapitero.rpc.arba_cadastral_fetcher` → `{"region_id":"...","survey_id":"..."}`
+- `scrapitero.rpc.salta_catastro_fetcher` → `{"region_id":"...","survey_id":"...","fuente":"auto"}` (fuente: "auto"|"capital"|"provincia")
+- `scrapitero.rpc.salta_zonificacion_fetcher` → `{"region_id":"...","survey_id":"..."}` (classifica uso por CPUA; `overwrite:true` para reclasificar)
+- `scrapitero.rpc.salta_registro_fetcher` → `{"region_id":"...","survey_id":"..."}` (TIPO registro SIGSA; rural→vacante, club de campo→residencial)
+- `scrapitero.rpc.salta_rentas_fetcher` → `{"region_id":"...","survey_id":"..."}` (baldíos por valorEdificado DGRM; lento, vía Playwright)
 - `scrapitero.rpc.ibge_logradouros_fetcher` → `{"region_id":"...","municipio_codigo":"...","estado_uf":"..."}`
 - `scrapitero.rpc.address_resolver` → `{"region_id":"...","survey_id":"...","batch_size":200}`
 - `scrapitero.rpc.survey_step_update` → `{"survey_id":"...","paso":"...","resultado":{...}}`
