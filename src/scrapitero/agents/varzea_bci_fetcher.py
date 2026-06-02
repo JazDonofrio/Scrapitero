@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import random
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -169,28 +170,50 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
             "const p = navigator.__proto__; delete p.webdriver; navigator.__proto__ = p;"
         )
 
-        # Interceptores: respuesta HTTP y evento de descarga
         current: dict = {"codigo": None, "ok": False}
 
+        # ── Estrategia 1: context.route() — intercepta ANTES de que el browser
+        # procese la respuesta. route.fetch() descarga el body completo al proceso
+        # Python; await resp.body() lee desde ese buffer local (inmediato).
+        # Distinto a on_response donde response.body() falla porque el recurso CDP
+        # se libera en Chromium antes de que el await pueda leerlo.
+        async def handle_pdf_route(route, request):
+            try:
+                resp = await route.fetch()
+                ct = resp.headers.get("content-type", "")
+                if "application/pdf" in ct.lower():
+                    body = await resp.body()
+                    if body and len(body) > 500 and current["codigo"] is not None and not current["ok"]:
+                        dest = Path(pdf_dir) / f"reporte_{current['codigo']}.pdf"
+                        dest.write_bytes(body)
+                        current["ok"] = True
+                        logger.info(
+                            f"    [route] Guardado reporte_{current['codigo']}.pdf "
+                            f"({len(body)} bytes) — {request.url[-60:]}"
+                        )
+                await route.fulfill(response=resp)
+            except Exception as e:
+                logger.warning(f"    [route] Error en {request.url[-60:]}: {e}")
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        # Interceptar el servlet BCI y cualquier PDF de este dominio
+        await context.route(re.compile(r"arrimprimebci"), handle_pdf_route)
+        await context.route(re.compile(r"vg\.abaco\.com\.br.*\.pdf"), handle_pdf_route)
+
+        # ── Estrategia 2: on_response — solo para logging y registro de URL
         async def on_response(response):
             ct = response.headers.get("content-type", "").lower()
             url = response.url
-            # Log todas las respuestas no-estáticas para diagnóstico
             if not any(ext in url for ext in (".js", ".css", ".png", ".gif", ".ico")):
                 logger.info(f"    [resp] {response.status} {ct[:40]} {url[-60:]}")
-            if "application/pdf" in ct or "pdf" in url.lower():
-                try:
-                    pdf_bytes = await response.body()
-                    if len(pdf_bytes) > 500 and current["codigo"] is not None:
-                        dest = Path(pdf_dir) / f"reporte_{current['codigo']}.pdf"
-                        dest.write_bytes(pdf_bytes)
-                        current["ok"] = True
-                        logger.info(f"    [PDF-resp] Guardado {dest.name} ({len(pdf_bytes)} bytes)")
-                except Exception as e:
-                    logger.warning(f"    [PDF-resp] Error leyendo body: {e}")
 
+        # ── Estrategia 3: on_download — cuando el servidor envía
+        # Content-Disposition: attachment (el browser no renderiza inline)
         async def on_download(download):
-            if current["codigo"] is not None:
+            if current["codigo"] is not None and not current["ok"]:
                 dest = Path(pdf_dir) / f"reporte_{current['codigo']}.pdf"
                 try:
                     await download.save_as(str(dest))
@@ -254,7 +277,8 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
                         await popup_page.wait_for_load_state("load", timeout=20000)
                     except PlaywrightTimeoutError:
                         pass
-                    await asyncio.sleep(3)  # dar tiempo al interceptor de respuesta/descarga
+                    # Dar tiempo a handle_pdf_route y on_download para completar
+                    await asyncio.sleep(2)
                     await popup_page.close()
                 except PlaywrightTimeoutError:
                     logger.info(f"  Sin popup — esperando networkidle en página principal")

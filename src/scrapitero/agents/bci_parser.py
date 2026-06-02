@@ -207,10 +207,44 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
 def run(input: BCIParserInput) -> BCIParserOutput:
     parcelas = _get_parcelas(input.region_id, input.batch_size)
     if not parcelas:
+        logger.warning(
+            f"BCIParser: región '{input.region_id}' no tiene parcelas con cca_code "
+            f"y fuente_parcela=smartgis_vg/catastro — ¿SmartGISFetcher fue ejecutado?"
+        )
         return BCIParserOutput(ok=True, error="Sin parcelas para parsear en esta región")
 
-    logger.info(f"BCIParser: {len(parcelas)} parcelas a procesar en '{input.region_id}'")
+    logger.info(f"BCIParser: {len(parcelas)} parcelas con cca_code en '{input.region_id}'")
     pdf_dir = Path(input.pdf_dir)
+
+    # Diagnóstico previo: cuántos PDFs existen antes de empezar
+    codigos_ok = [int(cca.strip()) for _, cca in parcelas
+                  if cca and cca.strip().isdigit()
+                  and (pdf_dir / f"reporte_{int(cca.strip())}.pdf").exists()]
+    codigos_faltantes = [int(cca.strip()) for _, cca in parcelas
+                         if cca and cca.strip().isdigit()
+                         and not (pdf_dir / f"reporte_{int(cca.strip())}.pdf").exists()]
+    logger.info(
+        f"BCIParser pre-check: {len(codigos_ok)} PDFs disponibles, "
+        f"{len(codigos_faltantes)} sin PDF en '{pdf_dir}'"
+    )
+    if codigos_faltantes:
+        sample = codigos_faltantes[:10]
+        logger.warning(
+            f"BCIParser: PDFs faltantes (muestra {len(sample)}/{len(codigos_faltantes)}): "
+            f"{sample} — ¿VGBCIFetcher fue ejecutado para '{input.region_id}'?"
+        )
+    if not codigos_ok:
+        msg = (
+            f"BCIParser: NINGÚN PDF disponible para los {len(parcelas)} cca_codes de "
+            f"'{input.region_id}'. Ejecutar VGBCIFetcher primero."
+        )
+        logger.error(msg)
+        return BCIParserOutput(
+            ok=False,
+            procesadas=0,
+            sin_pdf=len(parcelas),
+            error=msg,
+        )
 
     procesadas = actualizadas = sin_pdf = errores = 0
 
@@ -219,11 +253,13 @@ def run(input: BCIParserInput) -> BCIParserOutput:
             codigo = int(cca_code.strip())
         except (ValueError, AttributeError):
             errores += 1
+            logger.warning(f"BCIParser: cca_code inválido '{cca_code}' para parcela {parcela_id}")
             continue
 
         pdf_path = pdf_dir / f"reporte_{codigo}.pdf"
         if not pdf_path.exists():
             sin_pdf += 1
+            logger.debug(f"BCIParser: sin PDF para cca_code={codigo} (reporte_{codigo}.pdf)")
             continue
 
         procesadas += 1
@@ -232,20 +268,29 @@ def run(input: BCIParserInput) -> BCIParserOutput:
             data = _parse_bci(text)
             _update_parcela(parcela_id, data)
             actualizadas += 1
+            logger.debug(
+                f"BCIParser: {codigo} → uso={data['uso_principal']} "
+                f"uf_viv={data['uf_vivienda']} uf_com={data['uf_comercio']}"
+            )
 
             if procesadas % 50 == 0:
                 logger.info(
                     f"BCIParser: {procesadas}/{len(parcelas)} — "
-                    f"{actualizadas} actualizadas, {errores} errores"
+                    f"{actualizadas} actualizadas, {sin_pdf} sin PDF, {errores} errores"
                 )
         except Exception as e:
             errores += 1
-            logger.warning(f"  Error parseando reporte_{codigo}.pdf: {e}")
+            logger.error(f"BCIParser: error parseando reporte_{codigo}.pdf: {e}", exc_info=True)
 
     logger.info(
-        f"BCIParser completo: {actualizadas} actualizadas, "
+        f"BCIParser completo '{input.region_id}': "
+        f"{procesadas} procesadas, {actualizadas} actualizadas, "
         f"{sin_pdf} sin PDF, {errores} errores"
     )
+    if errores > 0:
+        logger.warning(
+            f"BCIParser: {errores} errores de parseo — revisar PDFs individuales con logs DEBUG"
+        )
     return BCIParserOutput(
         ok=True,
         procesadas=procesadas,
