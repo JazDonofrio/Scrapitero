@@ -124,6 +124,14 @@ class Parcela(Base):
     footprints_count: Mapped[int] = mapped_column(Integer, default=0)
     pisos_estimados_max: Mapped[Optional[int]] = mapped_column(Integer)
     unidades_funcionales_estimadas: Mapped[Optional[int]] = mapped_column(Integer)
+    uf_vivienda: Mapped[Optional[int]] = mapped_column(Integer)   # migración 004
+    uf_comercio: Mapped[Optional[int]] = mapped_column(Integer)   # migración 004
+    uf_fuente: Mapped[Optional[str]] = mapped_column(String(20))  # bci/osm/proxy/uso (migración 008)
+
+    # Catastro (migración 003)
+    cca_code: Mapped[Optional[str]] = mapped_column(String(100))
+    nomenclatura_catastral: Mapped[Optional[str]] = mapped_column(String(100))
+    partida_inmobiliaria: Mapped[Optional[str]] = mapped_column(String(100))
 
     # Auditoría
     fuente_parcela: Mapped[Optional[str]] = mapped_column(String(30))
@@ -152,7 +160,9 @@ class Edificio(Base):
     footprint: Mapped[Optional[object]] = mapped_column(Geometry("POLYGON", srid=4326))
     centroid: Mapped[Optional[object]] = mapped_column(Geometry("POINT", srid=4326))
     area_m2: Mapped[Optional[float]] = mapped_column(Float)
-    pisos_estimados: Mapped[Optional[int]] = mapped_column(Integer)
+    pisos_estimados: Mapped[Optional[int]] = mapped_column(Integer)  # building:levels (OSM)
+    tipo_osm: Mapped[Optional[str]] = mapped_column(String(50))      # valor de building=* (migración 007)
+    unidades_osm: Mapped[Optional[int]] = mapped_column(Integer)     # building:flats/addr:units (migración 007)
     source: Mapped[Optional[str]] = mapped_column(String(30))
     # "ms_global" | "google_open" | "osm"
     external_id: Mapped[Optional[str]] = mapped_column(String(100))

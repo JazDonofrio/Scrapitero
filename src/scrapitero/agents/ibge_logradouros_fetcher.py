@@ -25,7 +25,7 @@ from typing import Optional
 import geopandas as gpd
 import httpx
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
@@ -61,7 +61,22 @@ COL_MAP = {
 class LogradourosInput(BaseModel):
     region_id: str                  # "vg-mt-br"
     municipio_codigo: str           # "5108402"
-    estado_uf: str                  # "mt"
+    estado_uf: Optional[str] = None  # "mt" — si falta, se deriva de municipio_codigo
+
+    @model_validator(mode="after")
+    def _derivar_estado_uf(self) -> "LogradourosInput":
+        """Si no viene estado_uf, lo deriva del prefijo del código de município IBGE."""
+        if not self.estado_uf:
+            from scrapitero.agents.ibge_census_fetcher import _UF_POR_CODIGO
+            prefijo = (self.municipio_codigo or "").strip()[:2]
+            uf = _UF_POR_CODIGO.get(prefijo)
+            if not uf:
+                raise ValueError(
+                    f"falta estado_uf y no se pudo derivar de municipio_codigo="
+                    f"{self.municipio_codigo!r} (prefijo {prefijo!r} no es una UF IBGE válida)"
+                )
+            self.estado_uf = uf
+        return self
 
 
 class LogradourosOutput(BaseModel):

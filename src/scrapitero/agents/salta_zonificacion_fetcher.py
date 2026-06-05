@@ -185,7 +185,9 @@ def _update_batch(updates: list[tuple[str, str]]) -> None:
     """Actualiza uso_principal en lote. updates = [(parcela_id, uso), ...]
 
     Regla de UF mínimas:
-      - residencial → al menos 1 UF (una vivienda mínima por parcela habitada)
+      - residencial → siempre al menos 1 UF de vivienda (una vivienda mínima por
+                      parcela). Setea tanto unidades_funcionales_estimadas como
+                      uf_vivienda con GREATEST(…, 1) para no pisar un conteo real mayor.
       - vacante     → 0 UF (terreno baldío, sin unidad)
       - resto       → no se toca (lo resuelve otra fuente)
     """
@@ -193,14 +195,22 @@ def _update_batch(updates: list[tuple[str, str]]) -> None:
         return
     engine = get_engine()
     with engine.begin() as conn:
+        # CAST(:uso AS text) en todas las apariciones: sin el cast, Postgres deduce
+        # el parámetro como varchar (asignación) y text (comparación) → AmbiguousParameter.
         conn.execute(text("""
             UPDATE parcelas SET
-                uso_principal = :uso,
+                uso_principal = CAST(:uso AS text),
                 unidades_funcionales_estimadas = CASE
-                    WHEN :uso = 'residencial'
+                    WHEN CAST(:uso AS text) = 'residencial'
                         THEN GREATEST(COALESCE(unidades_funcionales_estimadas, 0), 1)
-                    WHEN :uso = 'vacante' THEN 0
+                    WHEN CAST(:uso AS text) = 'vacante' THEN 0
                     ELSE unidades_funcionales_estimadas
+                END,
+                uf_vivienda = CASE
+                    WHEN CAST(:uso AS text) = 'residencial'
+                        THEN GREATEST(COALESCE(uf_vivienda, 0), 1)
+                    WHEN CAST(:uso AS text) = 'vacante' THEN 0
+                    ELSE uf_vivienda
                 END
             WHERE parcela_id = :pid
         """), [{"pid": pid, "uso": uso} for pid, uso in updates])

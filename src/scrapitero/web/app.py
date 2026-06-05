@@ -27,6 +27,21 @@ from scrapitero.db.engine import get_engine
 app = FastAPI(title="Scrapitero")
 STATIC_DIR = Path(__file__).parent / "static"
 
+# FOS (Factor de Ocupación del Suelo): fracción máxima del terreno que puede ocupar
+# la huella del edificio. Se usa para estimar pisos: una huella real ≤ FOS·terreno,
+# por lo que pisos ≥ construida/(FOS·terreno) → tomamos el ceil como mínimo de plantas.
+FOS_DEFAULT = 0.6
+
+
+def _pisos_estimados(area_terreno: Optional[float], area_construida: Optional[float],
+                     fos: float = FOS_DEFAULT) -> Optional[int]:
+    """Estima nº mínimo de pisos: ceil(construida / (FOS·terreno)). None si falta data."""
+    if not area_terreno or not area_construida or area_terreno <= 0 or fos <= 0:
+        return None
+    import math
+    pisos = math.ceil(area_construida / (fos * area_terreno))
+    return max(1, pisos)
+
 HERMES_WEBHOOK_URL = os.getenv("HERMES_WEBHOOK_URL", "http://localhost:8644/webhooks/relevar")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
@@ -227,6 +242,7 @@ async def list_surveys() -> list[dict]:
                 COUNT(DISTINCT p.parcela_id)                                       AS total_parcelas,
                 COALESCE(SUM(p.uf_vivienda), 0)                                    AS total_uf_vivienda,
                 COALESCE(SUM(p.uf_comercio), 0)                                    AS total_uf_comercio,
+                COALESCE(BOOL_OR(p.uf_fuente IS NOT NULL AND p.uf_fuente <> 'bci'), false) AS uf_estimado,
                 COUNT(DISTINCT CASE WHEN p.calle IS NOT NULL THEN p.parcela_id END) AS con_direccion,
                 SUM(p.area_m2_terreno)                                             AS area_total_m2,
                 COUNT(DISTINCT CASE WHEN p.cca_code IS NOT NULL THEN p.parcela_id END) AS con_inscripcion
@@ -260,9 +276,10 @@ async def list_surveys() -> list[dict]:
             "total_parcelas": int(r[9] or 0),
             "total_uf_vivienda": int(r[10] or 0),
             "total_uf_comercio": int(r[11] or 0),
-            "con_direccion": int(r[12] or 0),
-            "area_total_m2": float(r[13]) if r[13] else None,
-            "con_inscripcion": int(r[14] or 0),
+            "uf_estimado": bool(r[12]),
+            "con_direccion": int(r[13] or 0),
+            "area_total_m2": float(r[14]) if r[14] else None,
+            "con_inscripcion": int(r[15] or 0),
         })
     return result
 
@@ -348,7 +365,8 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    uso_principal, uf_vivienda, uf_comercio,
                    unidades_funcionales_estimadas,
                    calle, numero, barrio, cca_code,
-                   area_m2_terreno, area_m2_construida
+                   area_m2_terreno, area_m2_construida,
+                   uf_fuente
             FROM parcelas
             WHERE survey_id = :sid
               AND centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL
@@ -364,6 +382,12 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "cca": r[9] or "",
             "area_t": round(float(r[10]), 1) if r[10] else None,
             "area_c": round(float(r[11]), 1) if r[11] else None,
+            "uf_fuente": r[12] or "",
+            "uf_estimado": bool(r[12]) and r[12] != "bci",
+            "pisos": _pisos_estimados(
+                float(r[10]) if r[10] else None,
+                float(r[11]) if r[11] else None,
+            ),
         }
         for r in rows
     ]
@@ -469,7 +493,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 fuente_parcela,
                 direccion_source,
                 centroid_lat,
-                centroid_lng
+                centroid_lng,
+                uf_fuente
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -489,7 +514,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         w.writerow([
             "Inscripción", "Setor-Quadra-Lote", "Calle", "Número",
             "Complemento", "Bairro", "Municipio", "CEP",
-            "Uso", "UF Vivienda", "UF Comercio", "Total UF",
+            "Uso", "UF Vivienda", "UF Comercio", "Total UF", "UF Fuente",
             "Área Terreno m²", "Área Construida m²", "Pisos",
             "Matrícula", "Fuente", "Fuente dirección",
             "Lat", "Lng",
@@ -500,7 +525,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[2] or "", r[3] or "", r[4] or "",
                 r[5] or "", r[6] or "", r[7] or "",
                 r[8] or "", r[9] or 0, r[10] or 0,
-                r[11] or 0,
+                r[11] or 0, r[20] or "",
                 f"{r[12]:.2f}" if r[12] else "",
                 f"{r[13]:.2f}" if r[13] else "",
                 r[14] or "",

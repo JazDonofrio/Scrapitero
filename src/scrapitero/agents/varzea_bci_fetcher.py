@@ -36,6 +36,45 @@ from scrapitero.db.engine import get_engine
 
 BASE_URL = "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55"
 
+# Directorio de PDFs BCI — fuente única compartida con BCIParser. ABSOLUTO y el MISMO
+# para ambos (este agente escribe, BCIParser lee). Configurable con SCRAPITERO_PDF_DIR.
+# Antes el default era relativo ("pdf_downloads") → dependía del CWD y, corriendo en el
+# container Hermes, escribía en otra carpeta que la que leía el parser (inconsistencia).
+DEFAULT_PDF_DIR = os.environ.get("SCRAPITERO_PDF_DIR", "/opt/scrapitero/pdf_downloads")
+
+# Subcarpeta por ciudad dentro de pdf_dir: los PDFs BCI se guardan en
+# pdf_dir/<ciudad>/reporte_*.pdf para poder reusarlos la próxima vez que se releve la
+# misma ciudad (zonas distintas comparten parcelas). vg.abaco.com.br es exclusivo de
+# Várzea Grande, así que "varzea-grande" es el default seguro cuando la región no tiene
+# municipio_codigo cargado.
+_MUNICIPIO_SLUG = {"5108402": "varzea-grande"}
+
+
+def city_slug(region_id: str) -> str:
+    """Slug estable de ciudad para nombrar la subcarpeta de PDFs. Estable por ciudad
+    (no por zona) para que el reuso funcione entre relevamientos."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT municipio_codigo FROM regions WHERE region_id = :r"
+            ), {"r": region_id}).fetchone()
+        if row and row[0]:
+            code = str(row[0]).strip()
+            return _MUNICIPIO_SLUG.get(code, f"municipio-{code}")
+    except Exception as e:
+        logger.warning(f"city_slug: no se pudo resolver la ciudad de '{region_id}': {e}")
+    return "varzea-grande"
+
+
+def resolve_city_pdf_dir(base_pdf_dir: str, region_id: str) -> Path:
+    """Devuelve base_pdf_dir/<ciudad>/ (creándola si no existe). VGBCIFetcher (escribe) y
+    BCIParser (lee) la usan ambos, así escriben y leen en la MISMA carpeta por ciudad."""
+    d = Path(base_pdf_dir) / city_slug(region_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # Stop flags por region_id
 _stop_regions: set[str] = set()
 
@@ -53,7 +92,7 @@ USER_AGENT = (
 class BCIInput(BaseModel):
     region_id: str
     survey_id: Optional[str] = None
-    pdf_dir: str = "pdf_downloads"
+    pdf_dir: str = DEFAULT_PDF_DIR
     batch_size: int = 0            # 0 = todos los pendientes
     min_delay_secs: float = 1.5
     max_delay_secs: float = 6.0
@@ -346,8 +385,10 @@ def run(input: BCIInput) -> BCIOutput:
     if not codigos:
         return BCIOutput(ok=True, error="Sin parcelas con cca_code en la zona")
 
-    # Contar cuántos PDF ya existen (sin arrancar el browser)
-    pdf_dir = Path(input.pdf_dir)
+    # Contar cuántos PDF ya existen (sin arrancar el browser).
+    # pdf_dir efectivo = base/<ciudad>/ para reusar entre relevamientos de la misma ciudad.
+    pdf_dir = resolve_city_pdf_dir(input.pdf_dir, input.region_id)
+    logger.info(f"BCI Fetcher: usando carpeta por ciudad → {pdf_dir}")
     codigos_faltantes = [c for c in codigos
                          if not (pdf_dir / f"reporte_{c}.pdf").exists()]
     ya_existentes_previo = len(codigos) - len(codigos_faltantes)

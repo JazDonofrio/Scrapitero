@@ -65,6 +65,7 @@
     .kpi { text-align: right; }
     .kpi-val { font-size: 1.15rem; font-weight: 800; color: #0f172a; line-height: 1; }
     .kpi-lbl { font-size: .65rem; text-transform: uppercase; letter-spacing: .5px; color: #9ca3af; margin-top: .15rem; }
+    .est-badge { display: inline-block; background: #fef3c7; color: #92400e; font-size: .58rem; font-weight: 700; text-transform: none; letter-spacing: 0; padding: .05rem .3rem; border-radius: 6px; vertical-align: middle; }
     .status-pill { padding: .25rem .65rem; border-radius: 20px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
     .s-running  { background: #fef3c7; color: #92400e; }
     .s-stopping { background: #ffedd5; color: #9a3412; }
@@ -116,12 +117,23 @@
       border-radius: 50%; margin-right: 5px; vertical-align: middle;
     }
 
+    /* Label con la cantidad de UF totales al lado del marcador */
+    .uf-label {
+      background: rgba(15,23,42,.85); color: #fbbf24;
+      border: none; border-radius: 4px; padding: 0 4px;
+      font-size: .65rem; font-weight: 700; box-shadow: none;
+      white-space: nowrap;
+    }
+    .uf-label::before { display: none; }   /* sin flechita de tooltip */
+
     /* Mapa en fullscreen (sobre el wrapper) */
     #mapwrap-*:-webkit-full-screen,
     .detail-map:-webkit-full-screen { width: 100vw !important; height: 100vh !important; }
     .detail-map:fullscreen           { width: 100vw !important; height: 100vh !important; }
     .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
     .detail-kpi { background: #f8fafc; border-radius: 9px; padding: .85rem 1rem; }
+    .detail-kpi-help { cursor: help; }
+    .detail-kpi-help .detail-kpi-lbl { border-bottom: 1px dotted #cbd5e1; display: inline-block; }
     .detail-kpi-val { font-size: 1.6rem; font-weight: 800; color: #0f172a; line-height: 1; }
     .detail-kpi-lbl { font-size: .72rem; color: #6b7280; margin-top: .25rem; }
     .progress-row { margin-top: .75rem; }
@@ -208,7 +220,8 @@
     .alog-err  { color: #fca5a5; }
     .alog-warn { color: #fcd34d; }
     .alog-info { color: #bae6fd; }
-    .alog-synth { color: #94a3b8; }
+    .alog-synth { color: #cbd5e1; }
+    .alog-run  { color: #38bdf8; font-weight: 700; }
     .alog-empty { color: #64748b; font-style: italic; }
 
     @media (max-width: 720px) {
@@ -288,6 +301,25 @@ const surveyCache = {}; // sid → objeto survey completo (pipeline, status, etc
 const fmt = n => (n == null || n === '') ? '—' : Number(n).toLocaleString('es-AR');
 const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('es-AR', {day:'2-digit',month:'short',year:'numeric'}) : '';
 const statusLabel = s => ({running:'En curso',stopping:'Deteniendo…',stopped:'Detenido',partial:'Parcial',completed:'Completado',failed:'Error'}[s] || s);
+
+/* ── UF: cómo se estimó (tooltips) ─────────────────────────────── */
+// Texto que se muestra al pasar el mouse sobre los KPI de UF del survey.
+const UF_KPI_TOOLTIP = 'UF estimada (no es un conteo exacto). Se calcula por parcela: '
+  + '1) conteo real de OSM (building:flats) si existe; '
+  + '2) si no, proxy geométrico = área del footprint × pisos ÷ tamaño típico '
+  + '(vivienda 80 m², comercio 50 m²), solo para edificios en altura; '
+  + '3) si la parcela no tiene edificios en OSM, mínimo según su uso. '
+  + 'Pasá el cursor sobre cada parcela del mapa para ver el método usado.';
+// Descripción por fuente de UF (popup de cada parcela).
+const UF_FUENTE_DESC = {
+  bci:   'Conteo exacto extraído del PDF BCI oficial (Brasil).',
+  osm:   'Conteo real declarado en OpenStreetMap (building:flats / addr:units).',
+  proxy: 'Estimado por geometría: área del footprint × pisos ÷ tamaño típico '
+       + '(vivienda 80 m², comercio 50 m²). Solo se subdivide la huella en edificios '
+       + 'de 2+ pisos o tipo apartments; un edificio de 1 planta cuenta como 1 unidad.',
+  uso:   'Estimado por uso: la parcela no tiene edificios en OpenStreetMap, '
+       + 'se asignó el mínimo según su uso (residencial→1 vivienda, comercial→1 comercio).',
+};
 
 /* ── Form ──────────────────────────────────────────────────────── */
 function toggleForm() {
@@ -444,15 +476,7 @@ function renderCard(s) {
          onclick="eliminarSurvey('${sid}', '${s.region_nombre}')" title="Eliminar relevamiento">🗑</button>`;
 
   const pasoActual = s.pipeline && s.pipeline.paso_actual;
-  const pasoLabel = {
-    diagnostico_inicial: 'Evaluando estado…',
-    smartgis: 'SmartGIS: descargando parcelas…',
-    bci: 'BCI: descargando PDFs…',
-    parser: 'Parser: extrayendo datos…',
-    completado: 'Completado',
-    detenido: 'Detenido',
-    error: 'Error',
-  }[pasoActual] || (pasoActual ? pasoActual + '…' : '');
+  const pasoLabel = pasoActual ? stepLabel(pasoActual) : '';
 
   const runningBanner = isRunning && pasoLabel ? `
     <div style="background:#0f172a;color:#38bdf8;font-size:.72rem;padding:.3rem .75rem;
@@ -472,9 +496,9 @@ function renderCard(s) {
             <div class="card-meta">${fmtDate(s.started_at)} &nbsp;·&nbsp; ${s.region_id}</div>
           </div>
           <div class="card-kpis">
-            <div class="kpi"><div class="kpi-val">${fmt(s.total_edificios)}</div><div class="kpi-lbl">Edificios</div></div>
             <div class="kpi"><div class="kpi-val">${fmt(s.total_parcelas)}</div><div class="kpi-lbl">Parcelas</div></div>
-            <div class="kpi"><div class="kpi-val">${fmt(s.con_inscripcion)}</div><div class="kpi-lbl">Inscripciones</div></div>
+            <div class="kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_vivienda)}</div><div class="kpi-lbl">UF Vivienda${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
+            <div class="kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_comercio)}</div><div class="kpi-lbl">UF Comercio${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
           </div>
         </div>
         ${btnAccion}
@@ -492,11 +516,9 @@ function renderCard(s) {
         </div>
         <div class="detail-body">
           <div class="detail-grid">
-            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_edificios)}</div><div class="detail-kpi-lbl">Edificios OSM</div></div>
             <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_parcelas)}</div><div class="detail-kpi-lbl">Parcelas</div></div>
-            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.con_inscripcion)}</div><div class="detail-kpi-lbl">Con inscripción (BCI)</div></div>
-            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_uf_vivienda)}</div><div class="detail-kpi-lbl">UF Vivienda</div></div>
-            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_uf_comercio)}</div><div class="detail-kpi-lbl">UF Comercio</div></div>
+            <div class="detail-kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="detail-kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_vivienda)}</div><div class="detail-kpi-lbl">UF Vivienda${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
+            <div class="detail-kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="detail-kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_comercio)}</div><div class="detail-kpi-lbl">UF Comercio${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
             <div class="detail-kpi"><div class="detail-kpi-val">${areaKm}</div><div class="detail-kpi-lbl">Área relevada</div></div>
           </div>
 
@@ -528,14 +550,37 @@ function renderCard(s) {
 const activeMarkers = {};    // sid → array de L.circleMarker en el mapa
 const mapPollTimers = {};    // sid → setInterval para live update de marcadores
 
-const USO_COLOR = {
-  residencial: '#60a5fa',
-  comercial:   '#fb923c',
-  mixto:       '#a78bfa',
-  industrial:  '#94a3b8',
-  vacante:     '#4ade80',
+// Tipología que se muestra en el mapa: combina uso_principal + cantidad de UF estimada
+// para distinguir una unidad suelta de un edificio de varias unidades.
+const CAT_COLOR = {
+  vivienda:           '#60a5fa',   // residencial, 1 UF
+  edificio_viviendas: '#2563eb',   // residencial, ≥2 UF (edificio en altura)
+  comercio:           '#fb923c',   // comercial, 1 UF
+  edificio_comercios: '#ea580c',   // comercial, ≥2 UF
+  mixto:              '#a78bfa',   // uso mixto (vivienda O comercio)
+  vacante:            '#4ade80',
+  industrial:         '#94a3b8',
+  equipamiento:       '#64748b',
 };
-const USO_DEFAULT = '#f8d347';  // amarillo claro para "sin clasificar" — visible en satélite
+const CAT_LABEL = {
+  vivienda:           'Vivienda',
+  edificio_viviendas: 'Edificio de viviendas',
+  comercio:           'Comercio',
+  edificio_comercios: 'Edificio de comercios',
+  mixto:              'Mixto',
+  vacante:            'Vacante',
+  industrial:         'Industrial',
+  equipamiento:       'Equipamiento',
+};
+const CAT_DEFAULT = '#f8d347';  // amarillo claro para "sin clasificar" — visible en satélite
+
+// Clasifica una parcela en la tipología del mapa según uso + UF estimadas.
+function categoriaMapa(p) {
+  if (p.uso === 'mixto') return 'mixto';
+  if (p.uso === 'comercial')  return p.uf_com >= 2 ? 'edificio_comercios' : 'comercio';
+  if (p.uso === 'residencial') return p.uf_viv >= 2 ? 'edificio_viviendas' : 'vivienda';
+  return p.uso || 'sin clasificar';   // vacante / industrial / equipamiento / sin clasificar
+}
 
 function initMap(sid) {
   const mapId = 'map-' + sid.replace(/-/g, '');
@@ -607,8 +652,9 @@ async function loadParcelasMap(sid) {
 
   for (const p of parcelas) {
     const uso = p.uso || 'sin clasificar';
-    counts[uso] = (counts[uso] || 0) + 1;
-    const color = USO_COLOR[p.uso] || USO_DEFAULT;
+    const cat = categoriaMapa(p);
+    counts[cat] = (counts[cat] || 0) + 1;
+    const color = CAT_COLOR[cat] || CAT_DEFAULT;
 
     const m = L.circleMarker([p.lat, p.lng], {
       radius: 7, fillColor: color,
@@ -616,20 +662,41 @@ async function loadParcelasMap(sid) {
     });
 
     const addr = [p.calle, p.numero].filter(Boolean).join(' ') || '—';
-    const ufLine = (p.uf_viv > 0 || p.uf_com > 0)
-      ? 'Viv: <b>' + p.uf_viv + '</b> &nbsp; Com: <b>' + p.uf_com + '</b>'
-      : 'UF: <b>' + (p.uf_total || '—') + '</b>';
+    const UF_FUENTE_LBL = {
+      bci:   'exacto (BCI)',
+      osm:   'estimado (OSM)',
+      proxy: 'estimado (proxy)',
+      uso:   'estimado (por uso)',
+    };
+    const prefix = p.uf_estimado ? '≈ ' : '';
+    const desc = UF_FUENTE_DESC[p.uf_fuente] || '';
+    const ufLine = ((p.uf_viv > 0 || p.uf_com > 0)
+        ? 'Viv: <b>' + prefix + p.uf_viv + '</b> &nbsp; Com: <b>' + prefix + p.uf_com + '</b>'
+        : 'UF: <b>' + prefix + (p.uf_total || '—') + '</b>')
+      + (UF_FUENTE_LBL[p.uf_fuente]
+          ? '<br><span style="color:#6b7280;font-size:.7rem;' + (desc ? 'cursor:help;border-bottom:1px dotted #9ca3af' : '') + '"'
+            + (desc ? ' title="' + escHtml(desc) + '"' : '') + '>UF: ' + UF_FUENTE_LBL[p.uf_fuente] + '</span>'
+          : '');
     m.bindPopup(
       '<div style="font-size:.83rem;line-height:1.8;min-width:165px">' +
       '<b>' + escHtml(addr) + '</b>' +
       (p.barrio ? '<br><span style="color:#9ca3af">' + escHtml(p.barrio) + '</span>' : '') +
-      '<br><span style="color:' + color + ';font-weight:700;text-transform:capitalize">' + escHtml(uso) + '</span>' +
+      '<br><span style="color:' + color + ';font-weight:700;text-transform:capitalize">' + escHtml(CAT_LABEL[cat] || uso) + '</span>' +
       '<br>' + ufLine +
       (p.area_t ? '<br><span style="color:#9ca3af">' + p.area_t + ' m² terreno</span>' : '') +
+      (p.area_c ? '<br><span style="color:#9ca3af">' + p.area_c + ' m² construida</span>' : '') +
+      (p.pisos ? '<br><span style="color:#fbbf24;font-weight:700">≈ ' + p.pisos + ' piso' + (p.pisos > 1 ? 's' : '') + '</span> <span style="color:#6b7280;font-size:.7rem">(FOS 0,6)</span>' : '') +
       (p.cca ? '<br><span style="color:#6b7280;font-size:.72rem">Insc: ' + escHtml(p.cca) + '</span>' : '') +
       '</div>',
       {maxWidth: 210}
     );
+    // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
+    if (p.uf_total > 0) {
+      m.bindTooltip(String(p.uf_total), {
+        permanent: true, direction: 'right', offset: [7, 0],
+        className: 'uf-label',
+      });
+    }
     m.addTo(map);
     markers.push(m);
   }
@@ -640,14 +707,15 @@ async function loadParcelasMap(sid) {
   const cntEl = document.getElementById('mcount-' + sid);
   if (cntEl) { cntEl.textContent = markers.length + ' parcelas'; cntEl.style.display = 'block'; }
 
-  // Leyenda
-  const usoEntries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  // Leyenda: tipologías (vivienda / comercio / edificios / mixto) con su conteo
+  const catEntries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   const ley = L.control({position: 'bottomleft'});
   ley.onAdd = function() {
     const d = L.DomUtil.create('div', 'map-legend');
-    d.innerHTML = usoEntries.map(([uso, n]) => {
-      const c = USO_COLOR[uso] || USO_DEFAULT;
-      return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(uso) + ' <b>(' + n + ')</b></div>';
+    d.innerHTML = catEntries.map(([cat, n]) => {
+      const c = CAT_COLOR[cat] || CAT_DEFAULT;
+      const lbl = CAT_LABEL[cat] || cat;
+      return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
     }).join('');
     return d;
   };
@@ -710,6 +778,85 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/* Label legible por paso/skill. La clave de paso la define Hermes (libre);
+   normalizamos (minúsculas, sin guiones ni sufijo _fetcher) y mapeamos. */
+const STEP_LABELS = {
+  diagnostico_inicial:  '🔍 Evaluando estado inicial',
+  coverage_reporter:    '🔍 Evaluando cobertura',
+  // Brasil / Várzea Grande
+  smartgis:             '🗺 SmartGIS: descargando parcelas',
+  varzea_bci:           '📄 BCI: descargando PDFs',
+  bci:                  '📄 BCI: descargando PDFs',
+  parser:               '🔎 BCI Parser: extrayendo uso/UF/dirección',
+  bci_parser:           '🔎 BCI Parser: extrayendo uso/UF/dirección',
+  onr_lotes:            '🏙 ONR: lotes urbanos',
+  onr_sigef:            '🌾 ONR/SIGEF: predios rurales',
+  ibge_census:          '🇧🇷 IBGE: setores censitários',
+  ibge_logradouros:     '🇧🇷 IBGE: geocoding por interpolación',
+  // Argentina — Buenos Aires
+  arba_carto:           '🗺 ARBA Carto: parcelas PBA',
+  arba_cadastral:       '🗺 ARBA WFS: parcelas PBA',
+  // Argentina — Salta
+  salta_catastro:       '🗺 Catastro Salta: parcelas (WFS)',
+  salta_zonificacion:   '🏘 Zonificación CPUA: uso por zona',
+  salta_registro:       '📋 Registro SIGSA: tipo provincial',
+  salta_rentas:         '🏗 Rentas DGRM: detectando baldíos',
+  // Enriquecimiento
+  osm_building:         '🏢 OSM: footprints de edificios',
+  osm:                  '🏢 OSM: footprints de edificios',
+  address_resolver:     '📫 Resolviendo direcciones',
+  address:              '📫 Resolviendo direcciones',
+  uso_classifier:       '🏷 Clasificando uso',
+  uso:                  '🏷 Clasificando uso',
+  // Reportes / cierre
+  relevamiento_csv:     '⬇ Exportando CSV',
+  relevamiento_reporter:'📊 Generando reporte',
+  completado:           '✓ Pipeline completado',
+  error:                '✗ Pipeline terminó con error',
+  detenido:             '⏹ Pipeline detenido manualmente',
+  sin_pipeline:         '— Pipeline no definido para este país',
+};
+const STEP_TERMINAL = new Set(['completado', 'error', 'detenido', 'sin_pipeline']);
+
+function normStep(key) {
+  return String(key || '').toLowerCase().replace(/-/g, '_').replace(/_fetcher$/, '');
+}
+function stepLabel(key) {
+  const k = normStep(key);
+  if (STEP_LABELS[k]) return STEP_LABELS[k];
+  // Fallback: humanizar la clave cruda
+  return '▸ ' + k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/* Resumen de avance a partir del resultado de la skill. Toma las métricas
+   numéricas conocidas; si no reconoce ninguna, cae a ok/error. */
+const METRIC_LABELS = {
+  parcelas_insertadas: 'insertadas', parcelas_actualizadas: 'actualizadas',
+  parcelas_consultadas: 'consultadas', parcelas_procesadas: 'procesadas',
+  parcelas_resueltas: 'direcciones', parcelas_clasificadas: 'clasificadas',
+  procesadas: 'procesadas', actualizadas: 'actualizadas', parcelas: 'parcelas',
+  baldios_detectados: 'baldíos', edificados: 'edificados', sin_match: 'sin match',
+  edificios_insertados: 'footprints', footprints: 'footprints',
+  logradouros_actualizados: 'logradouros', setores_atualizados: 'setores',
+  pdfs_descargados: 'PDFs nuevos', pdfs_ya_existentes: 'PDFs ya existían', sin_pdf: 'sin PDF',
+  lotes_escaneados: 'lotes escaneados', exportadas: 'exportadas', errores: 'errores',
+};
+function _stepFailed(r) {
+  return r.ok === false || r.status === 'failed' || r.status === 'error';
+}
+function stepSummary(result) {
+  if (!result || typeof result !== 'object') return '';
+  if (result.saltado) return 'saltado';
+  if (_stepFailed(result)) return 'error — ' + (result.error || 'desconocido');
+  const parts = [];
+  for (const [field, lbl] of Object.entries(METRIC_LABELS)) {
+    const v = result[field];
+    if (typeof v === 'number' && v > 0) parts.push(`${fmt(v)} ${lbl}`);
+  }
+  if (parts.length) return parts.slice(0, 4).join(', ');
+  return (result.ok || result.status === 'completed') ? 'ok' : '';
+}
+
 function renderActlog(sid) {
   const el = document.getElementById('actlog-' + sid);
   if (!el) return;
@@ -719,54 +866,59 @@ function renderActlog(sid) {
     return;
   }
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-  el.innerHTML = st.entries.slice(-10).map(e => {
+  el.innerHTML = st.entries.slice(-12).map(e => {
     const live = e.id >= 0;
-    const cls = e.lvl === 'ERROR' ? 'alog-err' : e.lvl === 'WARNING' ? 'alog-warn' : live ? 'alog-info' : 'alog-synth';
-    return `<div class="alog-line ${cls}"><span class="alog-ts">${e.ts}</span><span class="alog-msg">${escHtml(e.msg)}</span></div>`;
+    const cls = e.lvl === 'ERROR' ? 'alog-err' : e.lvl === 'WARNING' ? 'alog-warn'
+              : e.lvl === 'RUN' ? 'alog-run' : live ? 'alog-info' : 'alog-synth';
+    const ts = e.lvl === 'RUN'
+      ? '<span class="spinner" style="display:inline-block">⟳</span>'
+      : escHtml(e.ts);
+    return `<div class="alog-line ${cls}"><span class="alog-ts">${ts}</span><span class="alog-msg">${escHtml(e.msg)}</span></div>`;
   }).join('');
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
 function syntheticActlog(sid) {
-  /* Sintetiza entradas desde las notas del pipeline (guardadas en DB, siempre disponibles). */
+  /* Sintetiza entradas desde las notas del pipeline (guardadas en DB, siempre
+     disponibles — funcionan también para runs delegados a Hermes). Muestra cada
+     paso/skill ejecutado con su resumen de avance, y qué se está ejecutando ahora. */
   const s = surveyCache[sid];
   if (!s) return [];
   const pasos = (s.pipeline || {}).pasos || {};
   const paso_actual = (s.pipeline || {}).paso_actual || '';
+  const running = s.status === 'running';
   const entries = [];
   let seq = -9000;
 
-  if (pasos.smartgis) {
-    const p = pasos.smartgis;
-    const msg = p.saltado
-      ? `SmartGIS: saltado — ya había ${p.parcelas_existentes || 0} parcelas`
-      : p.ok
-        ? `SmartGIS: ${p.parcelas_insertadas || 0} insertadas, ${p.parcelas_actualizadas || 0} actualizadas`
-        : `SmartGIS: error — ${p.error || 'desconocido'}`;
-    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
-  }
-  if (pasos.bci) {
-    const p = pasos.bci;
-    const msg = p.ok
-      ? `BCI: ${p.pdfs_descargados || 0} descargados, ${p.pdfs_ya_existentes || 0} ya existían, ${p.pdfs_fallidos || 0} fallidos`
-      : `BCI: error — ${p.error || 'desconocido'}`;
-    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
-  }
-  if (pasos.parser) {
-    const p = pasos.parser;
-    const msg = p.saltado
-      ? 'Parser: saltado — todas las parcelas ya tienen uso'
-      : p.ok ? `Parser: ${p.actualizadas || 0} actualizadas` : 'Parser: error';
-    entries.push({id: seq++, ts: '·', lvl: p.ok ? 'INFO' : 'ERROR', msg});
+  // Pasos ya ejecutados, en el orden en que se registraron
+  const doneKeys = Object.keys(pasos);
+  for (const key of doneKeys) {
+    const p = pasos[key] || {};
+    const summary = stepSummary(p);
+    const lvl = _stepFailed(p) ? 'ERROR' : (p.saltado ? 'WARNING' : 'INFO');
+    const tick = lvl === 'ERROR' ? '✗' : (lvl === 'WARNING' ? '·' : '✓');
+    entries.push({
+      id: seq++, ts: tick, lvl,
+      msg: `${stepLabel(key)}${summary ? ' — ' + summary : ''}`,
+    });
   }
 
-  const finalMsg = {
-    completado:    '✓ Pipeline completado',
-    error:         '✗ Pipeline terminó con error',
-    detenido:      '⏹ Pipeline detenido manualmente',
-    sin_pipeline:  '— Pipeline no definido para este país',
-  }[paso_actual];
-  if (finalMsg) entries.push({id: seq++, ts: '·', lvl: paso_actual === 'completado' ? 'INFO' : 'WARNING', msg: finalMsg});
+  // Qué se está ejecutando ahora (paso_actual no terminal y aún sin resultado)
+  if (running && paso_actual && !STEP_TERMINAL.has(normStep(paso_actual)) && !(paso_actual in pasos)) {
+    entries.push({id: seq++, ts: '⟳', lvl: 'RUN', msg: `${stepLabel(paso_actual)}…`});
+  }
+
+  // Estado final
+  if (STEP_TERMINAL.has(normStep(paso_actual))) {
+    const k = normStep(paso_actual);
+    entries.push({
+      id: seq++, ts: k === 'completado' ? '✓' : '■',
+      lvl: k === 'completado' ? 'INFO' : (k === 'error' ? 'ERROR' : 'WARNING'),
+      msg: stepLabel(paso_actual),
+    });
+  } else if (running && entries.length === 0) {
+    entries.push({id: seq++, ts: '⟳', lvl: 'RUN', msg: '🔍 Iniciando pipeline…'});
+  }
 
   return entries;
 }
@@ -778,12 +930,13 @@ async function fetchActlog(sid) {
     const res = await fetch(`/api/surveys/${sid}/activity?since=${st.lastId}`);
     const data = await res.json();
     if (data.entries.length > 0) {
-      // Actividad en vivo — descartar sintéticos si los había
+      // Actividad en vivo (run in-process) — descartar sintéticos si los había
       if (st.entries.length > 0 && st.entries[0].id < 0) st.entries = [];
       st.entries.push(...data.entries);
       st.lastId = data.last_id;
-    } else if (st.entries.length === 0) {
-      // Sin actividad en vivo — sintetizar desde notas del pipeline
+    } else if (st.lastId === 0) {
+      // Sin actividad en vivo (run delegado a Hermes) — re-sintetizar en cada
+      // poll desde las notas del pipeline, que se actualizan a medida que avanza.
       st.entries = syntheticActlog(sid);
     }
   } catch(_) {}

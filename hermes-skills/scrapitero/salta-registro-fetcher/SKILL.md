@@ -29,8 +29,8 @@ clasifica parcelas según el campo `TIPO` ∈ {URBANO, RURAL, CLUB DE CAMPO}.
 
 | TIPO | uso_principal |
 |------|---------------|
-| RURAL | `vacante` (terreno rural sin edificación urbana) |
-| CLUB DE CAMPO | `residencial` (loteo cerrado) |
+| RURAL | `vacante` (terreno rural sin edificación urbana) → **0 UF** |
+| CLUB DE CAMPO | `residencial` (loteo cerrado) → **siempre al menos 1 UF de vivienda** (`unidades_funcionales_estimadas` y `uf_vivienda` con `GREATEST(actual, 1)`) |
 | URBANO | *(sin cambio — lo resuelve CPUA / salta-zonificacion-fetcher)* |
 
 ## Cuándo usar

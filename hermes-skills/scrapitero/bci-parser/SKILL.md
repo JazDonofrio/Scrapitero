@@ -16,6 +16,8 @@ Lee cada PDF `pdf_downloads/reporte_{cca_code}.pdf` y actualiza la parcela en DB
 - `uso_principal`: residencial / comercial / mixto / industrial / vacante
 - `uf_vivienda`: cantidad de unidades residenciales
 - `uf_comercio`: cantidad de unidades comerciales
+- `uf_fuente = 'bci'`: marca la UF como **exacta** (extraída del PDF oficial). La web la
+  muestra sin el badge `est.`/`≈` que llevan las UF estimadas por UnidadesEstimator
 - `area_m2_construida`: área construída total
 - `calle`, `numero`, `barrio`, `codigo_postal`: dirección completa
 - `partida_inmobiliaria`: número de matrícula del Registro de Imóveis
@@ -54,10 +56,19 @@ echo '{"region_id":"<REGION_ID>","batch_size":100}' | ...
 | Campo | Default | Descripción |
 |-------|---------|-------------|
 | `region_id` | ✅ | ID de la región |
-| `pdf_dir` | `/opt/scrapitero/pdf_downloads` | Carpeta con los PDFs |
+| `pdf_dir` | `/opt/scrapitero/pdf_downloads` (o `$SCRAPITERO_PDF_DIR`) | Carpeta **base** de PDFs — **la MISMA que usó VGBCIFetcher**. Lee de `pdf_dir/<ciudad>/` (subcarpeta por ciudad, resuelta sola desde `region_id`) |
 | `batch_size` | 0 (todas) | Limitar cantidad |
 
 ## Notas
+- ⚠️ **`pdf_dir` debe coincidir con el de VGBCIFetcher.** Si el parser reporta "PDFs
+  faltantes" pero el fetcher dijo que ya existían, es casi siempre un desajuste de
+  `pdf_dir` (el fetcher descargó en otra carpeta — p.ej. el CWD del container Hermes). El
+  parser ahora lo detecta y avisa en qué carpeta SÍ están los PDFs faltantes. Solución:
+  pasar el MISMO `pdf_dir` absoluto a ambos (o setear `SCRAPITERO_PDF_DIR`). No hace falta
+  re-descargar.
+- 📁 **Carpeta por ciudad:** lee de `pdf_dir/<ciudad>/reporte_{codigo}.pdf`, la misma
+  subcarpeta donde VGBCIFetcher guarda (la ciudad se resuelve sola desde `region_id`). Pasá
+  el mismo `pdf_dir` **base** que al fetcher; ambos le anexan la ciudad automáticamente.
 - No usa LLM — extrae datos con regex sobre el texto del PDF
 - Compatible con PDFs `Predial` (con construcción) y `Territorial` (terreno vacante)
 - Detecta TIPOLOGIA: CASA, APARTAMENTO, SALA, LOJA, etc.

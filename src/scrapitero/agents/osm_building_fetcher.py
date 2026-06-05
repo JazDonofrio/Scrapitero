@@ -73,6 +73,7 @@ class OSMOutput(BaseModel):
     ok: bool
     edificios_insertados: int
     edificios_actualizados: int
+    edificios_vinculados: int = 0           # asociados a una parcela por join espacial
     bbox_usado: Optional[str] = None        # "south,west,north,east"
     fuentes: list[str]
     error: Optional[str] = None
@@ -192,6 +193,33 @@ def _area_m2(geom: Polygon, epsg_utm: int = 32721) -> Optional[float]:
         return None
 
 
+# ── Parseo de tags OSM (insumo para estimar unidades) ──────────────────────────
+
+def _parse_int(val) -> Optional[int]:
+    """Convierte un tag OSM numérico a int (tolera '3', '3;4', '3.0')."""
+    if val is None:
+        return None
+    try:
+        return int(float(str(val).split(";")[0].strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_tags(tags: dict) -> tuple[Optional[str], Optional[int], Optional[int]]:
+    """Extrae (tipo_osm, pisos, unidades) de los tags de un edificio OSM.
+
+    - tipo_osm:  valor de building=* (apartments/house/commercial/retail/…). 'yes'→None.
+    - pisos:     building:levels (entero).
+    - unidades:  building:flats o addr:units — conteo real de UF cuando OSM lo trae.
+    """
+    tipo = tags.get("building")
+    if tipo in (None, "yes", "true"):
+        tipo = None
+    pisos = _parse_int(tags.get("building:levels"))
+    unidades = _parse_int(tags.get("building:flats")) or _parse_int(tags.get("addr:units"))
+    return tipo, pisos, unidades
+
+
 # ── Inserción en DB ───────────────────────────────────────────────────────────
 
 def _upsert_edificios(ways: list[dict], nodes: dict,
@@ -214,6 +242,7 @@ def _upsert_edificios(ways: list[dict], nodes: dict,
             area = _area_m2(poly)
             geom_wkt = poly.wkt
             centroid_wkt = centroid.wkt
+            tipo_osm, pisos, unidades = _parse_tags(way.get("tags", {}))
 
             existing = conn.execute(
                 text("SELECT edificio_id FROM edificios WHERE external_id = :eid AND source = 'osm'"),
@@ -225,32 +254,63 @@ def _upsert_edificios(ways: list[dict], nodes: dict,
                     UPDATE edificios SET
                         footprint = ST_GeomFromText(:geom, 4326),
                         centroid  = ST_GeomFromText(:ctr, 4326),
-                        area_m2   = :area
+                        area_m2   = :area,
+                        tipo_osm  = :tipo,
+                        pisos_estimados = :pisos,
+                        unidades_osm = :unidades
                     WHERE edificio_id = :eid
-                """), {"geom": geom_wkt, "ctr": centroid_wkt, "area": area, "eid": str(existing[0])})
+                """), {"geom": geom_wkt, "ctr": centroid_wkt, "area": area,
+                       "tipo": tipo_osm, "pisos": pisos, "unidades": unidades,
+                       "eid": str(existing[0])})
                 actualizados += 1
             else:
                 new_id = uuid.uuid4()
                 conn.execute(text("""
                     INSERT INTO edificios
-                        (edificio_id, survey_id, footprint, centroid, area_m2, source, external_id)
+                        (edificio_id, survey_id, footprint, centroid, area_m2,
+                         tipo_osm, pisos_estimados, unidades_osm, source, external_id)
                     VALUES
                         (:eid, :sid,
                          ST_GeomFromText(:geom, 4326),
                          ST_GeomFromText(:ctr, 4326),
-                         :area, 'osm', :osm_id)
+                         :area, :tipo, :pisos, :unidades, 'osm', :osm_id)
                 """), {
                     "eid": str(new_id),
                     "sid": survey_id,
                     "geom": geom_wkt,
                     "ctr": centroid_wkt,
                     "area": area,
+                    "tipo": tipo_osm,
+                    "pisos": pisos,
+                    "unidades": unidades,
                     "osm_id": osm_id,
                 })
                 insertados += 1
 
     logger.info(f"Edificios DB: {insertados} insertados, {actualizados} actualizados")
     return insertados, actualizados
+
+
+def _link_to_parcelas(region_id: str) -> int:
+    """Asocia cada edificio sin parcela a la parcela que contiene su centroide.
+
+    Join espacial PostGIS (ST_Contains). Imprescindible para que UnidadesEstimator
+    pueda agregar los edificios por parcela. Devuelve la cantidad vinculada.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            UPDATE edificios e SET parcela_id = p.parcela_id
+            FROM parcelas p
+            WHERE p.region_id = :rid
+              AND p.geometry IS NOT NULL
+              AND e.centroid IS NOT NULL
+              AND ST_Contains(p.geometry, e.centroid)
+              AND (e.parcela_id IS NULL OR e.parcela_id <> p.parcela_id)
+        """), {"rid": region_id})
+        vinculados = result.rowcount or 0
+    logger.info(f"Edificios vinculados a parcela (ST_Contains): {vinculados}")
+    return vinculados
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -297,11 +357,13 @@ def run(input: OSMInput) -> OSMOutput:
             )
 
         insertados, actualizados = _upsert_edificios(ways, nodes, input.region_id, input.survey_id)
+        vinculados = _link_to_parcelas(input.region_id)
 
         return OSMOutput(
             ok=True,
             edificios_insertados=insertados,
             edificios_actualizados=actualizados,
+            edificios_vinculados=vinculados,
             bbox_usado=bbox_str,
             fuentes=fuentes,
         )

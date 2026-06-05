@@ -56,6 +56,7 @@ dirección, coordenadas, tipología (residencial/comercial/mixto), unidades func
 | `unidades_funcionales_estimadas` | int | Total UF |
 | `uf_vivienda` | int | UF vivienda (migración 004) |
 | `uf_comercio` | int | UF comercio (migración 004) |
+| `uf_fuente` | str | Cómo se determinó la UF: `bci`=exacto, `osm`/`proxy`/`uso`=estimado (migración 008) |
 | `cca_code` | str | Código catastral (migración 003) |
 | `nomenclatura_catastral` | str | (migración 003) |
 | `partida_inmobiliaria` | str | (migración 003) |
@@ -66,9 +67,11 @@ dirección, coordenadas, tipología (residencial/comercial/mixto), unidades func
 | Columna | Descripción |
 |---------|-------------|
 | `edificio_id` | PK UUID |
-| `survey_id`, `parcela_id` | FK |
+| `survey_id`, `parcela_id` | FK (parcela_id se setea por join espacial en OSMBuildingFetcher) |
 | `footprint` | POLYGON 4326 |
-| `area_m2`, `pisos_estimados` | |
+| `area_m2`, `pisos_estimados` | pisos_estimados = building:levels de OSM |
+| `tipo_osm` | valor de building=* — apartments/house/commercial/… (migración 007) |
+| `unidades_osm` | building:flats / addr:units — conteo real de UF (migración 007) |
 | `source` | `osm`/`ms_global`/`google_open` |
 
 ### `setores_censitarios` — sectores IBGE
@@ -89,6 +92,8 @@ Cada step del orquestador registra: `agent_called`, `input_resumen`, `output_res
 | 004 | `uf_vivienda`, `uf_comercio` en `parcelas` |
 | 005 | Tabla `logradouros` |
 | 006 | `zone_geojson` en `regions` |
+| 007 | `tipo_osm`, `unidades_osm` en `edificios` (tags OSM para estimar UF) |
+| 008 | `uf_fuente` en `parcelas` (bci=exacto / osm/proxy/uso=estimado; se muestra en la web) |
 
 ---
 
@@ -115,9 +120,25 @@ Todos en `src/scrapitero/agents/`. Interfaz: `run(input: XInput) -> XOutput`. RP
 
 ### OSMBuildingFetcher
 **Input:** `region_id`, `survey_id`, `bbox_south/west/north/east?`
-**Output:** `edificios_insertados`, `edificios_actualizados`, `bbox_usado`
-**Cuándo:** para descargar footprints de edificios
-**Cómo:** Overpass API, con fallback a mirrors; proyecta a UTM para área_m2
+**Output:** `edificios_insertados`, `edificios_actualizados`, `edificios_vinculados`, `bbox_usado`
+**Cuándo:** para descargar footprints de edificios (insumo de UnidadesEstimator)
+**Cómo:** Overpass API, con fallback a mirrors; proyecta a UTM para área_m2.
+Captura tags OSM → `tipo_osm` (building=*), `pisos_estimados` (building:levels),
+`unidades_osm` (building:flats/addr:units). Vincula cada edificio a la parcela que
+contiene su centroide (`ST_Contains`) → `edificios.parcela_id`.
+
+### UnidadesEstimator
+**Input:** `region_id`, `survey_id?`, `overwrite`, `m2_vivienda` (80), `m2_comercio` (50), `pisos_default` (1)
+**Output:** `parcelas_procesadas`, `parcelas_con_edificios`, `parcelas_fallback_uso`, `total_uf_vivienda`, `total_uf_comercio`, `fuente_unidades_osm`
+**Cuándo:** estimar **uf_vivienda/uf_comercio** por parcela. Último paso de uso/UF en Salta.
+**Cómo:** agrega los edificios vinculados de cada parcela y aplica OSM-tags-first
+(`building:flats`→conteo real; house/detached→1) + proxy geométrico (área×pisos/tamaño)
++ fallback por uso (parcela sin edificios → mínimo según residencial/comercial/mixto).
+Respeta reglas: residencial≥1 vivienda, comercial≥1 comercio, vacante/industrial/equipamiento=0 UF.
+**`mixto` = vivienda O comercio (excluyente):** cada UF es una u otra, nunca ambas; sin tag
+ni edificios → vivienda por defecto. Registra `uf_fuente` por parcela (`osm`/`proxy`/`uso`)
+→ la web la muestra como estimación. **NO** ejecutar en Brasil (pisaría la UF exacta de BCIParser).
+**Lógica completa: `docs/ESTIMACION_UF.md`.**
 
 ### AddressResolver
 **Input:** `region_id`, `survey_id?`, `batch_size`, `delay_ms`
@@ -254,7 +275,9 @@ Abre en `http://localhost:8765`
 | GET | `/api/surveys` | Lista todos los surveys con stats agregadas |
 | POST | `/api/surveys` | Crea nuevo survey (form: `nombre`, `country_code`, `geojson_file`) |
 
-**Stats que devuelve `/api/surveys`:** `total_edificios`, `total_parcelas`, `total_uf_vivienda`, `total_uf_comercio`, `con_direccion`, `area_total_m2`, `zone_geojson`
+**Stats que devuelve `/api/surveys`:** `total_edificios`, `total_parcelas`, `total_uf_vivienda`, `total_uf_comercio`, `uf_estimado` (bool — UF estimada vs exacta), `con_direccion`, `area_total_m2`, `zone_geojson`
+
+La UI marca con badge `est.` y prefijo `≈` las UF estimadas (cualquier `uf_fuente` ≠ `bci`); el popup de cada parcela muestra el detalle (`exacto (BCI)` / `estimado (OSM/proxy/por uso)`). El CSV exporta la columna **UF Fuente**.
 
 **Comportamiento del POST:** crea región+survey síncronamente, lanza descarga OSM en background thread, devuelve `{ok, survey_id, region_id}` de inmediato.
 
@@ -371,6 +394,8 @@ docker cp <container>:/tmp/cffi313/_cffi_backend.cpython-313-x86_64-linux-gnu.so
 - [x] **SmartGISFetcher** — parcelas VG desde SmartGIS (inscripción + geometría)
 - [x] **VGBCIFetcher** — descarga PDFs BCI via Playwright, reutiliza existentes
 - [x] **BCIParser** — extrae uso/UF/dirección de PDFs (sin LLM, regex). Funcional en Hermes (Python 3.13).
+- [x] **OSMBuildingFetcher v2** — captura tags OSM + vincula edificios a parcela (migración 007)
+- [x] **UnidadesEstimator** — estima uf_vivienda/uf_comercio por parcela (OSM tags + proxy geométrico)
 
 ### Pendiente / parcial
 - [ ] PopulationEstimator (desagregación dasymetrica IBGE)

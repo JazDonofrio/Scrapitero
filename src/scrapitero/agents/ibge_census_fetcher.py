@@ -20,18 +20,43 @@ import geopandas as gpd
 import httpx
 import pandas as pd
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
+# Código IBGE de UF (2 primeros dígitos del municipio_codigo) → sigla.
+_UF_POR_CODIGO = {
+    "11": "RO", "12": "AC", "13": "AM", "14": "RR", "15": "PA", "16": "AP", "17": "TO",
+    "21": "MA", "22": "PI", "23": "CE", "24": "RN", "25": "PB", "26": "PE", "27": "AL",
+    "28": "SE", "29": "BA",
+    "31": "MG", "32": "ES", "33": "RJ", "35": "SP",
+    "41": "PR", "42": "SC", "43": "RS",
+    "50": "MS", "51": "MT", "52": "GO", "53": "DF",
+}
+
+
 class IBGEInput(BaseModel):
     region_id: str                        # "vg-mt-br"
     municipio_codigo: str                 # "5108402" para Várzea Grande
-    estado_uf: str                        # "mt"
+    estado_uf: Optional[str] = None      # "mt" — si falta, se deriva de municipio_codigo
     survey_id: Optional[str] = None      # UUID del survey activo (opcional)
+
+    @model_validator(mode="after")
+    def _derivar_estado_uf(self) -> "IBGEInput":
+        """Si no viene estado_uf, lo deriva del prefijo del código de município IBGE."""
+        if not self.estado_uf:
+            prefijo = (self.municipio_codigo or "").strip()[:2]
+            uf = _UF_POR_CODIGO.get(prefijo)
+            if not uf:
+                raise ValueError(
+                    f"falta estado_uf y no se pudo derivar de municipio_codigo="
+                    f"{self.municipio_codigo!r} (prefijo {prefijo!r} no es una UF IBGE válida)"
+                )
+            self.estado_uf = uf
+        return self
 
 
 class IBGEOutput(BaseModel):

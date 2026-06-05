@@ -48,11 +48,12 @@ Parcelas fuera de cobertura CPUA (interior provincial) → quedan `sin_datos`.
 
 ## UF mínimas por uso
 
-Al clasificar, además del `uso_principal` se computa `unidades_funcionales_estimadas`:
+Al clasificar, además del `uso_principal` se computan `unidades_funcionales_estimadas`
+**y `uf_vivienda`**:
 
 | uso_principal | UF computadas |
 |---------------|---------------|
-| `residencial` | mínimo **1** (`GREATEST(actual, 1)` — una vivienda mínima por parcela habitada) |
+| `residencial` | **siempre al menos 1** UF de vivienda — `unidades_funcionales_estimadas` y `uf_vivienda` con `GREATEST(actual, 1)` (no pisa un conteo real mayor; una vivienda mínima por parcela) |
 | `vacante` | **0** (terreno baldío, sin unidad) |
 | resto (comercial/mixto/industrial/equipamiento) | sin tocar |
 

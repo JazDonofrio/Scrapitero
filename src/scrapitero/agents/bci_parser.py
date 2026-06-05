@@ -13,6 +13,7 @@ Extrae sin LLM usando regex sobre el texto del PDF:
 
 from __future__ import annotations
 
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -25,11 +26,16 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 
+# Directorio de PDFs BCI — fuente única compartida con VGBCIFetcher. Debe ser ABSOLUTO
+# y el MISMO para ambos agentes (el fetcher escribe, el parser lee). Configurable con
+# SCRAPITERO_PDF_DIR para que un solo setting (p.ej. en el container Hermes) los alinee.
+DEFAULT_PDF_DIR = os.environ.get("SCRAPITERO_PDF_DIR", "/opt/scrapitero/pdf_downloads")
+
 
 class BCIParserInput(BaseModel):
     region_id: str
     survey_id: Optional[str] = None
-    pdf_dir: str = "/opt/scrapitero/pdf_downloads"
+    pdf_dir: str = DEFAULT_PDF_DIR
     batch_size: int = 0   # 0 = todas las parcelas con PDF disponible
 
 
@@ -149,6 +155,39 @@ def _parse_bci(text: str) -> dict:
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
+def _buscar_en_dirs_alternativos(codigos: list[int], pdf_dir: Path) -> dict[str, int]:
+    """Busca los PDFs faltantes en ubicaciones alternativas conocidas para detectar
+    un desajuste de `pdf_dir` entre VGBCIFetcher (que descarga) y BCIParser (que lee).
+
+    Devuelve {directorio: cuántos de los faltantes están ahí}. Esto convierte el caso
+    '10 PDFs faltantes' (silencioso) en un aviso accionable que nombra dónde SÍ están.
+    """
+    if not codigos:
+        return {}
+    candidatos = [
+        Path.cwd() / "pdf_downloads",                          # default relativo del fetcher
+        Path("/opt/scrapitero/pdf_downloads"),                 # default histórico del host
+        Path("/docker/hermes-agent-wgnq/data/pdf_downloads"),  # data dir del container Hermes
+    ]
+    env = os.environ.get("SCRAPITERO_PDF_DIR")
+    if env:
+        candidatos.insert(0, Path(env))
+    encontrados: dict[str, int] = {}
+    vistos = {pdf_dir.resolve()}
+    for d in candidatos:
+        try:
+            rd = d.resolve()
+        except OSError:
+            continue
+        if rd in vistos:
+            continue
+        vistos.add(rd)
+        n = sum(1 for c in codigos if (d / f"reporte_{c}.pdf").exists())
+        if n:
+            encontrados[str(d)] = n
+    return encontrados
+
+
 def _get_parcelas(region_id: str, batch_size: int) -> list[tuple[str, str]]:
     """Devuelve (parcela_id, cca_code) con PDF pendiente de parseo."""
     engine = get_engine()
@@ -175,6 +214,7 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                 uso_principal               = COALESCE(:uso, uso_principal),
                 uf_vivienda                 = :uf_viv,
                 uf_comercio                 = :uf_com,
+                uf_fuente                   = 'bci',
                 unidades_funcionales_estimadas = :uf_tot,
                 area_m2_construida          = COALESCE(:area, area_m2_construida),
                 calle                       = COALESCE(:calle, calle),
@@ -214,7 +254,9 @@ def run(input: BCIParserInput) -> BCIParserOutput:
         return BCIParserOutput(ok=True, error="Sin parcelas para parsear en esta región")
 
     logger.info(f"BCIParser: {len(parcelas)} parcelas con cca_code en '{input.region_id}'")
-    pdf_dir = Path(input.pdf_dir)
+    # pdf_dir efectivo = base/<ciudad>/ — la MISMA carpeta por ciudad que escribe VGBCIFetcher.
+    from scrapitero.agents.varzea_bci_fetcher import resolve_city_pdf_dir
+    pdf_dir = resolve_city_pdf_dir(input.pdf_dir, input.region_id)
 
     # Diagnóstico previo: cuántos PDFs existen antes de empezar
     codigos_ok = [int(cca.strip()) for _, cca in parcelas
@@ -233,6 +275,17 @@ def run(input: BCIParserInput) -> BCIParserOutput:
             f"BCIParser: PDFs faltantes (muestra {len(sample)}/{len(codigos_faltantes)}): "
             f"{sample} — ¿VGBCIFetcher fue ejecutado para '{input.region_id}'?"
         )
+        # ¿Están en otra carpeta? Detecta desajuste de pdf_dir fetcher↔parser.
+        alt = _buscar_en_dirs_alternativos(codigos_faltantes, pdf_dir)
+        if alt:
+            detalle = ", ".join(f"{n} en {d}" for d, n in alt.items())
+            logger.warning(
+                f"BCIParser: ⚠ {len(codigos_faltantes)} PDFs 'faltantes' SÍ existen en otra "
+                f"ubicación ({detalle}) pero NO en pdf_dir='{pdf_dir}'. Es un DESAJUSTE de "
+                f"pdf_dir entre VGBCIFetcher (descarga) y BCIParser (lee): pasá el MISMO "
+                f"pdf_dir absoluto a ambos (o seteá SCRAPITERO_PDF_DIR). No hace falta "
+                f"re-descargar."
+            )
     if not codigos_ok:
         msg = (
             f"BCIParser: NINGÚN PDF disponible para los {len(parcelas)} cca_codes de "

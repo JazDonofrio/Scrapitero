@@ -1,6 +1,6 @@
 ---
 name: osm-building-fetcher
-description: "Descarga footprints de edificios desde OpenStreetMap (Overpass API) para cualquier región. Genérico para Argentina y Brasil. Usar cuando footprints == 0 y ya hay parcelas con coordenadas en la DB."
+description: "Descarga footprints de edificios desde OpenStreetMap (Overpass API), captura sus tags (tipo, pisos, viviendas) y los vincula a la parcela que los contiene. Genérico para Argentina y Brasil. Insumo de unidades-estimator. Usar cuando footprints == 0 y ya hay parcelas con coordenadas en la DB."
 version: 1.0.0
 author: Scrapitero
 platforms: [linux]
@@ -16,8 +16,21 @@ Descarga polígonos de edificios desde OpenStreetMap via Overpass API.
 El bbox se deriva automáticamente de las parcelas ya cargadas en la DB.
 Funciona para cualquier país.
 
+Además de la geometría, **captura los tags de OSM** que sirven para estimar unidades:
+
+| Tag OSM | Columna en `edificios` | Para qué |
+|---------|------------------------|----------|
+| `building=*` | `tipo_osm` | apartments/house/commercial/retail/… (`yes` → null) |
+| `building:levels` | `pisos_estimados` | pisos del edificio |
+| `building:flats` / `addr:units` | `unidades_osm` | conteo real de viviendas cuando OSM lo trae |
+
+Y **vincula cada edificio a su parcela** por join espacial PostGIS
+(`ST_Contains(parcela.geometry, edificio.centroid)`) → setea `edificios.parcela_id`.
+Esa vinculación es lo que después consume `unidades-estimator`.
+
 ## Cuándo usar
 Cuando `coverage-reporter` devuelve `footprints == 0` y ya hay parcelas en la DB.
+Es paso previo a `unidades-estimator` (estimación de uf_vivienda/uf_comercio).
 
 ## Comando
 **No instalar nada. El venv ya está listo.**
