@@ -387,6 +387,13 @@ async function submitForm(e) {
 }
 
 /* ── Pipeline step display ─────────────────────────────────────── */
+// Pasos a mostrar por país (solo visual; el pipeline real lo ejecuta Hermes).
+// El país se autodetecta al crear la zona; si no matchea, se usa el default.
+const PIPELINE_DEFAULT = [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
+const PIPELINE_BY_COUNTRY = {
+  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']],
+};
+
 function renderPipelineSteps(pipeline, status, countryCode) {
   if (!pipeline || Object.keys(pipeline).length === 0) return '';
   const actual = pipeline.paso_actual || '';
