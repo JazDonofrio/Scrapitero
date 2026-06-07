@@ -13,8 +13,11 @@ metadata:
 # OSM Building Fetcher
 
 Descarga polígonos de edificios desde OpenStreetMap via Overpass API.
-El bbox se deriva automáticamente de las parcelas ya cargadas en la DB.
-Funciona para cualquier país.
+**Funciona en cualquier parte del mundo** — OSM tiene cobertura global y el área de
+cada edificio se proyecta al huso UTM correcto según su ubicación (no asume Sudamérica).
+El bbox puede **pasarse explícito** en el input (`bbox_south/west/north/east`, ideal para
+relevar una zona sin parcelas todavía cargadas) o **derivarse automáticamente** de las
+parcelas ya cargadas en la DB para la región.
 
 Además de la geometría, **captura los tags de OSM** que sirven para estimar unidades:
 
@@ -37,16 +40,12 @@ Es paso previo a `unidades-estimator` (estimación de uf_vivienda/uf_comercio).
 
 Derivando bbox automáticamente de las parcelas (recomendado):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.osm_building_fetcher
+python3 -m scrapitero.rpc.osm_building_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
 ```
 
 Con bbox explícita:
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","bbox_south":-34.67,"bbox_west":-58.68,"bbox_north":-34.66,"bbox_east":-58.67}' |
-
-  python3 -m scrapitero.rpc.osm_building_fetcher
+python3 -m scrapitero.rpc.osm_building_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","bbox_south":-34.67,"bbox_west":-58.68,"bbox_north":-34.66,"bbox_east":-58.67}'
 ```
 
 ## Output esperado

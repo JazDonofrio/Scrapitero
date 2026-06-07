@@ -27,7 +27,7 @@ from typing import Optional
 
 import httpx
 from loguru import logger
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -119,7 +119,7 @@ def _set_vacante(parcela_id: str) -> None:
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text(
-            "UPDATE parcelas SET uso_principal = 'vacante', "
+            "UPDATE parcelas SET uso_principal = 'vacante', uso_fuente = 'rentas', "
             "unidades_funcionales_estimadas = 0 WHERE parcela_id = :pid"
         ), {"pid": parcela_id})
 
@@ -138,6 +138,62 @@ def _parse_money(s: Optional[str]) -> Optional[float]:
 
 # ── Consulta Playwright ───────────────────────────────────────────────────────
 
+# JS que verifica que el script de reCAPTCHA v3 ya esté cargado y usable.
+_GRECAPTCHA_READY_JS = (
+    "() => typeof grecaptcha !== 'undefined' "
+    "&& typeof grecaptcha.execute === 'function'"
+)
+
+# Consulta una parcela: genera token reCAPTCHA v3 esperando a grecaptcha.ready
+# (en vez de asumir que el global ya existe) y postea al endpoint de rentas.
+_CONSULTA_JS = """async (args) => {
+    const [sitekey, catastro, apiUrl] = args;
+    const tok = await new Promise((resolve, reject) => {
+        if (typeof grecaptcha === 'undefined' || !grecaptcha.execute) {
+            reject(new Error('grecaptcha no disponible'));
+            return;
+        }
+        grecaptcha.ready(() => {
+            grecaptcha.execute(sitekey, {action: 'submit'}).then(resolve).catch(reject);
+        });
+    });
+    const r = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            unidad: catastro, recaptcha: tok,
+            impuesto: '0007', moratoria: false,
+            catastro: String(catastro)
+        })
+    });
+    return await r.json();
+}"""
+
+
+async def _ensure_grecaptcha(page, timeout_ms: int = 30000) -> bool:
+    """Espera a que el script de reCAPTCHA v3 cargue y exponga grecaptcha.execute.
+
+    Antes el código disparaba grecaptcha.execute tras un sleep fijo de 2,5 s; si el
+    script aún no había cargado (SPA Angular + carga async), tiraba ReferenceError en
+    CADA consulta → fallaba el 100% de las parcelas. Acá pooleamos hasta que el global
+    esté listo, con un reload de cortesía si la primera espera se vence."""
+    for intento in (1, 2):
+        try:
+            await page.wait_for_function(_GRECAPTCHA_READY_JS, timeout=timeout_ms)
+            return True
+        except PlaywrightTimeoutError:
+            logger.warning(
+                f"SaltaRentas: grecaptcha no cargó en {timeout_ms} ms "
+                f"(intento {intento}/2)" + (" — recargando…" if intento == 1 else "")
+            )
+            if intento == 1:
+                try:
+                    await page.reload(wait_until="networkidle", timeout=40000)
+                except PlaywrightTimeoutError:
+                    pass
+    return False
+
+
 async def _run(parcelas: list[tuple[str, str]], region_id: str,
                delay_ms: int, headless: bool) -> tuple[int, int, int, int]:
     """Returns (baldios, edificados, sin_match, errores)."""
@@ -150,7 +206,15 @@ async def _run(parcelas: list[tuple[str, str]], region_id: str,
         )
         page = await browser.new_page()
         await page.goto(_PORTAL_URL, wait_until="networkidle", timeout=40000)
-        await page.wait_for_timeout(2500)
+
+        # Esperar a que grecaptcha esté realmente disponible antes de consultar.
+        # Si no carga, no tiene sentido recorrer las parcelas (todas fallarían igual).
+        if not await _ensure_grecaptcha(page):
+            await browser.close()
+            raise RuntimeError(
+                "El script de reCAPTCHA (grecaptcha) no cargó en el portal de rentas; "
+                "no se pudieron generar tokens. Reintentar más tarde."
+            )
 
         for i, (parcela_id, cca) in enumerate(parcelas):
             if region_id in _stop_regions:
@@ -164,27 +228,24 @@ async def _run(parcelas: list[tuple[str, str]], region_id: str,
                 errores += 1
                 continue
 
-            try:
-                data = await page.evaluate(
-                    """async (args) => {
-                        const [sitekey, catastro] = args;
-                        const tok = await grecaptcha.execute(sitekey, {action: "submit"});
-                        const r = await fetch("%s", {
-                            method: "POST",
-                            headers: {"Content-Type": "application/json"},
-                            body: JSON.stringify({
-                                unidad: catastro, recaptcha: tok,
-                                impuesto: "0007", moratoria: false,
-                                catastro: String(catastro)
-                            })
-                        });
-                        return await r.json();
-                    }""" % _API_URL,
-                    [_RECAPTCHA_SITEKEY, codigo],
-                )
-            except Exception as e:
+            # Hasta 2 intentos por parcela: el token v3 a veces falla transitoriamente.
+            data = None
+            last_err: Optional[Exception] = None
+            for intento in (1, 2):
+                try:
+                    data = await page.evaluate(
+                        _CONSULTA_JS, [_RECAPTCHA_SITEKEY, codigo, _API_URL]
+                    )
+                    last_err = None
+                    break
+                except Exception as e:  # noqa: BLE001 — errores JS variados
+                    last_err = e
+                    if intento == 1:
+                        await asyncio.sleep(min(delay_ms / 1000, 1.5))
+
+            if last_err is not None:
                 errores += 1
-                logger.warning(f"  Catastro {codigo}: error de consulta: {e}")
+                logger.warning(f"  Catastro {codigo}: error de consulta: {last_err}")
                 await asyncio.sleep(delay_ms / 1000)
                 continue
 
@@ -246,6 +307,23 @@ def run(inp: SaltaRentasInput) -> SaltaRentasOutput:
         f"{baldios} baldíos, {edificados} edificados, "
         f"{sin_match} sin match, {errores} errores"
     )
+
+    # Si TODAS las consultas fallaron, no es un "completo": es un fallo (típicamente
+    # reCAPTCHA). Reportarlo como ok=False para que el orquestador no lo dé por bueno.
+    if errores == len(parcelas):
+        msg = (
+            f"<b>Salta Rentas — FALLÓ</b> — {inp.region_id}\n"
+            f"⚠️ Las {errores} consultas fallaron (probable reCAPTCHA). "
+            f"No se detectaron baldíos."
+        )
+        _tg(msg)
+        return SaltaRentasOutput(
+            ok=False,
+            parcelas_consultadas=len(parcelas),
+            errores=errores,
+            error="Todas las consultas fallaron (probable reCAPTCHA).",
+        )
+
     _tg(
         f"<b>Salta Rentas — COMPLETO</b> — {inp.region_id}\n"
         f"🏗️ Baldíos detectados: {baldios}\n"

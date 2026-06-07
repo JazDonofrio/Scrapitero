@@ -1,8 +1,10 @@
 """OSMBuildingFetcher — descarga footprints de edificios desde OpenStreetMap via Overpass API.
 
-Genérico: funciona para cualquier región/país.
-Filtra por bounding box (bbox) derivado de las parcelas ya cargadas en la DB,
-o acepta un bbox explícito.
+Genérico: funciona para cualquier región/país del mundo (OSM tiene cobertura global).
+Filtra por bounding box (bbox) que puede pasarse explícito en el input
+(`bbox_south/west/north/east`) o derivarse de las parcelas ya cargadas en la DB.
+El área de cada edificio se proyecta al huso UTM correcto según su posición, así
+que el `area_m2` es válido en cualquier parte del planeta, no solo en Sudamérica.
 
 Output: filas insertadas en tabla `edificios`.
 """
@@ -182,12 +184,33 @@ def _way_to_polygon(way: dict, nodes: dict) -> Optional[Polygon]:
         return None
 
 
-def _area_m2(geom: Polygon, epsg_utm: int = 32721) -> Optional[float]:
-    """Área en m² proyectada a UTM (zona 21S para Argentina/Brasil sur)."""
+_utm_transformers: dict[int, "pyproj.Transformer"] = {}
+
+
+def _utm_epsg(lon: float, lat: float) -> int:
+    """EPSG del huso UTM que contiene (lon, lat). Global: cualquier país.
+
+    Norte → 326xx, Sur → 327xx, donde xx es el huso 1..60.
+    """
+    zone = int((lon + 180.0) // 6.0) + 1
+    zone = min(max(zone, 1), 60)
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _area_m2(geom: Polygon) -> Optional[float]:
+    """Área en m² proyectada al huso UTM correcto según el centroide del edificio.
+
+    El huso se deriva de la posición real del polígono → válido en todo el mundo,
+    no solo en la zona 21S (Argentina/Brasil sur)."""
     try:
-        proj = pyproj.Transformer.from_crs(
-            "EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True
-        ).transform
+        c = geom.centroid
+        epsg = _utm_epsg(c.x, c.y)
+        proj = _utm_transformers.get(epsg)
+        if proj is None:
+            proj = pyproj.Transformer.from_crs(
+                "EPSG:4326", f"EPSG:{epsg}", always_xy=True
+            ).transform
+            _utm_transformers[epsg] = proj
         return round(shp_transform(proj, geom).area, 2)
     except Exception:
         return None

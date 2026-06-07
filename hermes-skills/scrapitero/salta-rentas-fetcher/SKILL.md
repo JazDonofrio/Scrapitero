@@ -43,8 +43,7 @@ Después de `salta-catastro-fetcher` (necesita `cca_code`). Idealmente **despué
 ## Comando
 
 ```bash
-echo '{"region_id":"{region_id}","survey_id":"{survey_id}"}' |
-  python3 -m scrapitero.rpc.salta_rentas_fetcher
+python3 -m scrapitero.rpc.salta_rentas_fetcher <<< '{"region_id":"{region_id}","survey_id":"{survey_id}"}'
 ```
 
 | Campo | Default | Descripción |
@@ -71,6 +70,11 @@ echo '{"region_id":"{region_id}","survey_id":"{survey_id}"}' |
 
 - **Lento por diseño:** cada consulta genera un token reCAPTCHA + espera `delay_ms`.
   Notifica por Telegram al inicio y al final (patrón de throttling del proyecto).
+- **reCAPTCHA robusto:** antes de consultar, espera a que el script `grecaptcha` cargue
+  de verdad (poll + reload de cortesía) en vez de un sleep fijo; usa `grecaptcha.ready()`
+  y reintenta cada parcela hasta 2 veces. Si el script no carga, falla rápido y claro
+  (`ok=false`, "probable reCAPTCHA") sin recorrer parcelas en vano. Si **todas** las
+  consultas fallan, el output es `ok=false` (no un "completo" con errores).
 - **No da número de UF/PH:** el catastro de Salta modela cada unidad funcional como
   una clave independiente; el agrupamiento solo está en la cédula parcelaria paga.
   Esta skill solo aporta la señal vacante/edificado + (en el futuro) valuación fiscal.
