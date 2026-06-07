@@ -89,20 +89,17 @@ este agente las pisaría con una estimación. Es solo para fuentes sin UF exacta
 ## Comando
 
 ```bash
-echo '{"region_id":"{region_id}","survey_id":"{survey_id}"}' |
-  python3 -m scrapitero.rpc.unidades_estimator
+python3 -m scrapitero.rpc.unidades_estimator <<< '{"region_id":"{region_id}","survey_id":"{survey_id}"}'
 ```
 
 Recalcular todo (incluso parcelas ya estimadas):
 ```bash
-echo '{"region_id":"...","overwrite":true}' |
-  python3 -m scrapitero.rpc.unidades_estimator
+python3 -m scrapitero.rpc.unidades_estimator <<< '{"region_id":"...","overwrite":true}'
 ```
 
 Ajustar supuestos del proxy geométrico:
 ```bash
-echo '{"region_id":"...","m2_vivienda":90,"m2_comercio":60,"pisos_default":2}' |
-  python3 -m scrapitero.rpc.unidades_estimator
+python3 -m scrapitero.rpc.unidades_estimator <<< '{"region_id":"...","m2_vivienda":90,"m2_comercio":60,"pisos_default":2}'
 ```
 
 ## Parámetros

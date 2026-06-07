@@ -26,16 +26,12 @@ El archivo se abre directamente en Google Sheets al subirlo a Google Drive.
 
 ### Paso 1 — Generar el CSV
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.relevamiento_csv
+python3 -m scrapitero.rpc.relevamiento_csv <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
 ```
 
 Sin survey_id (usa el más reciente):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar"}' |
-
-  python3 -m scrapitero.rpc.relevamiento_csv
+python3 -m scrapitero.rpc.relevamiento_csv <<< '{"region_id":"ituzaingo-ba-ar"}'
 ```
 
 Output:

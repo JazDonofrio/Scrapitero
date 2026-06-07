@@ -10,6 +10,7 @@ Hermes lo llama así:
 
 import json
 import sys
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -19,6 +20,10 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+
+# Hora de Buenos Aires (UTC-3, sin DST) — timestamp que ve el operador en el cuadro
+# de actividad. Offset fijo para no depender de tzdata en el container de Hermes.
+BA_TZ = timezone(timedelta(hours=-3))
 
 
 class SurveyStepUpdateInput(BaseModel):
@@ -68,7 +73,10 @@ def run(inp: SurveyStepUpdateInput) -> SurveyStepUpdateOutput:
         except Exception:
             pass
 
+    ahora = datetime.now(BA_TZ).isoformat(timespec="seconds")
     notas["paso_actual"] = inp.paso
+    notas["paso_actual_ts"] = ahora
+    notas.setdefault("pasos_ts", {})[inp.paso] = ahora
     if inp.resultado is not None:
         notas.setdefault("pasos", {})[inp.paso] = inp.resultado
 

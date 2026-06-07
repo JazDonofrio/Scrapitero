@@ -66,11 +66,27 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 | GooglePlacesFetcher | `google_places_fetcher` | Comercios de Google Maps (cualquier país). **Después de UnidadesEstimator.** Baja POIs comerciales por teselas adaptativas, los vincula a parcela (`ST_Contains`) y aporta el **conteo real de `uf_comercio`** (cada comercio = +1 UF, `uf_fuente='google'`) + señal de uso (parcela con comercio → comercial/mixto, `uso_fuente='google'`). Caro (~USD 0,032/req): tope `max_requests` + Telegram |
 | UsoClassifier | `uso_classifier` | Clasificar `uso_principal` (residencial/comercial/mixto) por parcela |
 
+### Estimaciones adicionales (opcional — fuera del relevamiento principal)
+| Agente | RPC | Cuándo usarlo |
+|--------|-----|---------------|
+| DasymetricPopulation | `dasymetric_population` | **Habitantes por manzana** (desagregación dasimétrica). Estimación **secundaria** (menos exacta), se guarda y muestra aparte con su fecha. Reparte `setores_censitarios.pop_total` entre parcelas por peso de ocupación (uf_vivienda → volumen → área) y agrega por manzana catastral. Genérico para cualquier país con censo + parcelas. Necesita: censo que cubra la zona + fuente con parser de manzana (`manzana_catastral.py`). Correr **después** de uso/UF para mejor reparto. NO toca `parcelas`; escribe en `manzanas_habitantes`. |
+
 ### Creación de zonas
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
-| GeoJSONZoneFetcher | `geojson_zone_fetcher` | Crear región+survey desde archivo GeoJSON de polígonos |
-| ZonaFetcher | `zona_fetcher` | Crear zona desde coordenada central + radio en metros |
+| GeoJSONZoneFetcher | `geojson_zone_fetcher` | Crear región+survey desde archivo GeoJSON de polígonos. **País autodetectado** del centroide (cualquier país); `country_code` es override opcional |
+| ZonaFetcher | `zona_fetcher` | Crear zona desde coordenada central + radio en metros. **País autodetectado** del centro |
+
+**Genericidad / multi-país:** el sistema debe poder relevar **cualquier región del mundo**.
+- El **país se autodetecta** (reverse-geocoding) al crear la zona, tanto en la web como en
+  los agentes de creación — no se hardcodea ni se pide a mano (la web igual deja forzarlo).
+- Las utilidades geográficas comunes están en `src/scrapitero/agents/geo.py`:
+  `area_m2`/`area_km2` (proyectan al **huso UTM correcto según la posición**, válido en
+  todo el planeta — no usar husos fijos como 21S/20S), `utm_epsg`, `detect_country` (ISO-3)
+  y `country_iso2`. Cualquier cálculo de área nuevo debe usar `geo`, no un EPSG fijo.
+- Las **fuentes** sí son por-zona (abaco=VG, IDEMSA/IDESA=Salta, ARBA=PBA): se agregan con
+  el patrón **registry por fuente/región** (como `manzana_catastral.py`), y el orquestador
+  elige la fuente según país/región.
 
 ### Reportes y exportación
 | Agente | RPC | Cuándo usarlo |
@@ -215,6 +231,13 @@ Al tocar mensajería, aplicar el cambio en `CLAUDE.md` **y** en las skills `rele
 ## Web UI
 
 Dashboard para gestionar relevamientos. Corre en `http://localhost:8765`.
+
+**Habitantes por manzana (opción adicional):** en el detalle de cada relevamiento hay una
+sección aparte **"👥 Habitantes por manzana"** con un botón **"▶ Estimar habitantes"** que
+corre `DasymetricPopulation` in-process y muestra una tabla por manzana (Habitantes ≈ ·
+rango · UF Viv · UF Com · Parcelas) con total y **fecha de estimación**. Es **secundaria**
+al relevamiento (menos exacta), claramente marcada como tal. Endpoints:
+`POST /api/surveys/{id}/dasimetrico` (correr) y `GET /api/surveys/{id}/manzanas` (leer).
 
 **UF exacta vs estimada:** la web siempre muestra la cantidad de UF de vivienda y comercio.
 Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca con badge

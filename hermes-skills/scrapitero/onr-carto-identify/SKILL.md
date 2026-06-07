@@ -25,9 +25,7 @@ Para Várzea Grande siempre devuelve: CNS=063446, "1º Registro de Imóveis de V
 ## Correr el agente
 
 ```bash
-echo '{"lat":-15.65,"lng":-56.10}' |
-
-  python3 -m scrapitero.rpc.onr_carto_identify
+python3 -m scrapitero.rpc.onr_carto_identify <<< '{"lat":-15.65,"lng":-56.10}'
 ```
 
 ## Output esperado

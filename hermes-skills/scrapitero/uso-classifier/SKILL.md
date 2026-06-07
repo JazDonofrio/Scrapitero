@@ -28,16 +28,12 @@ El resultado se guarda en `uso_principal` de cada parcela: `residencial`, `comer
 ## Comando
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.uso_classifier
+python3 -m scrapitero.rpc.uso_classifier <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
 ```
 
 Sin survey_id (todas las parcelas de la región):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar"}' |
-
-  python3 -m scrapitero.rpc.uso_classifier
+python3 -m scrapitero.rpc.uso_classifier <<< '{"region_id":"ituzaingo-ba-ar"}'
 ```
 
 ## Parámetros opcionales

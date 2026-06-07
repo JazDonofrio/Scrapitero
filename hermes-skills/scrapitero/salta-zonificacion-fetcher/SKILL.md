@@ -60,17 +60,19 @@ Al clasificar, además del `uso_principal` se computan `unidades_funcionales_est
 `salta-rentas-fetcher` puede corregir después un residencial a `vacante` (UF → 0) si
 el `valorEdificado` es ≈ 0.
 
+**Origen del uso:** al clasificar se setea también `uso_fuente = 'cpua'` (queda registrado en
+el relevamiento final, columna **Uso Fuente** del CSV). Si después `salta-rentas-fetcher` lo
+corrige a vacante, pasa a `uso_fuente = 'rentas'`.
+
 ## Comando
 
 ```bash
-echo '{"region_id":"{region_id}","survey_id":"{survey_id}"}' |
-  python3 -m scrapitero.rpc.salta_zonificacion_fetcher
+python3 -m scrapitero.rpc.salta_zonificacion_fetcher <<< '{"region_id":"{region_id}","survey_id":"{survey_id}"}'
 ```
 
 Para reclasificar parcelas que ya tienen uso:
 ```bash
-echo '{"region_id":"...","overwrite":true}' |
-  python3 -m scrapitero.rpc.salta_zonificacion_fetcher
+python3 -m scrapitero.rpc.salta_zonificacion_fetcher <<< '{"region_id":"...","overwrite":true}'
 ```
 
 ## Parámetros

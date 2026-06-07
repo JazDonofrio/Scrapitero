@@ -47,6 +47,17 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 # ── Activity log (loguru sink → SSE + per-survey) ─────────────────────────────
 
+# Hora de Buenos Aires (UTC-3, Argentina no usa horario de verano → offset fijo,
+# sin depender de tzdata). Todos los timestamps que ve el operador van en esta zona.
+from datetime import datetime, timezone, timedelta
+BA_TZ = timezone(timedelta(hours=-3))
+
+
+def _ahora_ba() -> str:
+    """Fecha/hora actual de Buenos Aires en ISO (con offset), para guardar en notes."""
+    return datetime.now(BA_TZ).isoformat(timespec="seconds")
+
+
 _activity: deque = deque(maxlen=500)
 _activity_seq: int = 0
 _activity_lock = threading.Lock()
@@ -67,7 +78,7 @@ def _activity_sink(message) -> None:
         _activity_seq += 1
         entry = {
             "id": _activity_seq,
-            "ts": record["time"].strftime("%H:%M:%S"),
+            "ts": record["time"].astimezone(BA_TZ).strftime("%d/%m %H:%M:%S"),
             "lvl": record["level"].name,
             "msg": record["message"],
         }
@@ -149,7 +160,10 @@ def _set_pipeline_step(survey_id: str, step: str, result: Optional[dict] = None)
         except Exception:
             pass
 
+    ahora = _ahora_ba()
     notas["paso_actual"] = step
+    notas["paso_actual_ts"] = ahora
+    notas.setdefault("pasos_ts", {})[step] = ahora
     if result is not None:
         notas.setdefault("pasos", {})[step] = result
 
@@ -287,7 +301,7 @@ async def list_surveys() -> list[dict]:
 @app.post("/api/surveys")
 async def create_survey(
     nombre: str = Form(...),
-    country_code: str = Form("BRA"),
+    country_code: str = Form("AUTO"),   # "AUTO" → autodetectar del centroide del GeoJSON
     geojson_file: UploadFile = File(...),
 ) -> JSONResponse:
     geojson_bytes = await geojson_file.read()
@@ -297,6 +311,18 @@ async def create_survey(
         bbox = _bbox_from_geojson(geojson_data)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    # País: autodetectado del centroide del GeoJSON (cualquier país) salvo override.
+    if not country_code or country_code.upper() == "AUTO":
+        from scrapitero.agents import geo
+        lat = (bbox["south"] + bbox["north"]) / 2.0
+        lng = (bbox["west"] + bbox["east"]) / 2.0
+        country_code = await asyncio.to_thread(geo.detect_country, lat, lng)
+        if not country_code:
+            return JSONResponse({"ok": False, "error": (
+                "No se pudo autodetectar el país del GeoJSON (reverse-geocoding falló). "
+                "Reintentá o elegí el país manualmente."
+            )}, status_code=422)
 
     region_id = f"zona-{_slugify(nombre)}"
     survey_id = str(uuid.uuid4())
@@ -361,16 +387,21 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT centroid_lat, centroid_lng,
-                   uso_principal, uf_vivienda, uf_comercio,
-                   unidades_funcionales_estimadas,
-                   calle, numero, barrio, cca_code,
-                   area_m2_terreno, area_m2_construida,
-                   uf_fuente
-            FROM parcelas
-            WHERE survey_id = :sid
-              AND centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL
-            ORDER BY calle NULLS LAST
+            SELECT p.centroid_lat, p.centroid_lng,
+                   p.uso_principal, p.uf_vivienda, p.uf_comercio,
+                   p.unidades_funcionales_estimadas,
+                   p.calle, p.numero, p.barrio, p.cca_code,
+                   p.area_m2_terreno, p.area_m2_construida,
+                   p.uf_fuente,
+                   COALESCE((
+                       SELECT array_agg(c.nombre ORDER BY c.nombre)
+                       FROM comercios c
+                       WHERE c.parcela_id = p.parcela_id AND c.nombre IS NOT NULL
+                   ), '{}') AS comercios
+            FROM parcelas p
+            WHERE p.survey_id = :sid
+              AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
+            ORDER BY p.calle NULLS LAST
         """), {"sid": survey_id}).fetchall()
     return [
         {
@@ -384,6 +415,7 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "area_c": round(float(r[11]), 1) if r[11] else None,
             "uf_fuente": r[12] or "",
             "uf_estimado": bool(r[12]) and r[12] != "bci",
+            "comercios": list(r[13] or []),
             "pisos": _pisos_estimados(
                 float(r[10]) if r[10] else None,
                 float(r[11]) if r[11] else None,
@@ -401,6 +433,66 @@ async def survey_activity(survey_id: str, since: int = Query(0)) -> dict:
     new = [e for e in entries if e["id"] > since]
     last_id = entries[-1]["id"] if entries else 0
     return {"entries": new, "last_id": last_id}
+
+
+@app.post("/api/surveys/{survey_id}/dasimetrico")
+async def run_dasimetrico(survey_id: str) -> JSONResponse:
+    """Estimación ADICIONAL de habitantes por manzana (desagregación dasimétrica).
+
+    Es secundaria al relevamiento principal (menos exacta). Corre in-process — es sólo
+    cómputo en DB sobre los setores censales y las parcelas ya cargadas.
+    """
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.dasymetric_population import DasymetricInput
+    from scrapitero.agents.dasymetric_population import run as run_dasi
+
+    def _job() -> dict:
+        _thread_survey_id.value = survey_id
+        return run_dasi(DasymetricInput(region_id=region_id, survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.get("/api/surveys/{survey_id}/manzanas")
+async def survey_manzanas(survey_id: str) -> dict:
+    """Resultado de la estimación dasimétrica: habitantes por manzana (+ UF de la manzana)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT manzana_codigo, habitantes_est, habitantes_low, habitantes_high,
+                   uf_vivienda, uf_comercio, n_parcelas, metodo, fecha_estimacion,
+                   ST_Y(ST_Centroid(geometry)) AS lat, ST_X(ST_Centroid(geometry)) AS lng
+            FROM manzanas_habitantes
+            WHERE survey_id = :sid
+            ORDER BY habitantes_est DESC NULLS LAST
+        """), {"sid": survey_id}).mappings().all()
+
+    manzanas = [{
+        "codigo": r["manzana_codigo"],
+        "habitantes": round(r["habitantes_est"]) if r["habitantes_est"] is not None else None,
+        "habitantes_low": round(r["habitantes_low"]) if r["habitantes_low"] is not None else None,
+        "habitantes_high": round(r["habitantes_high"]) if r["habitantes_high"] is not None else None,
+        "uf_vivienda": int(r["uf_vivienda"] or 0),
+        "uf_comercio": int(r["uf_comercio"] or 0),
+        "n_parcelas": int(r["n_parcelas"] or 0),
+        "metodo": r["metodo"] or "",
+        "lat": float(r["lat"]) if r["lat"] is not None else None,
+        "lng": float(r["lng"]) if r["lng"] is not None else None,
+    } for r in rows]
+
+    total_hab = sum(m["habitantes"] or 0 for m in manzanas)
+    fecha = rows[0]["fecha_estimacion"].isoformat() if rows else None
+    return {
+        "manzanas": manzanas,
+        "total_manzanas": len(manzanas),
+        "total_habitantes": total_hab,
+        "fecha_estimacion": fecha,
+    }
 
 
 def _get_survey_row(survey_id: str) -> Optional[tuple]:
@@ -494,7 +586,13 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 direccion_source,
                 centroid_lat,
                 centroid_lng,
-                uf_fuente
+                uf_fuente,
+                uso_fuente,
+                COALESCE((
+                    SELECT string_agg(c.nombre, ' | ' ORDER BY c.nombre)
+                    FROM comercios c
+                    WHERE c.parcela_id = parcelas.parcela_id AND c.nombre IS NOT NULL
+                ), '') AS comercios
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -514,17 +612,17 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         w.writerow([
             "Inscripción", "Setor-Quadra-Lote", "Calle", "Número",
             "Complemento", "Bairro", "Municipio", "CEP",
-            "Uso", "UF Vivienda", "UF Comercio", "Total UF", "UF Fuente",
+            "Uso", "Uso Fuente", "UF Vivienda", "UF Comercio", "Total UF", "UF Fuente",
             "Área Terreno m²", "Área Construida m²", "Pisos",
             "Matrícula", "Fuente", "Fuente dirección",
-            "Lat", "Lng",
+            "Lat", "Lng", "Comercios (Google)",
         ])
         for r in rows:
             w.writerow([
                 r[0] or "", r[1] or "",
                 r[2] or "", r[3] or "", r[4] or "",
                 r[5] or "", r[6] or "", r[7] or "",
-                r[8] or "", r[9] or 0, r[10] or 0,
+                r[8] or "", r[21] or "", r[9] or 0, r[10] or 0,
                 r[11] or 0, r[20] or "",
                 f"{r[12]:.2f}" if r[12] else "",
                 f"{r[13]:.2f}" if r[13] else "",
@@ -532,6 +630,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[15] or "", r[16] or "", r[17] or "",
                 f"{r[18]:.6f}" if r[18] else "",
                 f"{r[19]:.6f}" if r[19] else "",
+                r[22] or "",
             ])
         yield buf.getvalue()
 

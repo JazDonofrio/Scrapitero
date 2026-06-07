@@ -35,15 +35,15 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 import httpx
-import pyproj
 from loguru import logger
 from pydantic import BaseModel
 from shapely.geometry import shape
-from shapely.ops import transform as shp_transform, unary_union
+from shapely.ops import unary_union
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 from scrapitero.agents.smartgis_fetcher import _geom_to_polygon
 
 
@@ -97,11 +97,6 @@ SOURCES: dict[str, WFSSource] = {
 # Bbox aproximado de la ciudad de Salta Capital (lat/lng WGS84)
 # (south, west, north, east)
 _CAPITAL_BBOX = (-24.95, -65.55, -24.70, -65.30)
-
-# Proyector UTM Zona 20S — sistema métrico para Salta (EPSG:32720)
-_PROJ_UTM20S = pyproj.Transformer.from_crs(
-    "EPSG:4326", "EPSG:32720", always_xy=True
-).transform
 
 # Departamentos de Salta → nombre legible
 _DEPARTA_NOMBRES: dict[str, str] = {
@@ -217,10 +212,8 @@ def _to_polygon(geom):
 
 
 def _area_m2(geom) -> Optional[float]:
-    try:
-        return round(shp_transform(_PROJ_UTM20S, geom).area, 2)
-    except Exception:
-        return None
+    # Huso UTM correcto según la posición (antes 20S fijo). Genérico vía geo.area_m2.
+    return geo.area_m2(geom)
 
 
 def _centroid(geom) -> tuple[float, float]:

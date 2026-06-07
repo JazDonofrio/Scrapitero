@@ -33,6 +33,9 @@ clasifica parcelas según el campo `TIPO` ∈ {URBANO, RURAL, CLUB DE CAMPO}.
 | CLUB DE CAMPO | `residencial` (loteo cerrado) → **siempre al menos 1 UF de vivienda** (`unidades_funcionales_estimadas` y `uf_vivienda` con `GREATEST(actual, 1)`) |
 | URBANO | *(sin cambio — lo resuelve CPUA / salta-zonificacion-fetcher)* |
 
+Cuando setea uso (RURAL/CLUB DE CAMPO) registra también `uso_fuente = 'sigsa'` — el origen del
+uso queda en el relevamiento final (columna **Uso Fuente** del CSV).
+
 ## Cuándo usar
 
 - **Interior provincial:** es la única señal de uso disponible (el CPUA solo cubre Capital).
@@ -43,8 +46,7 @@ Usar después de `salta-catastro-fetcher` (necesita `nomenclatura_catastral`).
 ## Comando
 
 ```bash
-echo '{"region_id":"{region_id}","survey_id":"{survey_id}"}' |
-  python3 -m scrapitero.rpc.salta_registro_fetcher
+python3 -m scrapitero.rpc.salta_registro_fetcher <<< '{"region_id":"{region_id}","survey_id":"{survey_id}"}'
 ```
 
 `overwrite:true` para reclasificar; `batch_size` (default 100) nomenclaturas por request.

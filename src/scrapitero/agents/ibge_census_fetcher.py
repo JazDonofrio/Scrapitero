@@ -25,6 +25,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
@@ -226,24 +227,13 @@ def _upsert_setores(gdf: gpd.GeoDataFrame, agregados: dict,
         for _, row in gdf.iterrows():
             setor_id = str(row[col_setor]).strip()
             geom_wkt = row.geometry.wkt if row.geometry else None
-            area_km2 = float(row.geometry.area * 1e10 / 1e6) if row.geometry else None
 
             ag = agregados.get(setor_id, {})
             pop = ag.get("pop_total")
 
-            # Calcular área en km² correctamente (geometría en grados → aproximación)
-            if row.geometry:
-                # Proyectar a SIRGAS 2000 / UTM para área precisa
-                from shapely.ops import transform
-                import pyproj
-                project = pyproj.Transformer.from_crs(
-                    "EPSG:4326", "EPSG:32721", always_xy=True
-                ).transform
-                try:
-                    projected = transform(project, row.geometry)
-                    area_km2 = projected.area / 1_000_000
-                except Exception:
-                    area_km2 = None
+            # Área en km² proyectando al huso UTM correcto según la posición del setor
+            # (antes UTM 21S fijo → erróneo fuera de esa franja; Brasil abarca 18S–25S).
+            area_km2 = geo.area_km2(row.geometry) if row.geometry else None
 
             existing = conn.execute(
                 text("SELECT setor_id FROM setores_censitarios WHERE setor_id = :sid"),

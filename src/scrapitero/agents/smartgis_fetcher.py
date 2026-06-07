@@ -329,11 +329,31 @@ def _get_lot_details(ids: set[int], delay_ms: int) -> list[dict]:
     return lots
 
 
+# Municipio/estado por código IBGE (extensible). SmartGIS hoy sirve sólo a Várzea
+# Grande (la URL de la API lo fija), por eso VG es el default; el país sale de la
+# región. Para sumar otra ciudad abaco: agregar su código acá (y su path de API).
+_MUNICIPIO_INFO = {
+    "5108402": {"municipio": "Várzea Grande", "estado": "MT"},
+}
+_MUNICIPIO_DEFAULT = {"municipio": "Várzea Grande", "estado": "MT"}
+
+
+def _municipio_info(conn, region_id: str) -> dict:
+    """Resuelve municipio/estado/país de la parcela desde la región (no hardcodea)."""
+    row = conn.execute(text(
+        "SELECT municipio_codigo, country_code FROM regions WHERE region_id = :r"
+    ), {"r": region_id}).fetchone()
+    info = dict(_MUNICIPIO_INFO.get(row[0] if row else None, _MUNICIPIO_DEFAULT))
+    info["pais"] = (row[1] if row and row[1] else "BRA")
+    return info
+
+
 def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int, int]:
     engine = get_engine()
     inserted = updated = 0
 
     with engine.begin() as conn:
+        muni = _municipio_info(conn, region_id)
         for lot in lots:
             codigo = _parse_codigo(lot)
             if codigo is None:
@@ -398,7 +418,7 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
                         :calle, :barrio, :cep,
                         :aterr, :acons,
                         :unid,
-                        'Várzea Grande', 'MT', 'BRA',
+                        :municipio, :estado, :pais,
                         'smartgis_vg', 'smartgis_vg', 0.85
                     )
                 """), {
@@ -407,6 +427,7 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
                     "cca": str(codigo), "nomen": nomenclatura,
                     "calle": calle, "barrio": barrio, "cep": cep,
                     "aterr": area_terreno, "acons": area_const,
+                    "municipio": muni["municipio"], "estado": muni["estado"], "pais": muni["pais"],
                     "unid": unidades,
                 })
                 inserted += 1

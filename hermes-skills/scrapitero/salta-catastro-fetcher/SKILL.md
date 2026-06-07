@@ -32,17 +32,16 @@ Cuando `coverage-reporter` devuelve `parcelas == 0` para una región en **Salta,
 ## Comando
 
 ```bash
-echo '{"region_id":"{region_id}","survey_id":"{survey_id}","fuente":"auto"}' |
-  python3 -m scrapitero.rpc.salta_catastro_fetcher
+python3 -m scrapitero.rpc.salta_catastro_fetcher <<< '{"region_id":"{region_id}","survey_id":"{survey_id}","fuente":"auto"}'
 ```
 
 Para forzar una fuente específica:
 ```bash
 # Solo Capital (IDEMSA)
-echo '{"region_id":"...","fuente":"capital"}' | python3 -m scrapitero.rpc.salta_catastro_fetcher
+python3 -m scrapitero.rpc.salta_catastro_fetcher <<< '{"region_id":"...","fuente":"capital"}'
 
 # Solo Interior (IDESA)
-echo '{"region_id":"...","fuente":"provincia"}' | python3 -m scrapitero.rpc.salta_catastro_fetcher
+python3 -m scrapitero.rpc.salta_catastro_fetcher <<< '{"region_id":"...","fuente":"provincia"}'
 ```
 
 ## Parámetros
@@ -75,16 +74,16 @@ Después de este agente, ejecutar en orden:
 
 ```bash
 # 1. Footprints de edificios (independiente)
-echo '{"region_id":"...","survey_id":"..."}' | python3 -m scrapitero.rpc.osm_building_fetcher &
+python3 -m scrapitero.rpc.osm_building_fetcher & <<< '{"region_id":"...","survey_id":"..."}'
 
 # 2. Completar direcciones con Google Maps (es-AR)
-echo '{"region_id":"...","survey_id":"...","batch_size":200}' | python3 -m scrapitero.rpc.address_resolver
+python3 -m scrapitero.rpc.address_resolver <<< '{"region_id":"...","survey_id":"...","batch_size":200}'
 
 # 3. Clasificar uso residencial/comercial/mixto
-echo '{"region_id":"...","survey_id":"..."}' | python3 -m scrapitero.rpc.uso_classifier
+python3 -m scrapitero.rpc.uso_classifier <<< '{"region_id":"...","survey_id":"..."}'
 
 # 4. Exportar
-echo '{"region_id":"...","survey_id":"..."}' | python3 -m scrapitero.rpc.relevamiento_csv
+python3 -m scrapitero.rpc.relevamiento_csv <<< '{"region_id":"...","survey_id":"..."}'
 ```
 
 ## Si falla

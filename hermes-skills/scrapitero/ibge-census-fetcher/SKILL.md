@@ -26,9 +26,7 @@ Cuando `coverage-reporter` devuelve `setores == 0`.
 ## Comando
 **No instalar nada. El venv ya está listo.**
 ```bash
-echo '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}' |
-
-  python3 -m scrapitero.rpc.ibge_census_fetcher
+python3 -m scrapitero.rpc.ibge_census_fetcher <<< '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}'
 ```
 
 ## Output esperado

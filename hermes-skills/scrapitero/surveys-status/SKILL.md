@@ -26,16 +26,12 @@ Cuando el usuario dice cosas como:
 
 Solo los activos (status=running):
 ```bash
-echo '{}' |
-
-  python3 -m scrapitero.rpc.surveys_status
+python3 -m scrapitero.rpc.surveys_status <<< '{}'
 ```
 
 Todos (incluye completed/failed):
 ```bash
-echo '{"solo_activos": false}' |
-
-  python3 -m scrapitero.rpc.surveys_status
+python3 -m scrapitero.rpc.surveys_status <<< '{"solo_activos": false}'
 ```
 
 ## Output esperado

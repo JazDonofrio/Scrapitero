@@ -24,9 +24,7 @@ si el survey fue detenido externamente (usuario hizo click en "Parar").
 ## Comando
 
 ```bash
-echo '<JSON>' |
-
-  python3 -m scrapitero.rpc.survey_step_update
+python3 -m scrapitero.rpc.survey_step_update <<< '<JSON>'
 ```
 
 ## Ejemplos de input

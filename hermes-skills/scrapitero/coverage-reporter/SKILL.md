@@ -23,16 +23,12 @@ Devuelve un JSON compacto con el estado del relevamiento activo.
 ## Comando
 **No instalar nada. El venv ya está listo.**
 ```bash
-echo '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.coverage_reporter
+python3 -m scrapitero.rpc.coverage_reporter <<< '{"region_id":"vg-mt-br","survey_id":"<SURVEY_ID>"}'
 ```
 
 Si no hay survey activo todavía, omitir `survey_id`:
 ```bash
-echo '{"region_id":"vg-mt-br"}' |
-
-  python3 -m scrapitero.rpc.coverage_reporter
+python3 -m scrapitero.rpc.coverage_reporter <<< '{"region_id":"vg-mt-br"}'
 ```
 
 ## Output esperado

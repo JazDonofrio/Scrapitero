@@ -20,6 +20,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 from scrapitero.agents.osm_building_fetcher import OSMInput, run as osm_run
 
 
@@ -27,7 +28,7 @@ class GeoJSONZoneInput(BaseModel):
     region_nombre: str
     geojson_str: str           # GeoJSON FeatureCollection, Feature o Polygon
     region_id: Optional[str] = None
-    country_code: str = "BRA"
+    country_code: Optional[str] = None   # autodetectado del centroide si no se pasa
 
 
 class GeoJSONZoneOutput(BaseModel):
@@ -92,6 +93,19 @@ def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
 
     logger.info(f"GeoJSON zona: bbox={bbox}")
 
+    # País: autodetectado del centroide de la zona (cualquier país) salvo override explícito.
+    country = input.country_code or geo.detect_country(
+        (bbox["south"] + bbox["north"]) / 2.0,
+        (bbox["west"] + bbox["east"]) / 2.0,
+    )
+    if not country:
+        return GeoJSONZoneOutput(ok=False, error=(
+            "No se pudo autodetectar el país del GeoJSON (reverse-geocoding falló). "
+            "Reintentá en unos segundos o pasá country_code explícito."
+        ))
+    logger.info(f"País de la zona: {country}"
+                f"{' (autodetectado)' if not input.country_code else ' (explícito)'}")
+
     region_id = input.region_id or f"zona-{_slugify(input.region_nombre)}"
     bbox_wkt = _bbox_to_wkt(bbox)
     engine = get_engine()
@@ -106,7 +120,7 @@ def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
                         zone_geojson = EXCLUDED.zone_geojson,
                         bbox_wkt = EXCLUDED.bbox_wkt
             """), {"rid": region_id, "name": input.region_nombre,
-                   "cc": input.country_code, "geojson": input.geojson_str,
+                   "cc": country, "geojson": input.geojson_str,
                    "bbox": bbox_wkt})
 
             survey_id = str(uuid.uuid4())

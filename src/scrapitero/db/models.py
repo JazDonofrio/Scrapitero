@@ -127,6 +127,7 @@ class Parcela(Base):
     uf_vivienda: Mapped[Optional[int]] = mapped_column(Integer)   # migración 004
     uf_comercio: Mapped[Optional[int]] = mapped_column(Integer)   # migración 004
     uf_fuente: Mapped[Optional[str]] = mapped_column(String(20))  # bci/osm/proxy/uso (migración 008)
+    uso_fuente: Mapped[Optional[str]] = mapped_column(String(20))  # bci/cpua/sigsa/rentas/clasificador (migración 009)
 
     # Catastro (migración 003)
     cca_code: Mapped[Optional[str]] = mapped_column(String(100))
@@ -170,6 +171,37 @@ class Edificio(Base):
     parcela: Mapped[Optional["Parcela"]] = relationship("Parcela", back_populates="edificios")
 
 
+# ── Comercios (POIs Google Places — tabla interna) ─────────────────────────────
+
+class Comercio(Base):
+    """Comercios de Google Places — POIs vinculados a parcela. Tabla interna.
+
+    Cada comercio cuyo punto cae dentro de una parcela suma +1 a `uf_comercio`
+    (sin agrupar). Insumo de GooglePlacesFetcher. Migración 010.
+    """
+    __tablename__ = "comercios"
+    __table_args__ = (
+        UniqueConstraint("region_id", "place_id", name="uq_comercios_region_place"),
+    )
+
+    comercio_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                    default=uuid.uuid4)
+    survey_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+                                                  ForeignKey("surveys.survey_id"))
+    region_id: Mapped[str] = mapped_column(String(50), ForeignKey("regions.region_id"))
+    parcela_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parcelas.parcela_id")
+    )
+    place_id: Mapped[str] = mapped_column(String(120))   # id de Google (dedup)
+    nombre: Mapped[Optional[str]] = mapped_column(String(250))
+    rubro: Mapped[Optional[str]] = mapped_column(String(80))   # primaryType
+    tipos: Mapped[Optional[str]] = mapped_column(Text)         # csv de types
+    business_status: Mapped[Optional[str]] = mapped_column(String(40))
+    location: Mapped[Optional[object]] = mapped_column(Geometry("POINT", srid=4326))
+    source: Mapped[Optional[str]] = mapped_column(String(30), default="google_places")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ── Unidades Funcionales (tabla interna) ───────────────────────────────────────
 
 class UnidadFuncional(Base):
@@ -184,6 +216,39 @@ class UnidadFuncional(Base):
     depto: Mapped[Optional[str]] = mapped_column(String(10))
     tipo: Mapped[Optional[str]] = mapped_column(String(30))
     # "casa" | "depto" | "local_comercial" | "garage"
+
+
+# ── Manzanas: estimación dasimétrica de habitantes (tabla aparte) ──────────────
+
+class ManzanaHabitantes(Base):
+    """Estimación SECUNDARIA de habitantes por manzana catastral (dasimétrica).
+
+    Reparte `setores_censitarios.pop_total` entre las parcelas por un peso de
+    ocupación y agrega por manzana catastral. Es menos exacta que la UF del
+    relevamiento principal → se guarda y muestra aparte, con su fecha. Migración 011.
+    """
+    __tablename__ = "manzanas_habitantes"
+    __table_args__ = (
+        UniqueConstraint("survey_id", "manzana_codigo",
+                         name="uq_manzana_hab_survey_codigo"),
+    )
+
+    manzana_hab_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                       default=uuid.uuid4)
+    survey_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+                                                  ForeignKey("surveys.survey_id"))
+    region_id: Mapped[str] = mapped_column(String(50), ForeignKey("regions.region_id"))
+    manzana_codigo: Mapped[str] = mapped_column(String(120))
+    geometry: Mapped[Optional[object]] = mapped_column(Geometry("MULTIPOLYGON", srid=4326))
+    habitantes_est: Mapped[Optional[float]] = mapped_column(Float)
+    habitantes_low: Mapped[Optional[float]] = mapped_column(Float)
+    habitantes_high: Mapped[Optional[float]] = mapped_column(Float)
+    uf_vivienda: Mapped[Optional[int]] = mapped_column(Integer)
+    uf_comercio: Mapped[Optional[int]] = mapped_column(Integer)
+    n_parcelas: Mapped[int] = mapped_column(Integer, default=0)
+    metodo: Mapped[Optional[str]] = mapped_column(String(40))
+    fecha_estimacion: Mapped[date] = mapped_column(Date, server_default=func.current_date())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 # ── Orchestrator Log ──────────────────────────────────────────────────────────

@@ -105,7 +105,10 @@ Skills disponibles:
 
 ## Mensajes de Telegram
 
-Usar siempre `target="telegram:979088442"` en cada llamada a `send_message`.
+Enviar a la **chat configurada del operador**: usar `target="telegram:$TELEGRAM_CHAT_ID"`
+(la variable de entorno `TELEGRAM_CHAT_ID` del entorno de Hermes). No hardcodear un id de
+chat: así el mismo flujo sirve para distintos operadores/zonas. Si por algún motivo la
+variable no está disponible, pedírsela al usuario antes de seguir.
 Escribir siempre en español.
 
 **Audiencia técnica.** Quien lee Telegram es un operador técnico capaz de destrabar el

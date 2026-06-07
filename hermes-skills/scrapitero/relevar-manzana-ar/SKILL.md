@@ -63,9 +63,7 @@ Guardar el `survey_id`.
 Con el JSESSIONID recibido, correr `arba_carto_fetcher` (descarga IDERA + enriquece carto en un solo paso):
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"<CIRC>","seccion":"<SECC>","manzana":"<MZA>","cookie_header":"<COOKIE_DEL_USUARIO>"}' |
-
-  python3 -m scrapitero.rpc.arba_carto_fetcher
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"<CIRC>","seccion":"<SECC>","manzana":"<MZA>","cookie_header":"<COOKIE_DEL_USUARIO>"}'
 ```
 
 ### Si el output tiene `"needs_cookies": true`:
@@ -82,9 +80,7 @@ Reportar el error exacto al usuario y detener.
 ## Paso 4 — Verificar estado
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.coverage_reporter
+python3 -m scrapitero.rpc.coverage_reporter <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
 ```
 
 ---

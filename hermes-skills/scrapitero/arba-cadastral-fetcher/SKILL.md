@@ -28,16 +28,12 @@ Cuando `coverage-reporter` devuelve `parcelas == 0` para una región argentina.
 
 Para una manzana específica (recomendado para tests):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' |
-
-  python3 -m scrapitero.rpc.arba_cadastral_fetcher
+python3 -m scrapitero.rpc.arba_cadastral_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}'
 ```
 
 Para todo el partido:
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136"}' |
-
-  python3 -m scrapitero.rpc.arba_cadastral_fetcher
+python3 -m scrapitero.rpc.arba_cadastral_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136"}'
 ```
 
 ## Output esperado

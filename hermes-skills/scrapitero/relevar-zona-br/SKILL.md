@@ -23,23 +23,17 @@ No requiere conocer de antemano el municipio, la nomenclatura ni la región.
 ## Paso 1 — Definir la zona y descargar edificios OSM
 
 ```bash
-echo '{"lat":-15.6468,"lng":-56.1195,"radio_m":500}' |
-
-  python3 -m scrapitero.rpc.zona_fetcher
+python3 -m scrapitero.rpc.zona_fetcher <<< '{"lat":-15.6468,"lng":-56.1195,"radio_m":500}'
 ```
 
 Con nombre personalizado:
 ```bash
-echo '{"lat":-15.6468,"lng":-56.1195,"radio_m":500,"region_nombre":"Centro Várzea Grande"}' |
-
-  python3 -m scrapitero.rpc.zona_fetcher
+python3 -m scrapitero.rpc.zona_fetcher <<< '{"lat":-15.6468,"lng":-56.1195,"radio_m":500,"region_nombre":"Centro Várzea Grande"}'
 ```
 
 Con region_id explícito (para reutilizar una zona ya definida):
 ```bash
-echo '{"lat":-15.6468,"lng":-56.1195,"radio_m":500,"region_id":"centro-vg-br"}' |
-
-  python3 -m scrapitero.rpc.zona_fetcher
+python3 -m scrapitero.rpc.zona_fetcher <<< '{"lat":-15.6468,"lng":-56.1195,"radio_m":500,"region_id":"centro-vg-br"}'
 ```
 
 ## Output esperado
@@ -63,16 +57,12 @@ echo '{"lat":-15.6468,"lng":-56.1195,"radio_m":500,"region_id":"centro-vg-br"}' 
 Guardar el `region_id` y `survey_id` del output y continuar:
 
 ```bash
-echo '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.coverage_reporter
+python3 -m scrapitero.rpc.coverage_reporter <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
 ```
 
 Luego resolver direcciones:
 ```bash
-echo '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>","batch_size":100}' |
-
-  python3 -m scrapitero.rpc.address_resolver
+python3 -m scrapitero.rpc.address_resolver <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>","batch_size":100}'
 ```
 
 ## Parámetros

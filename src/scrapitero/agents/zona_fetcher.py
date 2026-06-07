@@ -1,4 +1,4 @@
-"""ZonaFetcher — define una zona de relevamiento por coordenada + radio (Brasil).
+"""ZonaFetcher — define una zona de relevamiento por coordenada + radio (cualquier país).
 
 Dado un punto central y un radio en metros:
 1. Calcula el bounding box
@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 from scrapitero.agents.osm_building_fetcher import OSMInput, run as osm_run
 
 
@@ -88,7 +89,7 @@ def _slugify(text: str) -> str:
     return s.strip("-")
 
 
-def _ensure_region(conn, region_id: str, nombre: str) -> None:
+def _ensure_region(conn, region_id: str, nombre: str, country_code: str) -> None:
     exists = conn.execute(
         text("SELECT 1 FROM regions WHERE region_id = :rid"),
         {"rid": region_id}
@@ -96,10 +97,10 @@ def _ensure_region(conn, region_id: str, nombre: str) -> None:
     if not exists:
         conn.execute(text("""
             INSERT INTO regions (region_id, name, country_code)
-            VALUES (:rid, :name, 'BRA')
+            VALUES (:rid, :name, :cc)
             ON CONFLICT (region_id) DO NOTHING
-        """), {"rid": region_id, "name": nombre})
-        logger.info(f"Región creada: {region_id} ({nombre})")
+        """), {"rid": region_id, "name": nombre, "cc": country_code})
+        logger.info(f"Región creada: {region_id} ({nombre}) — país {country_code}")
 
 
 @agent_run
@@ -107,17 +108,26 @@ def run(input: ZonaInput) -> ZonaOutput:
     bbox = _bbox_from_center(input.lat, input.lng, input.radio_m)
     logger.info(f"Zona: centro=({input.lat},{input.lng}) radio={input.radio_m}m → bbox={bbox}")
 
-    # Nombre y region_id
+    # País autodetectado del centro (cualquier país; sin hardcodear Brasil).
+    country = geo.detect_country(input.lat, input.lng)
+    if not country:
+        return ZonaOutput(ok=False, error=(
+            "No se pudo autodetectar el país de la coordenada (reverse-geocoding falló). "
+            "Reintentá en unos segundos."
+        ))
+    iso2 = geo.country_iso2(country) or "xx"
+
+    # Nombre y region_id (el sufijo ISO-2 lo usa address-resolver para el idioma)
     nombre = input.region_nombre or _reverse_geocode(input.lat, input.lng)
-    region_id = input.region_id or f"zona-{_slugify(nombre)}-br"
-    logger.info(f"Región: {region_id} ({nombre})")
+    region_id = input.region_id or f"zona-{_slugify(nombre)}-{iso2}"
+    logger.info(f"Región: {region_id} ({nombre}) — país {country}")
 
     engine = get_engine()
 
     # Crear región y reusar o crear survey
     try:
         with engine.begin() as conn:
-            _ensure_region(conn, region_id, nombre)
+            _ensure_region(conn, region_id, nombre, country)
             # Reusar el survey más reciente si ya existe para esta región
             existing = conn.execute(text("""
                 SELECT survey_id::text FROM surveys

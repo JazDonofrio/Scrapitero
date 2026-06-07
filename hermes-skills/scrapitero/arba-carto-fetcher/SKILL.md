@@ -38,9 +38,7 @@ Después de `arba-cadastral-fetcher`, para enriquecer las parcelas con:
 ### Paso 1 — Correr con el JSESSIONID recibido
 
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}' |
-
-  python3 -m scrapitero.rpc.arba_carto_fetcher
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}'
 ```
 
 ### Paso 2 — Si `needs_cookies: true` → pedir al usuario por Telegram
@@ -64,16 +62,12 @@ Enviar este mensaje:
 
 **Si el usuario mandó solo el valor del JSESSIONID** (ej: `ABC123XYZ`):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","jsessionid":"<VALOR>"}' |
-
-  python3 -m scrapitero.rpc.arba_carto_fetcher
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","jsessionid":"<VALOR>"}'
 ```
 
 **Si el usuario mandó el header Cookie completo** (ej: `JSESSIONID=ABC123; TS01x=yyy` o `Cookie: JSESSIONID=ABC123`):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","cookie_header":"<STRING_COMPLETO>"}' |
-
-  python3 -m scrapitero.rpc.arba_carto_fetcher
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","cookie_header":"<STRING_COMPLETO>"}'
 ```
 
 **IMPORTANTE:** no inventar ni modificar el valor del cookie. Usarlo exactamente como lo mandó el usuario.

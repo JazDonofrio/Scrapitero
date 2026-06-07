@@ -31,14 +31,12 @@ Lee cada PDF `pdf_downloads/reporte_{cca_code}.pdf` y actualiza la parcela en DB
 ## Correr el agente
 
 ```bash
-echo '{"region_id":"<REGION_ID>"}' |
-
-  python3 -m scrapitero.rpc.bci_parser
+python3 -m scrapitero.rpc.bci_parser <<< '{"region_id":"<REGION_ID>"}'
 ```
 
 Con batch (procesar de a 100):
 ```bash
-echo '{"region_id":"<REGION_ID>","batch_size":100}' | ...
+python3 -m scrapitero.rpc.bci_parser <<< '{"region_id":"<REGION_ID>","batch_size":100}'
 ```
 
 ## Output esperado

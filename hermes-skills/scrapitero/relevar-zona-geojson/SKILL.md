@@ -23,20 +23,16 @@ Crea un nuevo relevamiento a partir de un GeoJSON con el polígono del área.
 ## Paso 1 — Crear zona y descargar edificios OSM
 
 ```bash
-echo '{
+python3 -m scrapitero.rpc.geojson_zone_fetcher <<< '{
   "region_nombre": "Barrio Centro",
   "geojson_str": "<CONTENIDO_DEL_ARCHIVO_GEOJSON>",
   "country_code": "BRA"
-}' |
-
-  python3 -m scrapitero.rpc.geojson_zone_fetcher
+}'
 ```
 
 Para Argentina:
 ```bash
-echo '{"region_nombre":"Villa Sur","geojson_str":"<GeoJSON>","country_code":"ARG"}' |
-
-  python3 -m scrapitero.rpc.geojson_zone_fetcher
+python3 -m scrapitero.rpc.geojson_zone_fetcher <<< '{"region_nombre":"Villa Sur","geojson_str":"<GeoJSON>","country_code":"ARG"}'
 ```
 
 ## Output esperado

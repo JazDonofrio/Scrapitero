@@ -23,23 +23,19 @@ de la Prefeitura de Várzea Grande. Guarda geometría + inscripción en `parcela
 ## Paso 1 — Correr el agente (bbox derivado automáticamente del zone_geojson)
 
 ```bash
-echo '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.smartgis_fetcher
+python3 -m scrapitero.rpc.smartgis_fetcher <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
 ```
 
 Con bbox explícito (si la región no tiene zone_geojson):
 ```bash
-echo '{
+env $(cat /opt/scrapitero/.env | xargs) python3 -m scrapitero.rpc.smartgis_fetcher <<< '{
   "region_id":"<REGION_ID>",
   "survey_id":"<SURVEY_ID>",
   "bbox_south":-15.660,
   "bbox_west":-56.130,
   "bbox_north":-15.640,
   "bbox_east":-56.110
-}' | env $(cat /opt/scrapitero/.env | xargs)
-   
-     python3 -m scrapitero.rpc.smartgis_fetcher
+}'
 ```
 
 ## Output esperado

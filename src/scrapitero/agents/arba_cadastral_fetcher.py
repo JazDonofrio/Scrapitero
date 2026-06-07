@@ -15,12 +15,11 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 from shapely.geometry import shape
-from shapely.ops import transform as shp_transform
-import pyproj
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 
 
 IDERA_WFS = "https://geo.arba.gov.ar/geoserver/idera/wfs"
@@ -102,13 +101,8 @@ def _centroid_from_feature(feat: dict) -> tuple[Optional[float], Optional[float]
 
 
 def _area_m2(geom) -> Optional[float]:
-    try:
-        proj = pyproj.Transformer.from_crs(
-            "EPSG:4326", "EPSG:32721", always_xy=True
-        ).transform
-        return round(shp_transform(proj, geom).area, 2)
-    except Exception:
-        return None
+    # Huso UTM correcto según la posición (antes 21S fijo). Genérico vía geo.area_m2.
+    return geo.area_m2(geom)
 
 
 # ── Upsert en DB ──────────────────────────────────────────────────────────────

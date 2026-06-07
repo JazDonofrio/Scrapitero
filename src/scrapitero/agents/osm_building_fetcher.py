@@ -24,6 +24,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import geo
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -185,36 +186,8 @@ def _way_to_polygon(way: dict, nodes: dict) -> Optional[Polygon]:
         return None
 
 
-_utm_transformers: dict[int, "pyproj.Transformer"] = {}
-
-
-def _utm_epsg(lon: float, lat: float) -> int:
-    """EPSG del huso UTM que contiene (lon, lat). Global: cualquier país.
-
-    Norte → 326xx, Sur → 327xx, donde xx es el huso 1..60.
-    """
-    zone = int((lon + 180.0) // 6.0) + 1
-    zone = min(max(zone, 1), 60)
-    return (32600 if lat >= 0 else 32700) + zone
-
-
-def _area_m2(geom: Polygon) -> Optional[float]:
-    """Área en m² proyectada al huso UTM correcto según el centroide del edificio.
-
-    El huso se deriva de la posición real del polígono → válido en todo el mundo,
-    no solo en la zona 21S (Argentina/Brasil sur)."""
-    try:
-        c = geom.centroid
-        epsg = _utm_epsg(c.x, c.y)
-        proj = _utm_transformers.get(epsg)
-        if proj is None:
-            proj = pyproj.Transformer.from_crs(
-                "EPSG:4326", f"EPSG:{epsg}", always_xy=True
-            ).transform
-            _utm_transformers[epsg] = proj
-        return round(shp_transform(proj, geom).area, 2)
-    except Exception:
-        return None
+# Área en m² al huso UTM correcto según la posición (centralizado en geo, global).
+_area_m2 = geo.area_m2
 
 
 # ── Parseo de tags OSM (insumo para estimar unidades) ──────────────────────────

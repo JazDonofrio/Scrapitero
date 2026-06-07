@@ -27,16 +27,12 @@ Cuando el usuario dice cosas como:
 
 Sin survey_id (usa el más reciente de la región):
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar"}' |
-
-  python3 -m scrapitero.rpc.relevamiento_reporter
+python3 -m scrapitero.rpc.relevamiento_reporter <<< '{"region_id":"ituzaingo-ba-ar"}'
 ```
 
 Con survey_id específico:
 ```bash
-echo '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.relevamiento_reporter
+python3 -m scrapitero.rpc.relevamiento_reporter <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
 ```
 
 ## Output esperado

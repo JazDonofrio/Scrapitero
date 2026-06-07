@@ -23,14 +23,12 @@ Prerequisito: `smartgis-fetcher` debe haberse ejecutado (necesita `cca_code` en 
 ## Correr el agente
 
 ```bash
-echo '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.varzea_bci_fetcher
+python3 -m scrapitero.rpc.varzea_bci_fetcher <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
 ```
 
 Con parámetros explícitos:
 ```bash
-echo '{
+env $(cat /opt/scrapitero/.env | xargs) python3 -m scrapitero.rpc.varzea_bci_fetcher <<< '{
   "region_id":"<REGION_ID>",
   "survey_id":"<SURVEY_ID>",
   "pdf_dir":"/opt/scrapitero/pdf_downloads",
@@ -39,9 +37,7 @@ echo '{
   "max_delay_secs":8.0,
   "pausa_cada_n":20,
   "pausa_minutos":3
-}' | env $(cat /opt/scrapitero/.env | xargs)
-   
-     python3 -m scrapitero.rpc.varzea_bci_fetcher
+}'
 ```
 
 ## Output esperado

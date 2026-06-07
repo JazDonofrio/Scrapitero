@@ -160,6 +160,22 @@
     .pipeline-error b { color: #7f1d1d; }
     .pipeline-error code { background: #fee2e2; padding: 0 .2rem; border-radius: 3px;
       font-family: ui-monospace, monospace; font-size: .72rem; }
+    /* Estimación dasimétrica de habitantes (opción adicional) */
+    .dasi-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed #e5e7eb; }
+    .dasi-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .dasi-sub { font-size: .68rem; color: #9ca3af; }
+    .dasi-body { margin-top: .6rem; }
+    .dasi-summary { font-size: .8rem; color: #5b21b6; font-weight: 700; margin-bottom: .1rem; }
+    .dasi-date { font-size: .68rem; color: #9ca3af; margin-bottom: .5rem; }
+    .dasi-table { width: 100%; border-collapse: collapse; font-size: .74rem; }
+    .dasi-table th { text-align: right; color: #9ca3af; font-weight: 600; padding: .2rem .4rem;
+      border-bottom: 1px solid #f3f4f6; position: sticky; top: 0; background: #fff; }
+    .dasi-table th:first-child, .dasi-table td:first-child { text-align: left; }
+    .dasi-table td { padding: .2rem .4rem; border-bottom: 1px solid #f9fafb; }
+    .dasi-table td.hab { color: #5b21b6; font-weight: 700; }
+    .dasi-scroll { max-height: 260px; overflow-y: auto; }
+    .dasi-err { color: #991b1b; font-size: .75rem; background: #fef2f2; border: 1px solid #fecaca;
+      border-radius: 6px; padding: .5rem .7rem; white-space: pre-wrap; }
 
     .detail-footer { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
 
@@ -270,7 +286,8 @@
           </div>
           <div class="form-group">
             <label>País</label>
-            <select id="f-country">
+            <select id="f-country" title="Por defecto se detecta del GeoJSON; podés forzarlo">
+              <option value="AUTO" selected>Auto-detectar (del GeoJSON)</option>
               <option value="BRA">Brasil</option>
               <option value="ARG">Argentina</option>
             </select>
@@ -307,6 +324,12 @@ const surveyCache = {}; // sid → objeto survey completo (pipeline, status, etc
 /* ── Utils ─────────────────────────────────────────────────────── */
 const fmt = n => (n == null || n === '') ? '—' : Number(n).toLocaleString('es-AR');
 const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('es-AR', {day:'2-digit',month:'short',year:'numeric'}) : '';
+// Formatea un timestamp ISO ya en hora de Buenos Aires (offset -03:00) como 'DD/MM HH:MM'.
+// Se parsea por componentes para no depender de la tz del navegador.
+function fmtActTs(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  return m ? `${m[3]}/${m[2]} ${m[4]}:${m[5]}` : '';
+}
 const statusLabel = s => ({running:'En curso',stopping:'Deteniendo…',stopped:'Detenido',partial:'Parcial',completed:'Completado',failed:'Error'}[s] || s);
 
 /* ── UF: cómo se estimó (tooltips) ─────────────────────────────── */
@@ -406,14 +429,13 @@ function renderPipelineSteps(pipeline, status, countryCode) {
     const cur = pasos[actual];
     const err = cur && cur.ok === false ? cur.error : null;
     if (!err) return '';
-    return `<div class="pipeline-error">⚠️ <b>${escHtml(stepLabel(actual))}</b><br>`
-         + `Causa: <code>${escHtml(err)}</code></div>`;
+    const ts = fmtActTs((pipeline.pasos_ts || {})[actual] || pipeline.paso_actual_ts);
+    return `<div class="pipeline-error">⚠️ <b>${escHtml(stepLabel(actual))}</b>`
+         + (ts ? ` <span style="color:#9ca3af;font-weight:400">· ${ts} (hora AR)</span>` : '')
+         + `<br>Causa: <code>${escHtml(err)}</code></div>`;
   }
 
-  countryCode = countryCode || 'BRA';
-  const stepsConfig = countryCode === 'BRA'
-    ? [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']]
-    : [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
+  const stepsConfig = PIPELINE_BY_COUNTRY[countryCode] || PIPELINE_DEFAULT;
 
   let html = '<div class="pipeline-section"><p class="pipeline-title">Pipeline</p><div class="pipeline-steps">';
   stepsConfig.forEach(([key, label], i) => {
@@ -557,6 +579,21 @@ function renderCard(s) {
             <p class="pipeline-title">Actividad</p>
             <div class="actlog-lines" id="actlog-${sid}">
               <span class="alog-empty">Abrí el detalle para cargar el historial…</span>
+            </div>
+          </div>
+
+          <div class="dasi-section">
+            <div class="dasi-head">
+              <div>
+                <p class="pipeline-title" style="margin-bottom:.15rem">👥 Habitantes por manzana</p>
+                <span class="dasi-sub">Estimación adicional por desagregación dasimétrica — menos exacta que el relevamiento</span>
+              </div>
+              <button class="btn btn-sm" style="background:#ede9fe;color:#5b21b6;padding:.25rem .6rem;font-size:.72rem;border:1px solid #ddd6fe"
+                onclick="runDasimetrico('${sid}', this)"
+                title="Repartir la población censal entre las manzanas (técnica dasimétrica). Requiere censo + parcelas con uso/UF.">▶ Estimar habitantes</button>
+            </div>
+            <div class="dasi-body" id="dasi-${sid}">
+              <span class="alog-empty">Sin estimación todavía. Tocá "Estimar habitantes".</span>
             </div>
           </div>
 
@@ -920,6 +957,7 @@ function syntheticActlog(sid) {
   let seq = -9000;
 
   // Pasos ya ejecutados, en el orden en que se registraron
+  const tsMap = (s.pipeline || {}).pasos_ts || {};
   const doneKeys = Object.keys(pasos);
   for (const key of doneKeys) {
     const p = pasos[key] || {};
@@ -927,8 +965,8 @@ function syntheticActlog(sid) {
     const lvl = _stepFailed(p) ? 'ERROR' : (p.saltado ? 'WARNING' : 'INFO');
     const tick = lvl === 'ERROR' ? '✗' : (lvl === 'WARNING' ? '·' : '✓');
     entries.push({
-      id: seq++, ts: tick, lvl,
-      msg: `${stepLabel(key)}${summary ? ' — ' + summary : ''}`,
+      id: seq++, ts: fmtActTs(tsMap[key]), lvl,
+      msg: `${tick} ${stepLabel(key)}${summary ? ' — ' + summary : ''}`,
     });
   }
 
@@ -940,10 +978,11 @@ function syntheticActlog(sid) {
   // Estado final
   if (STEP_TERMINAL.has(normStep(paso_actual))) {
     const k = normStep(paso_actual);
+    const ic = k === 'completado' ? '✓' : '■';
     entries.push({
-      id: seq++, ts: k === 'completado' ? '✓' : '■',
+      id: seq++, ts: fmtActTs((s.pipeline || {}).paso_actual_ts),
       lvl: k === 'completado' ? 'INFO' : (k === 'error' ? 'ERROR' : 'WARNING'),
-      msg: stepLabel(paso_actual),
+      msg: `${ic} ${stepLabel(paso_actual)}`,
     });
   } else if (running && entries.length === 0) {
     entries.push({id: seq++, ts: '⟳', lvl: 'RUN', msg: '🔍 Iniciando pipeline…'});
@@ -1008,6 +1047,7 @@ function toggleDetail(sid) {
     }, 80);
     if (isActive) startActlogPolling(sid);
     else fetchActlog(sid);
+    loadManzanas(sid);
   }
 }
 
@@ -1070,6 +1110,68 @@ async function loadSurveys() {
 async function refreshCard(sid) {
   if (maps[sid]) { maps[sid].remove(); delete maps[sid]; }
   await loadSurveys();
+}
+
+/* ── Estimación dasimétrica de habitantes por manzana (opción adicional) ──────── */
+async function runDasimetrico(sid, btn) {
+  const cont = document.getElementById('dasi-'+sid);
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '⟳ Estimando…';
+  cont.innerHTML = '<span class="alog-empty">Repartiendo población censal entre las manzanas…</span>';
+  try {
+    const res = await fetch(`/api/surveys/${sid}/dasimetrico`, {method:'POST'});
+    const data = await res.json();
+    if (data.ok) {
+      await loadManzanas(sid);
+    } else {
+      // Mostrar el detalle concreto del problema (audiencia técnica): qué dato falta.
+      cont.innerHTML = `<div class="dasi-err">⚠️ No se pudo estimar.\n${escHtml(data.error||'error desconocido')}</div>`;
+    }
+  } catch(err) {
+    cont.innerHTML = `<div class="dasi-err">Error de red: ${escHtml(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+async function loadManzanas(sid) {
+  const cont = document.getElementById('dasi-'+sid);
+  if (!cont) return;
+  try {
+    const data = await fetch(`/api/surveys/${sid}/manzanas`).then(r => r.json());
+    renderManzanas(sid, data);
+  } catch(err) { /* silencioso: el panel queda con su estado previo */ }
+}
+
+function renderManzanas(sid, data) {
+  const cont = document.getElementById('dasi-'+sid);
+  if (!cont) return;
+  const mz = data.manzanas || [];
+  if (!mz.length) {
+    cont.innerHTML = '<span class="alog-empty">Sin estimación todavía. Tocá "Estimar habitantes".</span>';
+    return;
+  }
+  const filas = mz.map(m => `
+    <tr>
+      <td>${escHtml(m.codigo)}</td>
+      <td class="hab">≈ ${fmt(m.habitantes)}</td>
+      <td>${fmt(m.habitantes_low)}–${fmt(m.habitantes_high)}</td>
+      <td>${fmt(m.uf_vivienda)}</td>
+      <td>${fmt(m.uf_comercio)}</td>
+      <td>${fmt(m.n_parcelas)}</td>
+    </tr>`).join('');
+  cont.innerHTML = `
+    <div class="dasi-summary">≈ ${fmt(data.total_habitantes)} habitantes en ${fmt(data.total_manzanas)} manzanas</div>
+    <div class="dasi-date">Estimación dasimétrica al ${data.fecha_estimacion || '—'} · valores aproximados (banda ±30%)</div>
+    <div class="dasi-scroll">
+      <table class="dasi-table">
+        <thead><tr>
+          <th>Manzana</th><th>Habitantes</th><th>Rango</th>
+          <th>UF Viv.</th><th>UF Com.</th><th>Parcelas</th>
+        </tr></thead>
+        <tbody>${filas}</tbody>
+      </table>
+    </div>`;
 }
 
 let refreshTimer = null;

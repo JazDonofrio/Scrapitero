@@ -44,32 +44,28 @@ Si la ciudad **no está en la lista** → usar `onr-sigef-fetcher` (predios rura
 ## Modo A — Auto-detección por coordenada
 
 ```bash
-echo '{
+python3 -m scrapitero.rpc.onr_lotes_fetcher <<< '{
   "region_id": "sp-capital-br",
   "survey_id": "<SURVEY_ID>",
   "lat": -23.55,
   "lng": -46.63
-}' |
-
-  python3 -m scrapitero.rpc.onr_lotes_fetcher
+}'
 ```
 
 ## Modo B — Ciudad explícita
 
 ```bash
-echo '{
+python3 -m scrapitero.rpc.onr_lotes_fetcher <<< '{
   "region_id": "sp-capital-br",
   "survey_id": "<SURVEY_ID>",
   "cidade_slug": "sp_capital"
-}' |
-
-  python3 -m scrapitero.rpc.onr_lotes_fetcher
+}'
 ```
 
 ## Modo C — Con bbox explícita (zona específica dentro de la ciudad)
 
 ```bash
-echo '{
+python3 -m scrapitero.rpc.onr_lotes_fetcher <<< '{
   "region_id": "sp-capital-br",
   "survey_id": "<SURVEY_ID>",
   "cidade_slug": "sp_capital",
@@ -77,9 +73,7 @@ echo '{
   "bbox_west": -46.65,
   "bbox_north": -23.53,
   "bbox_east": -46.61
-}' |
-
-  python3 -m scrapitero.rpc.onr_lotes_fetcher
+}'
 ```
 
 ## Output esperado

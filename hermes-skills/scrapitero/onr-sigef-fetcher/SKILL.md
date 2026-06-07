@@ -43,16 +43,14 @@ Status possíveis: `CERTIFICADA`, `REGISTRADA`
 ## Comando
 
 ```bash
-echo '{
+python3 -m scrapitero.rpc.onr_sigef_fetcher <<< '{
   "region_id": "vg-mt-br",
   "survey_id": "<SURVEY_ID>",
   "bbox_south": -15.72,
   "bbox_west": -56.25,
   "bbox_north": -15.56,
   "bbox_east": -56.00
-}' |
-
-  python3 -m scrapitero.rpc.onr_sigef_fetcher
+}'
 ```
 
 ## Output esperado

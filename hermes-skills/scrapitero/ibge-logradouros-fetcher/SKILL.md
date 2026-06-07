@@ -25,9 +25,7 @@ o cuando `logradouros_count == 0` en el CoverageReport.
 ## Comando
 
 ```bash
-echo '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}' |
-
-  python3 -m scrapitero.rpc.ibge_logradouros_fetcher
+python3 -m scrapitero.rpc.ibge_logradouros_fetcher <<< '{"region_id":"vg-mt-br","municipio_codigo":"5108402","estado_uf":"mt"}'
 ```
 
 ## Output esperado
