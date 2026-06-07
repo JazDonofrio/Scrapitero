@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 _PORTAL_URL = "https://rentas.dgrmsalta.gov.ar/#/inmobiliario/emision-boletas"
 _API_URL = "https://rentas.dgrmsalta.gov.ar/api/inmobiliario/login-inmobiliario"
@@ -280,6 +281,7 @@ async def _run(parcelas: list[tuple[str, str]], region_id: str,
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(inp: SaltaRentasInput) -> SaltaRentasOutput:
     _stop_regions.discard(inp.region_id)
     parcelas = _get_parcelas(inp.region_id, inp.survey_id, inp.overwrite, inp.batch_size)

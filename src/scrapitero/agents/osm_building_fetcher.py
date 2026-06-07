@@ -23,6 +23,7 @@ import pyproj
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -338,6 +339,7 @@ def _link_to_parcelas(region_id: str) -> int:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: OSMInput) -> OSMOutput:
     fuentes = []
     engine = get_engine()

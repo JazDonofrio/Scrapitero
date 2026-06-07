@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.osm_building_fetcher import OSMInput, run as osm_run
 
 
@@ -101,6 +102,7 @@ def _ensure_region(conn, region_id: str, nombre: str) -> None:
         logger.info(f"Región creada: {region_id} ({nombre})")
 
 
+@agent_run
 def run(input: ZonaInput) -> ZonaOutput:
     bbox = _bbox_from_center(input.lat, input.lng, input.radio_m)
     logger.info(f"Zona: centro=({input.lat},{input.lng}) radio={input.radio_m}m → bbox={bbox}")

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 PLACES_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -103,6 +104,7 @@ def _uso_final(uf_vivienda: int, uf_comercio_arba: int, comercios_places: int) -
     return "mixto"
 
 
+@agent_run
 def run(input: ClassifierInput) -> ClassifierOutput:
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
     if not api_key:
@@ -145,7 +147,8 @@ def run(input: ClassifierInput) -> ClassifierOutput:
 
             with engine.begin() as conn:
                 conn.execute(text(
-                    "UPDATE parcelas SET uso_principal = :uso WHERE parcela_id = :pid"
+                    "UPDATE parcelas SET uso_principal = :uso, uso_fuente = 'clasificador' "
+                    "WHERE parcela_id = :pid"
                 ), {"uso": uso, "pid": parcela_id})
 
             logger.debug(

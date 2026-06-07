@@ -29,6 +29,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 BASE_URL = (
@@ -268,6 +269,7 @@ def _upsert(gdf: gpd.GeoDataFrame, region_id: str) -> tuple[int, int]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: LogradourosInput) -> LogradourosOutput:
     cache_dir = Path(os.environ.get("SCRAPITERO_CACHE", "/tmp/scrapitero_cache"))
     cache_dir.mkdir(parents=True, exist_ok=True)

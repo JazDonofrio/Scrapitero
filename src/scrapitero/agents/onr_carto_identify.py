@@ -21,6 +21,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from scrapitero.agents.onr_token import get_token
+from scrapitero.agents._run import agent_run
 
 GIS_BASE = "https://gis-mapas.onr.org.br/onrgisserver/rest/services/Hosted"
 SERVICE = "competencias_registrais_hml/FeatureServer/0"
@@ -47,6 +48,7 @@ def _to_webmerc(lat: float, lng: float) -> tuple[float, float]:
     return x, y * 20037508.34 / 180
 
 
+@agent_run
 def run(input: CartoInput) -> CartoOutput:
     try:
         token = get_token()

@@ -26,6 +26,7 @@ from shapely.ops import unary_union
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 import os
 
@@ -415,6 +416,7 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: SmartGISInput) -> SmartGISOutput:
     bbox, zone_polygon = _resolve_bbox_zone(input)
     if bbox is None:

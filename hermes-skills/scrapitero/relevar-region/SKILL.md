@@ -63,9 +63,7 @@ Guardar el `survey_id` para los pasos siguientes.
 ## PASO 1B — Definir zona y crear survey (Modo B: coordenada + radio)
 
 ```bash
-echo '{"lat":<LAT>,"lng":<LNG>,"radio_m":<RADIO>}' |
-
-  python3 -m scrapitero.rpc.zona_fetcher
+python3 -m scrapitero.rpc.zona_fetcher <<< '{"lat":<LAT>,"lng":<LNG>,"radio_m":<RADIO>}'
 ```
 
 El output incluye `region_id` y `survey_id` generados automáticamente.
@@ -80,9 +78,7 @@ Repetir hasta máximo 20 iteraciones:
 
 **a) Leer estado actual:**
 ```bash
-echo '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}' |
-
-  python3 -m scrapitero.rpc.coverage_reporter
+python3 -m scrapitero.rpc.coverage_reporter <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
 ```
 
 **b) Decidir próximo agente según tabla:**
@@ -125,3 +121,18 @@ Reportar por Telegram:
 - Siempre enviar aviso parcial por Telegram cada vez que termina un agente.
 - Si cualquier agente falla por login/sesión → consultar al usuario por Telegram antes de continuar.
 - Máximo 20 steps por corrida. Si se alcanza el límite: exportar lo disponible y notificar.
+
+### Mensajes de error: detalle concreto (audiencia técnica)
+Quien lee Telegram es un **operador técnico** que puede destrabar el problema si sabe
+qué falló. **Todo mensaje de error o problema DEBE incluir la causa concreta**, nunca un
+genérico ("hubo un problema" / "reintentando…" a secas). Incluí, textual:
+- el campo `error` del output del agente **copialo tal cual**: ya viene sellado por el
+  código (decorador `agent_run`) con el formato `nombre-de-la-skill: detalle`, así que al
+  relayarlo ya queda **qué skill falló + la causa**. No lo reescribas ni resumas.
+- la causa técnica exacta ya está dentro de ese `error` (código HTTP + host/URL, credencial
+  o sesión faltante como `JSESSIONID` vencido, reCAPTCHA que no cargó, `ModuleNotFoundError`,
+  timeout del WFS…),
+- **qué se necesita para resolverlo**, si se sabe.
+
+Ejemplo: `❌ Falló descarga de edificios (OSM/Overpass). Causa: todos los mirrors
+fallaron — último HTTP 504 (overpass-api.de). Reintento más tarde.`

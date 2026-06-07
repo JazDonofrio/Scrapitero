@@ -27,6 +27,7 @@ from shapely.geometry import shape
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.onr_token import get_token
 
 GIS_BASE = "https://gis-mapas.onr.org.br/onrgisserver/rest/services/Hosted"
@@ -172,6 +173,7 @@ def _upsert(features: list[dict], region_id: str, survey_id: str) -> tuple[int, 
     return inserted, updated
 
 
+@agent_run
 def run(input: SigefInput) -> SigefOutput:
     try:
         token = get_token()

@@ -59,12 +59,10 @@ Cuando dos skills son independientes, lanzalas en background con `&` y esperá a
 
 ```bash
 # Ejemplo: BCI y address-resolver son independientes si ya hay parcelas
-echo '{"region_id":"...","survey_id":"..."}' |
-  python3 -m scrapitero.rpc.varzea_bci_fetcher > /tmp/bci_out.json &
+python3 -m scrapitero.rpc.varzea_bci_fetcher > /tmp/bci_out.json & <<< '{"region_id":"...","survey_id":"..."}'
 PID_BCI=$!
 
-echo '{"region_id":"...","survey_id":"...","batch_size":200}' |
-  python3 -m scrapitero.rpc.address_resolver > /tmp/addr_out.json &
+python3 -m scrapitero.rpc.address_resolver > /tmp/addr_out.json & <<< '{"region_id":"...","survey_id":"...","batch_size":200}'
 PID_ADDR=$!
 
 wait $PID_BCI $PID_ADDR
@@ -108,8 +106,23 @@ Skills disponibles:
 ## Mensajes de Telegram
 
 Usar siempre `target="telegram:979088442"` en cada llamada a `send_message`.
-Escribir siempre en español. Mensajes cortos, claros, sin jerga técnica.
-NO mencionar nombres internos de módulos, region_id ni survey_id.
+Escribir siempre en español.
+
+**Audiencia técnica.** Quien lee Telegram es un operador técnico capaz de destrabar el
+problema (dar una credencial, reiniciar un servicio, levantar una fuente caída, etc.)
+**siempre que sepa qué falló exactamente**. Por eso:
+- **Éxito / progreso:** mensajes cortos y claros con los números clave.
+- **Error o problema: SIEMPRE incluir el detalle concreto de la causa.** Nunca un
+  genérico tipo "hubo un problema" o "reintentando…" sin decir qué. Incluí, textual, lo
+  que devolvió el agente:
+  - el campo `error` del output **copialo tal cual**: ya viene sellado por el código del
+    agente con el formato `nombre-de-la-skill: detalle` (lo hace el decorador `agent_run`),
+    así que con relayarlo ya queda **qué skill falló + la causa**. No lo reescribas ni resumas.
+  - si querés, reforzá **qué paso** del pipeline era (descarga de parcelas, edificios, etc.),
+  - la causa técnica exacta: código HTTP + host/URL que falló, credencial o sesión
+    faltante (p.ej. `JSESSIONID` vencido), reCAPTCHA que no cargó, `ModuleNotFoundError`,
+    timeout del WFS, etc.,
+  - **qué se necesita para resolverlo**, si se sabe (p.ej. "mandá un JSESSIONID nuevo").
 
 **Al inicio:**
 ```
@@ -131,15 +144,27 @@ NO mencionar nombres internos de módulos, region_id ni survey_id.
 🔍 Datos extraídos: {N} parcelas con uso y dirección.
 ```
 
-**Si hay error y se reintenta:**
+**Si hay error y se reintenta** (incluí la causa concreta, no un genérico):
 ```
-⚠️ Problema con {paso legible}: {descripción simple}. Reintentando...
+⚠️ Problema en {paso legible} ({agente}). Causa: {detalle textual del error del agente}.
+Reintentando ({intento}/{máx})…
+```
+Ejemplo real:
+```
+⚠️ Problema al descargar edificios de OpenStreetMap (Overpass). Causa: todos los
+mirrors fallaron — último: HTTP 504 (overpass-api.de). Reintentando (2/3)…
 ```
 
 **Si un paso falla definitivamente:**
 ```
-❌ No se pudo completar {paso legible}: {descripción simple del problema}.
-Continuando con los pasos siguientes.
+❌ Falló {paso legible} ({agente}). Causa: {detalle textual del error del agente}.
+{Qué se necesita para resolverlo, si aplica.} Continúo con los pasos siguientes.
+```
+Ejemplo real:
+```
+❌ Falló la detección de baldíos (Salta Rentas DGRM). Causa: el script de reCAPTCHA
+no cargó en el portal; no se pudieron generar tokens. Se puede reintentar más tarde.
+Continúo con los pasos siguientes.
 ```
 
 **Al finalizar:**

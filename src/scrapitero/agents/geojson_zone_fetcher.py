@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.osm_building_fetcher import OSMInput, run as osm_run
 
 
@@ -81,6 +82,7 @@ def _bbox_to_wkt(b: dict) -> str:
     return f"POLYGON(({w} {s},{e} {s},{e} {n},{w} {n},{w} {s}))"
 
 
+@agent_run
 def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
     try:
         geojson_data = json.loads(input.geojson_str)

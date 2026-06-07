@@ -43,6 +43,7 @@ from shapely.ops import transform as shp_transform, unary_union
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.smartgis_fetcher import _geom_to_polygon
 
 
@@ -407,6 +408,7 @@ def _upsert(
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(inp: SaltaCatastroInput) -> SaltaCatastroOutput:
     # 1. Zona
     zone_bbox, zone_polygon = _load_zone(inp.region_id)

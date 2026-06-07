@@ -33,6 +33,7 @@ from shapely.ops import unary_union
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 BASE_URL = "https://vg.abaco.com.br/eagata/servlet/hwloginusuario?55"
 
@@ -374,6 +375,7 @@ def _telegram_notify(msg: str) -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: BCIInput) -> BCIOutput:
     zone_polygon = _load_zone_polygon(input.region_id)
     if zone_polygon is None:

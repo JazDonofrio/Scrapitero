@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 # ── Mapeo tipo_osm (building=*) → categoría de unidad ──────────────────────────
@@ -188,6 +189,9 @@ def _get_parcelas(region_id: str, survey_id: Optional[str], overwrite: bool) -> 
     params: dict = {"rid": region_id}
     if not overwrite:
         base += " AND COALESCE(footprints_count, 0) = 0"
+        # No pisar el conteo real de comercios de GooglePlacesFetcher (autoritativo).
+        # Con overwrite=true el usuario pide recálculo explícito y sí se reprocesa.
+        base += " AND COALESCE(uf_fuente, '') <> 'google'"
     if survey_id:
         base += " AND survey_id = :sid"
         params["sid"] = survey_id
@@ -236,6 +240,7 @@ def _persist(updates: list[dict]) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(inp: UnidadesInput) -> UnidadesOutput:
     try:
         parcelas = _get_parcelas(inp.region_id, inp.survey_id, inp.overwrite)

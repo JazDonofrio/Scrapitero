@@ -20,6 +20,7 @@ import pyproj
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 IDERA_WFS = "https://geo.arba.gov.ar/geoserver/idera/wfs"
@@ -183,6 +184,7 @@ def _upsert_parcelas(features: list[dict], region_id: str,
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: ARBAInput) -> ARBAOutput:
     try:
         features = fetch_idera(

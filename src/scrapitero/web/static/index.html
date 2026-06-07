@@ -153,6 +153,13 @@
     .step-arrow { color: #d1d5db; font-size: .8rem; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner { display: inline-block; animation: spin .8s linear infinite; }
+    /* Detalle concreto del error del paso fallido (audiencia técnica) */
+    .pipeline-error { margin-top: .6rem; padding: .5rem .7rem; border-radius: 6px;
+      background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+      font-size: .76rem; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
+    .pipeline-error b { color: #7f1d1d; }
+    .pipeline-error code { background: #fee2e2; padding: 0 .2rem; border-radius: 3px;
+      font-family: ui-monospace, monospace; font-size: .72rem; }
 
     .detail-footer { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
 
@@ -319,6 +326,8 @@ const UF_FUENTE_DESC = {
        + 'de 2+ pisos o tipo apartments; un edificio de 1 planta cuenta como 1 unidad.',
   uso:   'Estimado por uso: la parcela no tiene edificios en OpenStreetMap, '
        + 'se asignó el mínimo según su uso (residencial→1 vivienda, comercial→1 comercio).',
+  google: 'Conteo real de comercios de Google Maps dentro de la parcela: '
+       + 'cada comercio = 1 unidad de comercio (uf_comercio). El uf_vivienda mantiene su estimación previa.',
 };
 
 /* ── Form ──────────────────────────────────────────────────────── */
@@ -385,7 +394,20 @@ function renderPipelineSteps(pipeline, status, countryCode) {
       if (key === 'bci') detail = r.pdfs_descargados != null ? ` (${fmt(r.pdfs_descargados)} PDF)` : '';
       if (key === 'osm') detail = '';
     }
-    return `<span class="pipeline-step ${cls}">${icon} ${label}${detail}</span>`;
+    // Si el paso falló, exponer la causa concreta como tooltip (hover).
+    const titleAttr = (r && r.ok === false && r.error)
+      ? ` title="${escHtml(r.error)}"` : '';
+    return `<span class="pipeline-step ${cls}"${titleAttr}>${icon} ${label}${detail}</span>`;
+  }
+
+  // Detalle del error del paso actual, visible para el operador técnico.
+  // Hermes guarda en pasos[paso] el output del agente, que incluye `error`.
+  function currentErrorHtml() {
+    const cur = pasos[actual];
+    const err = cur && cur.ok === false ? cur.error : null;
+    if (!err) return '';
+    return `<div class="pipeline-error">⚠️ <b>${escHtml(stepLabel(actual))}</b><br>`
+         + `Causa: <code>${escHtml(err)}</code></div>`;
   }
 
   countryCode = countryCode || 'BRA';
@@ -401,7 +423,9 @@ function renderPipelineSteps(pipeline, status, countryCode) {
   if (actual === 'completado') html += '<span class="step-arrow">→</span><span class="pipeline-step step-done">✓ Completo</span>';
   if (actual === 'error') html += '<span class="step-arrow">→</span><span class="pipeline-step step-fail">✗ Error</span>';
   if (actual === 'sin_pipeline') html += '<span class="step-arrow">→</span><span class="pipeline-step step-idle">Sin pipeline</span>';
-  html += '</div></div>';
+  html += '</div>';
+  html += currentErrorHtml();
+  html += '</div>';
   return html;
 }
 
@@ -667,6 +691,7 @@ async function loadParcelasMap(sid) {
       osm:   'estimado (OSM)',
       proxy: 'estimado (proxy)',
       uso:   'estimado (por uso)',
+      google: 'comercio real (Google)',
     };
     const prefix = p.uf_estimado ? '≈ ' : '';
     const desc = UF_FUENTE_DESC[p.uf_fuente] || '';
@@ -687,8 +712,12 @@ async function loadParcelasMap(sid) {
       (p.area_c ? '<br><span style="color:#9ca3af">' + p.area_c + ' m² construida</span>' : '') +
       (p.pisos ? '<br><span style="color:#fbbf24;font-weight:700">≈ ' + p.pisos + ' piso' + (p.pisos > 1 ? 's' : '') + '</span> <span style="color:#6b7280;font-size:.7rem">(FOS 0,6)</span>' : '') +
       (p.cca ? '<br><span style="color:#6b7280;font-size:.72rem">Insc: ' + escHtml(p.cca) + '</span>' : '') +
+      ((p.comercios && p.comercios.length)
+          ? '<br><span style="color:#ea580c;font-weight:700;font-size:.72rem">🏪 ' + p.comercios.length + ' comercio' + (p.comercios.length > 1 ? 's' : '') + ' (Google)</span>'
+            + '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.comercios.slice(0, 8).join(', ')) + (p.comercios.length > 8 ? '…' : '') + '</span>'
+          : '') +
       '</div>',
-      {maxWidth: 210}
+      {maxWidth: 240}
     );
     // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
     if (p.uf_total > 0) {

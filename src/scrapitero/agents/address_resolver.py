@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -288,6 +289,7 @@ def _update_parcela_direccion(conn, parcela_id: str, addr: dict, preserve_calle:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: AddressResolverInput) -> AddressResolverOutput:
     api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
     if not api_key:

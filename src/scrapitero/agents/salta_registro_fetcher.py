@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 _SIGSA_URL = (
@@ -110,6 +111,7 @@ def _update_batch(updates: list[tuple[str, str]]) -> None:
         conn.execute(text("""
             UPDATE parcelas SET
                 uso_principal = CAST(:uso AS text),
+                uso_fuente = 'sigsa',
                 unidades_funcionales_estimadas = CASE
                     WHEN CAST(:uso AS text) = 'residencial'
                         THEN GREATEST(COALESCE(unidades_funcionales_estimadas, 0), 1)
@@ -174,6 +176,7 @@ def _fetch_tipos(nomenclaturas: list[str], batch_size: int) -> dict[str, str]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(inp: SaltaRegistroInput) -> SaltaRegistroOutput:
     parcelas = _get_parcelas(inp.region_id, inp.survey_id, inp.overwrite)
     if not parcelas:

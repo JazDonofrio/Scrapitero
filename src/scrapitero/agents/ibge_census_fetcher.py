@@ -24,6 +24,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
 
@@ -81,14 +82,15 @@ def _malha_url(estado_uf: str) -> str:
     )
 
 
-def _sidra_url(municipio_codigo: str) -> str:
-    """URL de la API SIDRA — tabla 9596: domicilios por tipo, por setor censitário."""
-    return (
-        f"https://apisidra.ibge.gov.br/values/t/9596"
-        f"/n322/{municipio_codigo}"   # n322 = setor censitário
-        f"/v/allxp/p/last%201/c629/allxt"
-        f"?formato=json"
-    )
+# Agregados por Setores Censitários (Censo 2022) — archivo "basico" nacional.
+# Es la fuente correcta de población y domicilios POR SETOR (SIDRA no expone n322).
+# Columnas relevantes del CSV: CD_SETOR, CD_MUN, v0001 (total de pessoas),
+# v0002 (total de domicílios). ~15 MB, se cachea.
+AGREGADOS_BASICO_URL = (
+    "https://ftp.ibge.gov.br/Censos/Censo_Demografico_2022/"
+    "Agregados_por_Setores_Censitarios/Agregados_por_Setor_csv/"
+    "Agregados_por_setores_basico_BR_20260520.zip"
+)
 
 
 # ── Descarga y procesamiento ──────────────────────────────────────────────────
@@ -149,79 +151,71 @@ def _filter_municipio(gdf: gpd.GeoDataFrame, municipio_codigo: str) -> gpd.GeoDa
     return gdf
 
 
-def _fetch_sidra(municipio_codigo: str) -> pd.DataFrame:
-    """Descarga tabla SIDRA 9596 — domicilios por tipo por setor."""
-    url = _sidra_url(municipio_codigo)
-    logger.info(f"Consultando SIDRA: {url}")
-    try:
-        with httpx.Client(timeout=60, follow_redirects=True) as client:
-            r = client.get(url)
+def _fetch_agregados_basico(municipio_codigo: str, cache_dir: Path) -> dict[str, dict]:
+    """Descarga (cacheado) el CSV nacional 'Agregados por setores — básico' del Censo
+    2022 y devuelve {setor_id: {pop_total, domicilios_total}} filtrado al município.
+
+    Reemplaza a la antigua consulta SIDRA (tabla 9596), que era la tabla equivocada y
+    no tiene nivel setor censitário → 400. Esta es la fuente oficial de población y
+    domicilios por setor.
+    """
+    zip_path = cache_dir / "agregados_basico_BR.zip"
+    if not zip_path.exists():
+        logger.info(f"Descargando Agregados básico IBGE: {AGREGADOS_BASICO_URL}")
+        with httpx.Client(timeout=300, follow_redirects=True) as client:
+            r = client.get(AGREGADOS_BASICO_URL)
             r.raise_for_status()
-        data = r.json()
-        # La API SIDRA devuelve lista de dicts; primera fila es header
-        if len(data) < 2:
-            logger.warning("SIDRA devolvió datos vacíos")
-            return pd.DataFrame()
-        df = pd.DataFrame(data[1:], columns=[v for v in data[0].values()])
-        logger.info(f"SIDRA: {len(df)} filas")
-        return df
-    except Exception as e:
-        logger.warning(f"SIDRA falló (no crítico): {e}")
-        return pd.DataFrame()
+        zip_path.write_bytes(r.content)
+        logger.info(f"Descargado: {len(r.content) / 1_000_000:.1f} MB")
+    else:
+        logger.info(f"Usando caché: {zip_path}")
 
-
-def _parse_sidra_domicilios(df: pd.DataFrame) -> dict[str, dict]:
-    """
-    Parsea tabla SIDRA y devuelve dict setor_id → {domicilios_total, casas, aptos}.
-    """
-    if df.empty:
-        return {}
+    import csv as _csv
 
     result: dict[str, dict] = {}
-    # Detectar columna de código de setor
-    setor_col = next((c for c in df.columns if "setor" in c.lower() or "geocod" in c.lower()), None)
-    val_col = next((c for c in df.columns if "valor" in c.lower() or "value" in c.lower()), None)
-    tipo_col = next((c for c in df.columns if "tipo" in c.lower() or "espécie" in c.lower()
-                     or "dom" in c.lower()), None)
+    with zipfile.ZipFile(zip_path) as z:
+        csv_name = next(n for n in z.namelist() if n.lower().endswith(".csv"))
+        with z.open(csv_name) as f:
+            reader = _csv.DictReader(io.TextIOWrapper(f, encoding="latin-1"), delimiter=";")
+            for row in reader:
+                if str(row.get("CD_MUN", "")).strip() != municipio_codigo:
+                    continue
+                setor_id = str(row.get("CD_SETOR", "")).strip()
+                if not setor_id:
+                    continue
 
-    if not setor_col or not val_col:
-        logger.warning(f"SIDRA: columnas no detectadas. Disponibles: {list(df.columns)}")
-        return {}
+                def _to_int(v: object) -> Optional[int]:
+                    s = str(v or "").strip()
+                    if not s or s in ("X", "."):  # IBGE usa 'X' para datos suprimidos
+                        return None
+                    try:
+                        return int(float(s.replace(",", ".")))
+                    except (ValueError, TypeError):
+                        return None
 
-    for _, row in df.iterrows():
-        setor_id = str(row.get(setor_col, "")).strip()
-        if not setor_id:
-            continue
-        try:
-            val = int(str(row.get(val_col, "0")).replace(".", "").replace(",", "") or "0")
-        except (ValueError, TypeError):
-            val = 0
+                result[setor_id] = {
+                    "pop_total": _to_int(row.get("v0001")),         # total de pessoas
+                    "domicilios_total": _to_int(row.get("v0002")),  # total de domicílios
+                }
 
-        if setor_id not in result:
-            result[setor_id] = {"domicilios_total": 0, "casas": 0, "aptos": 0}
-
-        tipo = str(row.get(tipo_col, "")).lower() if tipo_col else ""
-        if "casa" in tipo and "vila" not in tipo:
-            result[setor_id]["casas"] += val
-        elif "apart" in tipo or "apto" in tipo:
-            result[setor_id]["aptos"] += val
-        result[setor_id]["domicilios_total"] += val
-
+    logger.info(f"Agregados básico: {len(result)} setores para município {municipio_codigo}")
     return result
 
 
 # ── Inserción en DB ───────────────────────────────────────────────────────────
 
-def _upsert_setores(gdf: gpd.GeoDataFrame, sidra_data: dict,
+def _upsert_setores(gdf: gpd.GeoDataFrame, agregados: dict,
                     region_id: str, source_file: str) -> tuple[int, int]:
-    """Inserta o actualiza setores en la tabla setores_censitarios."""
+    """Inserta o actualiza setores en la tabla setores_censitarios.
+
+    `agregados` = {setor_id: {pop_total, domicilios_total}} del CSV de Agregados básico.
+    La población y los domicilios salen de ahí (la malha SHP es solo geometría)."""
     engine = get_engine()
     insertados = 0
     actualizados = 0
 
-    # Detectar columnas del SHP
+    # Detectar columna de código de setor en el SHP (la malha solo trae geometría)
     col_setor = next((c for c in ["CD_SETOR", "CD_GEOCODI", "Cod_setor"] if c in gdf.columns), None)
-    col_pop = next((c for c in ["POP", "POP_2022", "POPULACAO"] if c in gdf.columns), None)
 
     if not col_setor:
         raise ValueError(f"No se encontró columna de código de setor. Columnas: {list(gdf.columns)}")
@@ -232,10 +226,10 @@ def _upsert_setores(gdf: gpd.GeoDataFrame, sidra_data: dict,
         for _, row in gdf.iterrows():
             setor_id = str(row[col_setor]).strip()
             geom_wkt = row.geometry.wkt if row.geometry else None
-            pop = int(row[col_pop]) if col_pop and pd.notna(row.get(col_pop)) else None
             area_km2 = float(row.geometry.area * 1e10 / 1e6) if row.geometry else None
 
-            sidra = sidra_data.get(setor_id, {})
+            ag = agregados.get(setor_id, {})
+            pop = ag.get("pop_total")
 
             # Calcular área en km² correctamente (geometría en grados → aproximación)
             if row.geometry:
@@ -269,9 +263,9 @@ def _upsert_setores(gdf: gpd.GeoDataFrame, sidra_data: dict,
                     WHERE setor_id = :sid
                 """), {
                     "geom": geom_wkt, "pop": pop,
-                    "dom_total": sidra.get("domicilios_total"),
-                    "dom_casas": sidra.get("casas"),
-                    "dom_aptos": sidra.get("aptos"),
+                    "dom_total": ag.get("domicilios_total"),
+                    "dom_casas": None,   # el desglose casas/aptos está en otro dataset
+                    "dom_aptos": None,
                     "area": area_km2, "src": source_file, "sid": setor_id,
                 })
                 actualizados += 1
@@ -286,9 +280,9 @@ def _upsert_setores(gdf: gpd.GeoDataFrame, sidra_data: dict,
                          :dom_total, :dom_casas, :dom_aptos, :area, :src)
                 """), {
                     "sid": setor_id, "region": region_id, "geom": geom_wkt, "pop": pop,
-                    "dom_total": sidra.get("domicilios_total"),
-                    "dom_casas": sidra.get("casas"),
-                    "dom_aptos": sidra.get("aptos"),
+                    "dom_total": ag.get("domicilios_total"),
+                    "dom_casas": None,
+                    "dom_aptos": None,
                     "area": area_km2, "src": source_file,
                 })
                 insertados += 1
@@ -299,6 +293,7 @@ def _upsert_setores(gdf: gpd.GeoDataFrame, sidra_data: dict,
 
 # ── Entry point principal ─────────────────────────────────────────────────────
 
+@agent_run
 def run(input: IBGEInput) -> IBGEOutput:
     """Ejecuta el agente completo."""
     cache_dir = Path(os.environ.get("SCRAPITERO_CACHE", "/tmp/scrapitero_cache"))
@@ -318,35 +313,31 @@ def run(input: IBGEInput) -> IBGEOutput:
                 error=f"No se encontraron setores para municipio {input.municipio_codigo}"
             )
 
-        # 2. Descargar SIDRA (no crítico si falla)
-        sidra_df = _fetch_sidra(input.municipio_codigo)
-        sidra_data = _parse_sidra_domicilios(sidra_df)
-        if sidra_data:
-            fuentes.append("ibge_sidra_t9596")
+        # 2. Población y domicilios por setor — Agregados básico (no crítico si falla)
+        try:
+            agregados = _fetch_agregados_basico(input.municipio_codigo, cache_dir)
+            if agregados:
+                fuentes.append("ibge_agregados_setores_basico_2022")
+        except Exception as e:
+            logger.warning(f"Agregados básico falló (no crítico): {e}")
+            agregados = {}
 
         # 3. Insertar en DB
         insertados, actualizados = _upsert_setores(
-            gdf, sidra_data, input.region_id,
+            gdf, agregados, input.region_id,
             source_file=f"malha_setores_2022_{input.estado_uf}"
         )
 
-        # 4. Calcular totales para el output
-        pop_total = sum(
-            v.get("domicilios_total", 0) or 0 for v in sidra_data.values()
-        ) if sidra_data else 0
-        dom_total = pop_total  # SIDRA da domicilios, pop viene del SHP
-
-        # Intentar obtener pop real del SHP
-        col_pop = next((c for c in ["POP", "POP_2022"] if c in gdf.columns), None)
-        if col_pop:
-            pop_total = int(gdf[col_pop].sum())
+        # 4. Totales para el output (agregados ya viene filtrado al município)
+        pop_total = sum(v.get("pop_total") or 0 for v in agregados.values())
+        dom_total = sum(v.get("domicilios_total") or 0 for v in agregados.values())
 
         return IBGEOutput(
             ok=True,
             setores_insertados=insertados,
             setores_atualizados=actualizados,
             pop_total=pop_total,
-            domicilios_total=sum(v.get("domicilios_total", 0) or 0 for v in sidra_data.values()),
+            domicilios_total=dom_total,
             fuentes=fuentes,
         )
 

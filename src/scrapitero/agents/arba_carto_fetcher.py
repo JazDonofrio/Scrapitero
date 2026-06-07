@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.arba_cadastral_fetcher import fetch_idera, _upsert_parcelas
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -337,6 +338,7 @@ def _insert_unidades(conn, parcela_id: str, rows: list[dict]) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: ARBACartoInput) -> ARBACartoOutput:
     # Resolver JSESSIONID
     jsessionid = input.jsessionid

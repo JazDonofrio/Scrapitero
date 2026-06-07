@@ -36,6 +36,7 @@ from shapely.strtree import STRtree
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 
 # ── WFS ───────────────────────────────────────────────────────────────────────
@@ -200,6 +201,7 @@ def _update_batch(updates: list[tuple[str, str]]) -> None:
         conn.execute(text("""
             UPDATE parcelas SET
                 uso_principal = CAST(:uso AS text),
+                uso_fuente = 'cpua',
                 unidades_funcionales_estimadas = CASE
                     WHEN CAST(:uso AS text) = 'residencial'
                         THEN GREATEST(COALESCE(unidades_funcionales_estimadas, 0), 1)
@@ -235,6 +237,7 @@ def _classify_point(lat: float, lng: float, tree: STRtree, cpua: list[tuple]) ->
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+@agent_run
 def run(inp: SaltaZonifInput) -> SaltaZonifOutput:
     # 1. Descargar CPUA
     try:

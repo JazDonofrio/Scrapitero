@@ -20,6 +20,7 @@ from shapely.geometry import shape
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 from scrapitero.agents.onr_token import get_token
 from scrapitero.agents.onr_sigef_fetcher import _wgs84_to_webmerc, _bbox_webmerc
 
@@ -262,6 +263,7 @@ def _upsert_lotes(features: list[dict], region_id: str, survey_id: str,
     return inserted, updated
 
 
+@agent_run
 def run(input: LotesInput) -> LotesOutput:
     # Determinar ciudad
     slug = input.cidade_slug

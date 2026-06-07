@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
+from scrapitero.agents._run import agent_run
 
 # Directorio de PDFs BCI — fuente única compartida con VGBCIFetcher. Debe ser ABSOLUTO
 # y el MISMO para ambos agentes (el fetcher escribe, el parser lee). Configurable con
@@ -212,6 +213,8 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
         conn.execute(text("""
             UPDATE parcelas SET
                 uso_principal               = COALESCE(:uso, uso_principal),
+                uso_fuente                  = CASE WHEN :uso IS NOT NULL
+                                             THEN 'bci' ELSE uso_fuente END,
                 uf_vivienda                 = :uf_viv,
                 uf_comercio                 = :uf_com,
                 uf_fuente                   = 'bci',
@@ -244,6 +247,7 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+@agent_run
 def run(input: BCIParserInput) -> BCIParserOutput:
     parcelas = _get_parcelas(input.region_id, input.batch_size)
     if not parcelas:

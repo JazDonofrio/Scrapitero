@@ -10,6 +10,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from scrapitero.agents.relevamiento_reporter import ReporterInput, RelevamientoReport, run as get_report
+from scrapitero.agents._run import agent_run
 
 
 class CSVInput(BaseModel):
@@ -55,6 +56,7 @@ def _build_csv(report: RelevamientoReport, csv_path: Path) -> None:
             ])
 
 
+@agent_run
 def run(input: CSVInput) -> CSVOutput:
     try:
         report = get_report(ReporterInput(

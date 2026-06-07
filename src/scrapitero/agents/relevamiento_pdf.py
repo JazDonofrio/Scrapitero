@@ -11,6 +11,7 @@ from fpdf import FPDF
 from pydantic import BaseModel
 
 from scrapitero.agents.relevamiento_reporter import ReporterInput, RelevamientoReport, run as get_report
+from scrapitero.agents._run import agent_run
 
 
 class PDFInput(BaseModel):
@@ -117,6 +118,7 @@ def _build_pdf(report: RelevamientoReport) -> FPDF:
     return pdf
 
 
+@agent_run
 def run(input: PDFInput) -> PDFOutput:
     try:
         report = get_report(ReporterInput(
