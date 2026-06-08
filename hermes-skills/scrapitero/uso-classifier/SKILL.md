@@ -21,9 +21,16 @@ Clasifica las parcelas de un relevamiento en residencial / comercial / mixto.
 El resultado se guarda en `uso_principal` de cada parcela: `residencial`, `comercial`, `mixto` o `sin_datos`.
 
 ## Cuándo usar
-- "cuántas UFs son vivienda y cuántas son comercios?"
-- "clasificá el uso de las parcelas"
-- "quiero saber si hay locales comerciales en la manzana"
+- **Paso ESTÁNDAR del flujo PBA (Buenos Aires):** correr siempre que haya `parcelas > 0`
+  y `uso_principal` null en una región de Buenos Aires. PBA no tiene fuente nativa de uso
+  (no hay CPUA como Salta ni BCI como Brasil); sin este paso las parcelas quedan "sin
+  clasificar". **Correr `arba-carto-fetcher` antes** para que las parcelas tengan UF
+  (`uf_vivienda`/`uf_comercio`); si entraron solo por IDERA (geometría sin UF), la
+  clasificación cae a Google Places / `sin_datos`.
+- También bajo pedido: "cuántas UFs son vivienda y cuántas son comercios?", "clasificá el
+  uso de las parcelas", "hay locales comerciales en la manzana?".
+
+Requiere `GOOGLE_MAPS_API_KEY`.
 
 ## Comando
 

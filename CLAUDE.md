@@ -186,13 +186,24 @@ clave independiente; el agrupamiento solo está en la cédula paga de inmuebles.
 ## Flujo para Buenos Aires Province (Argentina)
 
 ```
-1. ARBACartoFetcher    → parcelas con geometría (requiere JSESSIONID vigente)
+1. ARBACartoFetcher    → parcelas con geometría + UF/cocheras (requiere JSESSIONID vigente)
    └─ Si falla login  → notificar al usuario por Telegram y detener
 2. OSMBuildingFetcher  → footprints de edificios
 3. AddressResolver     → completar direcciones faltantes
-4. UsoClassifier       → clasificar uso (opcional)
+4. UsoClassifier       → clasificar uso_principal (PASO ESTÁNDAR, no opcional)
 5. RelevamientoCSV     → exportar resultado
 ```
+
+**Regla PBA — uso_principal SIEMPRE se clasifica:** PBA no tiene fuente nativa de uso
+(a diferencia de Brasil=BCI y Salta=CPUA/SIGSA). La única señal es `UsoClassifier`, que
+combina la **UF de ARBA** (`uf_vivienda`/`uf_comercio` que llena ARBACartoFetcher desde las
+subparcelas de carto.arba.gov.ar) + **Google Places** (comercios alrededor). Por eso:
+- `UsoClassifier` es **paso estándar** del flujo PBA (no opcional) — si no se corre, todas
+  las parcelas quedan `uso_principal = NULL` ("sin clasificar").
+- **Depende de ARBACartoFetcher:** si las parcelas entraron solo por IDERA (`arba_idera`,
+  geometría sin UF), `UsoClassifier` no tiene UF y cae a Google Places / `sin_datos`. Para
+  uso útil, correr ARBACartoFetcher (con JSESSIONID) **antes**.
+- Requiere `GOOGLE_MAPS_API_KEY`. Opcional: `GooglePlacesFetcher` para conteo real de comercios.
 
 **Regla PBA — la zona (GeoJSON) maneja la descarga de parcelas:** como todo relevamiento
 parte de un GeoJSON, **no hace falta la nomenclatura catastral** para entrar a ARBA. Tanto

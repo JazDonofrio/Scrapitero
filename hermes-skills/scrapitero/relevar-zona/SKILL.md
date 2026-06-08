@@ -43,6 +43,7 @@ Con el output decidís qué ejecutar:
 | `parcelas > 0` y Salta interior y `uso_principal` null | `salta-registro-fetcher` (marca rural/club de campo) |
 | `parcelas > 0` y Salta Capital y `uso_principal` null | `salta-zonificacion-fetcher` (uso urbano por CPUA) |
 | `parcelas > 0` y Salta Capital, detectar baldíos | `salta-rentas-fetcher` (valorEdificado≈0 → vacante) |
+| `parcelas > 0` y país AR y provincia Buenos Aires y `uso_principal` null | `uso-classifier` (uso por UF de ARBA + Google Places) — **paso estándar de PBA, no opcional**. Antes correr `arba-carto-fetcher` para que las parcelas tengan UF |
 | `parcelas == 0` y otro país | `osm-building-fetcher` |
 | `parcelas > 0` y hay cca_codes sin PDF | `varzea-bci-fetcher` |
 | PDFs descargados pero parcelas sin `uso_principal` | `bci-parser` |
