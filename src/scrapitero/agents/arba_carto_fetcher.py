@@ -403,10 +403,15 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
         except Exception as e:
             return ARBACartoOutput(ok=False, error=f"IDERA WFS falló: {e}")
 
-        # Recargar desde DB
+        # Recargar desde DB — MISMAS 4 columnas que la query principal
+        # (parcela_id, lat, lng, cca_code); si no, el unpack de 4 más abajo
+        # rompe con IndexError cuando las parcelas vienen por la vía IDERA.
         with engine.connect() as conn:
             parcelas_db = conn.execute(text(
-                "SELECT parcela_id::text, centroid_lat, centroid_lng FROM parcelas "
+                "SELECT parcela_id::text, "
+                "ST_Y(ST_PointOnSurface(geometry)) AS lat, "
+                "ST_X(ST_PointOnSurface(geometry)) AS lng, "
+                "cca_code FROM parcelas "
                 "WHERE region_id = :region AND survey_id = :sid"
             ), {"region": input.region_id, "sid": input.survey_id}).fetchall()
 
