@@ -247,6 +247,11 @@ async def root() -> FileResponse:
 async def list_surveys() -> list[dict]:
     engine = get_engine()
     with engine.connect() as conn:
+        # NOTA: edificios y parcelas se agregan por SEPARADO (subconsultas) para evitar
+        # el producto cartesiano que tenía un solo JOIN — antes inflaba SUM(uf_*) y área
+        # multiplicándolos por la cantidad de edificios (p.ej. 51 UF × 12 edif = 612).
+        # total_uf_vivienda: si la parcela no tiene desglose viv/com, se usa
+        # unidades_funcionales_estimadas como vivienda (igual que el "UF total" del mapa).
         rows = conn.execute(text("""
             SELECT
                 s.survey_id::text,
@@ -257,20 +262,39 @@ async def list_surveys() -> list[dict]:
                 r.name                                                             AS region_nombre,
                 r.country_code,
                 r.zone_geojson,
-                COUNT(DISTINCT e.edificio_id)                                      AS total_edificios,
-                COUNT(DISTINCT p.parcela_id)                                       AS total_parcelas,
-                COALESCE(SUM(p.uf_vivienda), 0)                                    AS total_uf_vivienda,
-                COALESCE(SUM(p.uf_comercio), 0)                                    AS total_uf_comercio,
-                COALESCE(BOOL_OR(p.uf_fuente IS NOT NULL AND p.uf_fuente <> 'bci'), false) AS uf_estimado,
-                COUNT(DISTINCT CASE WHEN p.calle IS NOT NULL THEN p.parcela_id END) AS con_direccion,
-                SUM(p.area_m2_terreno)                                             AS area_total_m2,
-                COUNT(DISTINCT CASE WHEN p.cca_code IS NOT NULL THEN p.parcela_id END) AS con_inscripcion
+                COALESCE(ed.total_edificios, 0)                                    AS total_edificios,
+                COALESCE(pa.total_parcelas, 0)                                     AS total_parcelas,
+                COALESCE(pa.total_uf_vivienda, 0)                                  AS total_uf_vivienda,
+                COALESCE(pa.total_uf_comercio, 0)                                  AS total_uf_comercio,
+                COALESCE(pa.uf_estimado, false)                                    AS uf_estimado,
+                COALESCE(pa.con_direccion, 0)                                      AS con_direccion,
+                pa.area_total_m2                                                   AS area_total_m2,
+                COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
-            LEFT JOIN edificios e ON e.survey_id = s.survey_id
-            LEFT JOIN parcelas p ON p.survey_id = s.survey_id
-            GROUP BY s.survey_id, s.region_id, s.status, s.started_at, s.notes,
-                     r.name, r.country_code, r.zone_geojson
+            LEFT JOIN (
+                SELECT survey_id,
+                       COUNT(*)                                                    AS total_parcelas,
+                       COALESCE(SUM(CASE
+                           WHEN uf_vivienda IS NULL AND uf_comercio IS NULL
+                           THEN COALESCE(unidades_funcionales_estimadas, 0)
+                           ELSE COALESCE(uf_vivienda, 0) END), 0)                  AS total_uf_vivienda,
+                       COALESCE(SUM(uf_comercio), 0)                               AS total_uf_comercio,
+                       BOOL_OR(
+                           (uf_fuente IS NOT NULL AND uf_fuente <> 'bci')
+                           OR (uf_vivienda IS NULL AND uf_comercio IS NULL
+                               AND unidades_funcionales_estimadas IS NOT NULL)
+                       )                                                           AS uf_estimado,
+                       COUNT(*) FILTER (WHERE calle IS NOT NULL)                   AS con_direccion,
+                       SUM(area_m2_terreno)                                        AS area_total_m2,
+                       COUNT(*) FILTER (WHERE cca_code IS NOT NULL)                AS con_inscripcion
+                FROM parcelas
+                GROUP BY survey_id
+            ) pa ON pa.survey_id = s.survey_id
+            LEFT JOIN (
+                SELECT survey_id, COUNT(*) AS total_edificios
+                FROM edificios GROUP BY survey_id
+            ) ed ON ed.survey_id = s.survey_id
             ORDER BY s.started_at DESC
         """)).fetchall()
 
@@ -408,26 +432,38 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
             ORDER BY p.calle NULLS LAST
         """), {"sid": survey_id}).fetchall()
-    return [
-        {
+    out = []
+    for r in rows:
+        # UF consistente con el resumen: si no hay desglose viv/com, se usa
+        # unidades_funcionales_estimadas como vivienda (vivienda por defecto).
+        # uf_total = uf_viv + uf_com (antes mostraba la columna estimada por separado,
+        # lo que difería del resumen).
+        uf_viv_raw, uf_com_raw, ufe = r[3], r[4], r[5]
+        if uf_viv_raw is None and uf_com_raw is None:
+            uf_viv = int(ufe or 0)
+            estimado_fallback = ufe is not None
+        else:
+            uf_viv = int(uf_viv_raw or 0)
+            estimado_fallback = False
+        uf_com = int(uf_com_raw or 0)
+        out.append({
             "lat": float(r[0]), "lng": float(r[1]),
             "uso": r[2] or "",
-            "uf_viv": int(r[3] or 0), "uf_com": int(r[4] or 0),
-            "uf_total": int(r[5] or 0),
+            "uf_viv": uf_viv, "uf_com": uf_com,
+            "uf_total": uf_viv + uf_com,
             "calle": r[6] or "", "numero": r[7] or "", "barrio": r[8] or "",
             "cca": r[9] or "",
             "area_t": round(float(r[10]), 1) if r[10] else None,
             "area_c": round(float(r[11]), 1) if r[11] else None,
             "uf_fuente": r[12] or "",
-            "uf_estimado": bool(r[12]) and r[12] != "bci",
+            "uf_estimado": (bool(r[12]) and r[12] != "bci") or estimado_fallback,
             "comercios": list(r[13] or []),
             "pisos": _pisos_estimados(
                 float(r[10]) if r[10] else None,
                 float(r[11]) if r[11] else None,
             ),
-        }
-        for r in rows
-    ]
+        })
+    return out
 
 
 @app.get("/api/surveys/{survey_id}/activity")
