@@ -235,7 +235,12 @@ async def _cleanup_orphaned_surveys() -> None:
 
 @app.get("/")
 async def root() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-cache: el dashboard es una SPA de un solo HTML; sin esto el navegador
+    # (o un túnel intermedio) sirve una versión vieja del JS y rompe la UI.
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/surveys")
