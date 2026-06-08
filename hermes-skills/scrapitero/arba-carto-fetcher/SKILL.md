@@ -1,6 +1,6 @@
 ---
 name: arba-carto-fetcher
-description: "Enriquece parcelas de Buenos Aires Province con subparcelas, UF, cocheras y dirección desde carto.arba.gov.ar. Requiere JSESSIONID activo. Si needs_cookies=true, pedir el valor al usuario por Telegram."
+description: "Enriquece parcelas de Buenos Aires Province con subparcelas, UF, cocheras y dirección desde carto.arba.gov.ar. Requiere JSESSIONID activo. Si no hay parcelas en DB las baja de IDERA por el polígono de la zona (zone_geojson, sin nomenclatura) o por nomenclatura si se pasa. Si needs_cookies=true, pedir el valor al usuario por Telegram."
 version: 2.0.0
 author: Scrapitero
 platforms: [linux]
@@ -37,6 +37,13 @@ Después de `arba-cadastral-fetcher`, para enriquecer las parcelas con:
 
 ### Paso 1 — Correr con el JSESSIONID recibido
 
+**Por zona (recomendado):** si no hay parcelas en DB, las baja de IDERA por el polígono de
+la zona (`zone_geojson`). No requiere nomenclatura.
+```bash
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
+```
+
+**Por nomenclatura (opcional):** para acotar a una manzana puntual.
 ```bash
 python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}'
 ```
@@ -62,13 +69,15 @@ Enviar este mensaje:
 
 **Si el usuario mandó solo el valor del JSESSIONID** (ej: `ABC123XYZ`):
 ```bash
-python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","jsessionid":"<VALOR>"}'
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","jsessionid":"<VALOR>"}'
 ```
 
 **Si el usuario mandó el header Cookie completo** (ej: `JSESSIONID=ABC123; TS01x=yyy` o `Cookie: JSESSIONID=ABC123`):
 ```bash
-python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184","cookie_header":"<STRING_COMPLETO>"}'
+python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","cookie_header":"<STRING_COMPLETO>"}'
 ```
+
+(Agregar `partido_id`/`circunscripcion`/`seccion`/`manzana` solo si querés acotar a una manzana.)
 
 **IMPORTANTE:** no inventar ni modificar el valor del cookie. Usarlo exactamente como lo mandó el usuario.
 

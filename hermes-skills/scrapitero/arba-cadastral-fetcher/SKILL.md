@@ -1,6 +1,6 @@
 ---
 name: arba-cadastral-fetcher
-description: "Descarga parcelas catastrales de Buenos Aires Province (Argentina) desde el WFS público de ARBA. Filtrar por partido, circunscripción, sección y/o manzana. Usar cuando parcelas == 0 para una región argentina."
+description: "Descarga parcelas catastrales de Buenos Aires Province (Argentina) desde el WFS público de IDERA. Por default filtra por el polígono de la zona (zone_geojson) — no requiere nomenclatura. Opcionalmente filtra por partido/circunscripción/sección/manzana. Usar cuando parcelas == 0 para una región argentina."
 version: 1.0.0
 author: Scrapitero
 platforms: [linux]
@@ -26,32 +26,43 @@ Cuando `coverage-reporter` devuelve `parcelas == 0` para una región argentina.
 ## Comando
 **No instalar nada. El venv ya está listo.**
 
-Para una manzana específica (recomendado para tests):
+**Por zona (recomendado — todo relevamiento parte del GeoJSON):** sin nomenclatura. Baja
+las parcelas que caen dentro del polígono de la zona (`regions.zone_geojson`). La región
+debe haberse creado desde un GeoJSON (GeoJSONZoneFetcher).
+```bash
+python3 -m scrapitero.rpc.arba_cadastral_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>"}'
+```
+
+**Por nomenclatura (opcional):** para bajar una manzana puntual, pasar las 4 partes.
 ```bash
 python3 -m scrapitero.rpc.arba_cadastral_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136","circunscripcion":"2","seccion":"C","manzana":"184"}'
 ```
 
-Para todo el partido:
-```bash
-python3 -m scrapitero.rpc.arba_cadastral_fetcher <<< '{"region_id":"ituzaingo-ba-ar","survey_id":"<SURVEY_ID>","partido_id":"136"}'
-```
+## Cómo filtra (importante)
+- **Espacial (default):** bbox del polígono de la zona vía el parámetro WFS
+  `bbox=...,EPSG:4326` (reproyecta desde el CRS nativo Gauss-Krüger del layer) + recorte
+  exacto al polígono con shapely. **No** se usa CQL `INTERSECTS` (GeoServer interpreta el
+  WKT en el CRS nativo en metros, no en lat/lon → da 0 features).
+- **Por nomenclatura:** CQL `cca LIKE '{prefix}%'` con el prefijo armado de partido/circ/secc/manzana.
 
 ## Output esperado
 ```json
 {
   "ok": true,
-  "parcelas_insertadas": 42,
+  "parcelas_insertadas": 629,
   "parcelas_actualizadas": 0,
-  "fuentes": ["arba_wfs_parcelas"],
+  "fuentes": ["idera_wfs_espacial"],
   "error": null
 }
 ```
+(`fuentes`: `idera_wfs_espacial` por zona, `idera_wfs` por nomenclatura)
 
 ## Si falla
 - `ok: false` con mensaje en `error`
-- Si el error menciona HTTP 500 o "featureType not found": el WFS de ARBA puede estar caído
-  - URL pública: https://geo.arba.gov.ar/geoserver/irisas/ows
-- Si devuelve 0 parcelas: verificar partido_id, circunscripcion, seccion, manzana con ceros a izquierda
-  - partido_id: 4 dígitos (ej: "0136")
-  - manzana: 4 dígitos (ej: "0184")
-  - El agente rellena automáticamente con ceros
+- Si el error menciona HTTP 500 o "featureType not found": el WFS de IDERA puede estar caído
+  - URL pública: https://geo.arba.gov.ar/geoserver/idera/wfs (layer `idera:Parcela`)
+- Si dice "no tiene zone_geojson": la región se creó sin polígono → crearla con
+  GeoJSONZoneFetcher, o pasar la nomenclatura completa como fallback.
+- Si por zona devuelve 0 parcelas: verificar que la zona esté en Provincia de Buenos Aires.
+- Si por nomenclatura devuelve 0: revisar partido/circunscripcion/seccion/manzana (el
+  agente rellena ceros a izquierda automáticamente).

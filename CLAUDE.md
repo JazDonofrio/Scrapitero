@@ -50,8 +50,8 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 ### Fuentes de parcelas — Argentina
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
-| ARBACartoFetcher | `arba_carto_fetcher` | **PBA: SIEMPRE primero.** Requiere JSESSIONID. Si falla login → Telegram al usuario |
-| ARBACadastralFetcher | `arba_cadastral_fetcher` | PBA alternativo: WFS público de ARBA, sin autenticación |
+| ARBACartoFetcher | `arba_carto_fetcher` | **PBA: SIEMPRE primero.** Requiere JSESSIONID. Si falla login → Telegram al usuario. Si no hay parcelas en DB las baja de IDERA por **filtro espacial** (polígono de la zona) o por nomenclatura si se pasa completa. |
+| ARBACadastralFetcher | `arba_cadastral_fetcher` | PBA alternativo: WFS público de IDERA, sin autenticación. **Filtra por el polígono de la zona (`zone_geojson`) por default** — no requiere nomenclatura catastral; pasarla (partido/circ/secc/manzana) es opcional para bajar una manzana puntual. |
 | SaltaCatastroFetcher | `salta_catastro_fetcher` | **Salta: SIEMPRE primero.** WFS público sin autenticación. Capital → IDEMSA (~125k parcelas). Interior → IDESA provincial. Selección automática por centroide de zona. |
 | SaltaZonificacionFetcher | `salta_zonificacion_fetcher` | Después de SaltaCatastroFetcher. Clasifica uso_principal por CPUA 2019 (residencial/comercial/mixto/industrial/equipamiento/vacante). Cubre ciudad de Salta Capital. |
 | SaltaRegistroFetcher | `salta_registro_fetcher` | Después de SaltaCatastroFetcher. Registro SIGSA público (toda la provincia). TIPO: RURAL→vacante, CLUB DE CAMPO→residencial, URBANO→defer a CPUA. Única señal de uso para el interior. |
@@ -193,6 +193,16 @@ clave independiente; el agrupamiento solo está en la cédula paga de inmuebles.
 4. UsoClassifier       → clasificar uso (opcional)
 5. RelevamientoCSV     → exportar resultado
 ```
+
+**Regla PBA — la zona (GeoJSON) maneja la descarga de parcelas:** como todo relevamiento
+parte de un GeoJSON, **no hace falta la nomenclatura catastral** para entrar a ARBA. Tanto
+ARBACartoFetcher como ARBACadastralFetcher, si no encuentran parcelas en DB, las bajan de
+IDERA por **filtro espacial**: bbox del polígono de la zona (`regions.zone_geojson`) vía el
+parámetro WFS `bbox=...,EPSG:4326` (que reproyecta desde el CRS nativo Gauss-Krüger del
+layer) + **recorte exacto al polígono con shapely**. La nomenclatura (partido/circ/secc/
+manzana) es **opcional**: pasarla completa filtra por prefijo CCA (una manzana puntual).
+No se usa CQL `INTERSECTS` porque GeoServer interpreta el WKT en el CRS nativo (metros), no
+en lat/lon. Para esto la región debe tener `zone_geojson` (creada con GeoJSONZoneFetcher).
 
 ## Lo que NO debés hacer
 - ❌ `curl https://geoftp.ibge.gov.br/...`

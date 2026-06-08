@@ -1,13 +1,24 @@
 """ARBACadastralFetcher — descarga geometrías de parcelas desde IDERA WFS.
 
 Fuente: geo.arba.gov.ar/geoserver/idera/wfs (layer idera:Parcela)
-Filtro: CQL cca LIKE '{prefix}%' donde prefix se construye desde partido/circ/secc/manzana.
+
+Dos formas de filtrar (la espacial es la preferida — todo relevamiento parte del GeoJSON):
+- **Espacial (default):** bbox del polígono de la zona (`regions.zone_geojson`) vía el
+  parámetro WFS `bbox=...,EPSG:4326` (que reproyecta correctamente desde el CRS nativo
+  Gauss-Krüger del layer) y luego recorte exacto al polígono con shapely. NO requiere
+  nomenclatura catastral.
+- **Por nomenclatura (opcional):** CQL `cca LIKE '{prefix}%'` con prefix armado desde
+  partido/circ/secc/manzana. Útil para bajar una manzana puntual.
+
+Nota: el CQL `INTERSECTS(geom, WKT)` NO se usa porque GeoServer interpreta el WKT en el
+CRS nativo del layer (metros), no en lat/lon — por eso se filtra por `bbox` + recorte local.
 
 Output: filas insertadas en tabla `parcelas` con geometría y centroide.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Optional
 
@@ -15,6 +26,7 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 from shapely.geometry import shape
+from shapely.ops import unary_union
 from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
@@ -30,10 +42,12 @@ IDERA_WFS = "https://geo.arba.gov.ar/geoserver/idera/wfs"
 class ARBAInput(BaseModel):
     region_id: str                          # "ituzaingo-ba-ar"
     survey_id: str
-    partido_id: str                         # "136"
-    circunscripcion: str                    # "2"
-    seccion: str                            # "C"
-    manzana: str                            # "184"
+    # Nomenclatura catastral: OPCIONAL. Si se omite, se baja por filtro espacial
+    # (polígono de la zona). Si se pasa completa, se filtra por prefijo CCA (una manzana).
+    partido_id: Optional[str] = None        # "136"
+    circunscripcion: Optional[str] = None    # "2"
+    seccion: Optional[str] = None            # "C"
+    manzana: Optional[str] = None            # "184"
 
 
 class ARBAOutput(BaseModel):
@@ -80,6 +94,89 @@ def fetch_idera(partido: str, circ: str, secc: str, mza: str) -> list[dict]:
     features = r.json().get("features", [])
     logger.info(f"IDERA WFS devolvió {len(features)} features")
     return features
+
+
+# ── IDERA WFS — filtro espacial (desde el GeoJSON de la zona) ──────────────────
+
+def _load_zone_polygon(region_id: str):
+    """Devuelve el polígono (shapely) de la zona desde regions.zone_geojson.
+
+    Acepta FeatureCollection / Feature / geometría. Devuelve None si la región
+    no tiene zone_geojson (no se puede filtrar espacialmente sin polígono).
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT zone_geojson FROM regions WHERE region_id = :r"),
+            {"r": region_id},
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    gj = row[0]
+    if isinstance(gj, str):
+        gj = json.loads(gj)
+    geoms = []
+    if gj.get("type") == "FeatureCollection":
+        for f in gj.get("features", []):
+            if f.get("geometry"):
+                geoms.append(shape(f["geometry"]))
+    elif gj.get("type") == "Feature":
+        if gj.get("geometry"):
+            geoms.append(shape(gj["geometry"]))
+    else:
+        geoms.append(shape(gj))
+    if not geoms:
+        return None
+    poly = unary_union(geoms)
+    return poly if poly.is_valid else poly.buffer(0)
+
+
+def fetch_idera_spatial(zone_poly, max_features: int = 50000) -> list[dict]:
+    """Baja parcelas de IDERA por el bbox del polígono de la zona y las recorta
+    exactamente al polígono con shapely.
+
+    Se usa el parámetro WFS `bbox=minx,miny,maxx,maxy,EPSG:4326` (que reproyecta
+    desde el CRS nativo del layer) en vez de CQL INTERSECTS (que falla por orden de
+    ejes / CRS nativo). El recorte fino al polígono se hace localmente.
+    """
+    minx, miny, maxx, maxy = zone_poly.bounds
+    bbox = f"{minx},{miny},{maxx},{maxy},EPSG:4326"
+    logger.info(f"IDERA WFS — bbox espacial: {bbox}")
+
+    with httpx.Client(timeout=60) as client:
+        r = client.get(IDERA_WFS, params={
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typeNames": "idera:Parcela",
+            "srsName": "EPSG:4326",
+            "outputFormat": "application/json",
+            "count": str(max_features),
+            "bbox": bbox,
+        })
+        r.raise_for_status()
+
+    raw = r.json().get("features", [])
+    logger.info(f"IDERA WFS bbox devolvió {len(raw)} features (sin recortar)")
+    if len(raw) >= max_features:
+        logger.warning(
+            f"IDERA WFS alcanzó el tope de {max_features} features — la zona puede "
+            "estar truncada. Subdividir el GeoJSON o subir max_features."
+        )
+
+    # Recorte fino: quedarse solo con las parcelas que intersectan el polígono real.
+    kept = []
+    for feat in raw:
+        g = feat.get("geometry")
+        if not g:
+            continue
+        try:
+            if shape(g).intersects(zone_poly):
+                kept.append(feat)
+        except Exception:
+            continue
+    logger.info(f"IDERA: {len(kept)} parcelas dentro del polígono de la zona")
+    return kept
 
 
 def _centroid_from_feature(feat: dict) -> tuple[Optional[float], Optional[float]]:
@@ -180,21 +277,40 @@ def _upsert_parcelas(features: list[dict], region_id: str,
 
 @agent_run
 def run(input: ARBAInput) -> ARBAOutput:
+    # Camino por nomenclatura solo si viene COMPLETA; si no, filtro espacial (GeoJSON).
+    por_nomenclatura = all([
+        input.partido_id, input.circunscripcion, input.seccion, input.manzana
+    ])
     try:
-        features = fetch_idera(
-            input.partido_id, input.circunscripcion,
-            input.seccion, input.manzana
-        )
-        if not features:
-            return ARBAOutput(
-                ok=False,
-                error=(
+        if por_nomenclatura:
+            features = fetch_idera(
+                input.partido_id, input.circunscripcion,
+                input.seccion, input.manzana
+            )
+            if not features:
+                return ARBAOutput(ok=False, error=(
                     f"IDERA WFS no devolvió parcelas para "
                     f"Partido={input.partido_id} Circ={input.circunscripcion} "
                     f"Secc={input.seccion} Mza={input.manzana}. "
                     "Verificar nomenclatura."
-                )
-            )
+                ))
+            fuente = "idera_wfs"
+        else:
+            zone_poly = _load_zone_polygon(input.region_id)
+            if zone_poly is None:
+                return ARBAOutput(ok=False, error=(
+                    f"La región '{input.region_id}' no tiene zone_geojson para filtrar "
+                    "espacialmente. Creá la zona desde un GeoJSON (GeoJSONZoneFetcher) o "
+                    "pasá la nomenclatura completa (partido/circunscripcion/seccion/manzana)."
+                ))
+            features = fetch_idera_spatial(zone_poly)
+            if not features:
+                return ARBAOutput(ok=False, error=(
+                    f"IDERA WFS no devolvió parcelas dentro del polígono de "
+                    f"'{input.region_id}'. Verificar que la zona esté en Provincia de "
+                    "Buenos Aires y que el WFS de IDERA (geo.arba.gov.ar) esté disponible."
+                ))
+            fuente = "idera_wfs_espacial"
 
         insertadas, actualizadas = _upsert_parcelas(
             features, input.region_id, input.survey_id
@@ -203,7 +319,7 @@ def run(input: ARBAInput) -> ARBAOutput:
             ok=True,
             parcelas_insertadas=insertadas,
             parcelas_actualizadas=actualizadas,
-            fuentes=["idera_wfs"],
+            fuentes=[fuente],
         )
     except httpx.HTTPStatusError as e:
         return ARBAOutput(ok=False, error=f"IDERA HTTP {e.response.status_code}: {e.response.text[:200]}")

@@ -29,7 +29,9 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
-from scrapitero.agents.arba_cadastral_fetcher import fetch_idera, _upsert_parcelas
+from scrapitero.agents.arba_cadastral_fetcher import (
+    fetch_idera, fetch_idera_spatial, _load_zone_polygon, _upsert_parcelas,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ ARBA_SESSION_FILE = Path(os.environ.get("ARBA_SESSION_FILE",
 class ARBACartoInput(BaseModel):
     region_id: str
     survey_id: str
-    partido_id: str                         # "136"
+    partido_id: Optional[str] = None        # "136" — opcional (solo para vía nomenclatura)
     circunscripcion: Optional[str] = None
     seccion: Optional[str] = None
     manzana: Optional[str] = None
@@ -380,24 +382,42 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
             q += " AND fuente_parcela = 'arba_idera'"
         parcelas_db = conn.execute(text(q), params).fetchall()
 
-    # Si no hay parcelas, descargarlas de IDERA WFS primero
-    if not parcelas_db and input.circunscripcion and input.seccion and input.manzana:
-        logger.info("Sin parcelas en DB — descargando desde IDERA WFS...")
+    # Si no hay parcelas, descargarlas de IDERA WFS primero.
+    # Por nomenclatura si viene completa; si no, por filtro espacial (polígono de la zona).
+    if not parcelas_db:
+        por_nomenclatura = all([
+            input.partido_id, input.circunscripcion, input.seccion, input.manzana
+        ])
         try:
-            features = fetch_idera(
-                input.partido_id, input.circunscripcion,
-                input.seccion, input.manzana
-            )
-            if not features:
-                return ARBACartoOutput(
-                    ok=False,
-                    error=(
+            if por_nomenclatura:
+                logger.info("Sin parcelas en DB — descargando de IDERA por nomenclatura...")
+                features = fetch_idera(
+                    input.partido_id, input.circunscripcion,
+                    input.seccion, input.manzana
+                )
+                if not features:
+                    return ARBACartoOutput(ok=False, error=(
                         f"IDERA WFS no devolvió parcelas para "
                         f"Partido={input.partido_id} Circ={input.circunscripcion} "
                         f"Secc={input.seccion} Mza={input.manzana}. "
                         "Verificar nomenclatura catastral."
-                    )
-                )
+                    ))
+            else:
+                logger.info("Sin parcelas en DB — descargando de IDERA por zona (GeoJSON)...")
+                zone_poly = _load_zone_polygon(input.region_id)
+                if zone_poly is None:
+                    return ARBACartoOutput(ok=False, error=(
+                        f"La región '{input.region_id}' no tiene zone_geojson para filtrar "
+                        "espacialmente. Creá la zona desde un GeoJSON o pasá la nomenclatura "
+                        "completa (partido/circunscripcion/seccion/manzana)."
+                    ))
+                features = fetch_idera_spatial(zone_poly)
+                if not features:
+                    return ARBACartoOutput(ok=False, error=(
+                        f"IDERA WFS no devolvió parcelas dentro del polígono de "
+                        f"'{input.region_id}'. Verificar que la zona esté en PBA y que "
+                        "geo.arba.gov.ar esté disponible."
+                    ))
             _upsert_parcelas(features, input.region_id, input.survey_id)
             logger.info(f"IDERA: {len(features)} parcelas cargadas en DB")
         except Exception as e:
