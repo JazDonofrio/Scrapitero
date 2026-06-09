@@ -77,6 +77,16 @@ class SmartGISInput(BaseModel):
     step_grados: float = 0.00010        # ~11m por celda — cubre parcelas urbanas típicas (100-500 m²)
     n_passes: int = 2                   # 2 passes offset garantizan cobertura sin duplicados
     delay_ms: int = 80
+    # Presupuesto de tiempo interno. El comando que invoca al agente (Hermes) lo mata
+    # a los ~900s; frenamos con gracia ANTES de eso, persistiendo lo bajado, para que
+    # un corte por timeout nunca tire todo el trabajo. Re-ejecutar acumula el resto
+    # (upsert idempotente por cca_code + scan aleatorio que cubre subzonas distintas).
+    max_runtime_s: int = 840
+    # Fracción del presupuesto reservada al grid scan; el resto al detalle+guardado.
+    # Garantiza que aun en una zona grande siempre alcance tiempo a persistir parcelas.
+    scan_fraction: float = 0.6
+    # Cada cuántos lotes se hace flush a la DB durante el detalle (persistencia incremental).
+    batch_size: int = 50
 
 
 class SmartGISOutput(BaseModel):
@@ -85,6 +95,9 @@ class SmartGISOutput(BaseModel):
     parcelas_actualizadas: int = 0
     lotes_escaneados: int = 0
     fuera_de_zona: int = 0
+    # True si el agente frenó por presupuesto de tiempo (o stop) antes de terminar:
+    # lo guardado es válido pero parcial; re-ejecutar acumula el resto.
+    parcial: bool = False
     error: Optional[str] = None
 
 
@@ -245,16 +258,37 @@ def _build_cells(s: float, w: float, n: float, e: float,
 
 def _grid_scan(s: float, w: float, n: float, e: float,
                step: float, n_passes: int, delay_ms: int,
-               region_id: str = "") -> set[int]:
-    """Escanea el bbox con celdas offset entre passes. Devuelve IDs únicos de lotes."""
+               region_id: str = "", deadline: Optional[float] = None,
+               zone_polygon=None) -> tuple[set[int], bool]:
+    """Escanea el bbox con celdas offset entre passes. Devuelve (IDs únicos, completo).
+
+    `completo` es False si el scan se cortó antes de recorrer todas las celdas (por
+    stop o por `deadline`, un instante de `time.monotonic()`). Como las celdas se
+    recorren en orden aleatorio, un scan parcial cubre una subzona aleatoria: al
+    re-ejecutar, otra corrida cubre celdas distintas y la cobertura se acumula.
+
+    Si se pasa `zone_polygon`, se **descartan de antemano las celdas que no intersectan
+    la zona**: el bbox de un polígono irregular puede ser varias veces más grande que la
+    zona real, y escanear esas celdas es puro desperdicio (los lotes hallados ahí se
+    filtran igual después). Esto recorta drásticamente el scan en zonas chicas/irregulares.
+    """
     cells = _build_cells(s, w, n, e, step, n_passes)
     # Orden aleatorio: evita el patrón sistemático de fila-por-fila
     random.shuffle(cells)
 
+    if zone_polygon is not None:
+        from shapely.geometry import box as _box
+        antes = len(cells)
+        cells = [c for c in cells if zone_polygon.intersects(_box(c[0], c[1], c[2], c[3]))]
+        logger.info(
+            f"SmartGIS grid scan: {antes} celdas del bbox → {len(cells)} dentro de la zona "
+            f"(descarta {antes - len(cells)} fuera del polígono)"
+        )
+
     total = len(cells)
     logger.info(
         f"SmartGIS grid scan: {total} celdas "
-        f"({n_passes} passes × ~{total//n_passes}, ~{step*111000:.0f}m/celda)"
+        f"({n_passes} passes, ~{step*111000:.0f}m/celda)"
     )
 
     unique_ids: set[int] = set()
@@ -265,7 +299,14 @@ def _grid_scan(s: float, w: float, n: float, e: float,
             if region_id in _stop_regions:
                 logger.info(f"SmartGIS: stop solicitado, deteniendo scan ({scanned} celdas)")
                 _stop_regions.discard(region_id)
-                return unique_ids
+                return unique_ids, False
+
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    f"SmartGIS: presupuesto de scan agotado ({scanned}/{total} celdas, "
+                    f"{len(unique_ids)} lotes) — paso al detalle con lo hallado"
+                )
+                return unique_ids, False
 
             try:
                 r = client.post(
@@ -290,14 +331,61 @@ def _grid_scan(s: float, w: float, n: float, e: float,
             _human_sleep(delay_ms)
 
     logger.info(f"Grid scan completo: {len(unique_ids)} lotes en {total} celdas")
-    return unique_ids
+    return unique_ids, True
 
 
-def _get_lot_details(ids: set[int], delay_ms: int) -> list[dict]:
-    """Descarga atributos de cada lote por ID."""
-    lots = []
+def _lot_in_zone(data: dict, zone_polygon) -> bool:
+    """¿El lote cae dentro de la zona? Usa intersects(geom) (un lote grande puede
+    tener el centroide fuera pero parte del polígono dentro); si no hay geometría,
+    cae a contains(centroide)."""
+    if zone_polygon is None:
+        return True
+    geom = data.get("_geom")
+    if geom is None:
+        return zone_polygon.contains(Point(data["_lon"], data["_lat"]))
+    return zone_polygon.intersects(geom)
+
+
+def _stream_details_and_upsert(
+    ids: set[int], zone_polygon, region_id: str, survey_id: str,
+    delay_ms: int, batch_size: int = 50, deadline: Optional[float] = None,
+) -> tuple[int, int, int, int, bool]:
+    """Descarga el detalle de cada lote, lo filtra por zona y lo **persiste en batches**.
+
+    La persistencia incremental es la clave: si el comando se corta por timeout (o se
+    pide stop, o se agota `deadline`), lo ya bajado queda guardado en la DB en vez de
+    perderse al final. Devuelve (insertadas, actualizadas, fuera_de_zona, procesados,
+    completo).
+    """
+    inserted = updated = fuera = procesados = 0
+    batch: list[dict] = []
+    total = len(ids)
+    completo = True
+
+    def _flush() -> None:
+        nonlocal inserted, updated, batch
+        if not batch:
+            return
+        ins, upd = _upsert_lots(batch, region_id, survey_id)
+        inserted += ins
+        updated += upd
+        batch = []
+
     with httpx.Client(timeout=20, headers=_HEADERS) as client:
-        for idx, lot_id in enumerate(ids, 1):
+        for lot_id in ids:
+            if region_id in _stop_regions:
+                logger.info(f"SmartGIS: stop solicitado durante detalle ({procesados}/{total})")
+                _stop_regions.discard(region_id)
+                completo = False
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    f"SmartGIS: presupuesto de tiempo agotado en detalle "
+                    f"({procesados}/{total}) — persisto lo bajado y freno"
+                )
+                completo = False
+                break
+
             try:
                 r = client.get(f"{API_BASE}/PublicLote/Get/{lot_id}")
                 if r.status_code == 200:
@@ -317,16 +405,27 @@ def _get_lot_details(ids: set[int], delay_ms: int) -> list[dict]:
                         data["_lat"] = 0.0
                         data["_lon"] = 0.0
                         data["_geom_wkt"] = None
-                    lots.append(data)
+
+                    if _lot_in_zone(data, zone_polygon):
+                        batch.append(data)
+                    else:
+                        fuera += 1
             except httpx.HTTPError as e:
                 logger.warning(f"Error fetching lot {lot_id}: {e}")
 
-            if idx % 50 == 0:
-                logger.info(f"  Detalle: {idx}/{len(ids)} lotes descargados")
+            procesados += 1
+            if len(batch) >= batch_size:
+                _flush()
+            if procesados % 50 == 0:
+                logger.info(
+                    f"  Detalle+guardado: {procesados}/{total} "
+                    f"(insert {inserted}, update {updated}, fuera {fuera})"
+                )
 
             time.sleep(delay_ms / 1000 * random.uniform(0.8, 1.2))
 
-    return lots
+    _flush()  # guardar el último batch parcial
+    return inserted, updated, fuera, procesados, completo
 
 
 # Municipio/estado por código IBGE (extensible). SmartGIS hoy sirve sólo a Várzea
@@ -446,53 +545,48 @@ def run(input: SmartGISInput) -> SmartGISOutput:
     s, w, n, e = bbox
     logger.info(f"SmartGIS VG: bbox ({s:.5f},{w:.5f}) → ({n:.5f},{e:.5f})")
 
+    # Presupuesto de tiempo: frenamos con gracia antes de que el comando que nos invoca
+    # (Hermes, ~900s) nos mate. Reservamos `scan_fraction` del presupuesto al scan y el
+    # resto al detalle+guardado, para que aun en una zona grande siempre alcance a
+    # persistir parcelas (y no se pierda todo como pasaba antes).
+    start = time.monotonic()
+    deadline = start + input.max_runtime_s
+    scan_deadline = start + input.max_runtime_s * input.scan_fraction
+
     _stop_regions.discard(input.region_id)  # limpiar flag anterior
-    unique_ids = _grid_scan(s, w, n, e, input.step_grados, input.n_passes, input.delay_ms, input.region_id)
+    unique_ids, scan_completo = _grid_scan(
+        s, w, n, e, input.step_grados, input.n_passes, input.delay_ms,
+        input.region_id, deadline=scan_deadline, zone_polygon=zone_polygon,
+    )
     if not unique_ids:
         return SmartGISOutput(ok=True, error="Sin lotes en el área")
 
-    _tg(f"📋 <b>Zona escaneada</b> — {len(unique_ids)} parcelas encontradas\n"
-        f"Descargando datos de cada parcela...")
+    _tg(
+        f"📋 <b>Zona escaneada</b> — {len(unique_ids)} parcelas encontradas"
+        + ("" if scan_completo else " (scan parcial: presupuesto de tiempo)")
+        + "\nDescargando y guardando datos de cada parcela..."
+    )
 
-    lots = _get_lot_details(unique_ids, input.delay_ms)
-    logger.info(f"SmartGIS: {len(lots)} lotes con detalle")
+    # Detalle por lote + filtro por zona + persistencia incremental en batches.
+    inserted, updated, fuera, procesados, detalle_completo = _stream_details_and_upsert(
+        unique_ids, zone_polygon, input.region_id, input.survey_id,
+        input.delay_ms, input.batch_size, deadline=deadline,
+    )
 
-    # Filtrar por zona poligonal exacta.
-    # Usamos intersects(geom) en vez de contains(centroid): un lote grande puede
-    # tener el centroide fuera de la zona aunque parte de su polígono caiga dentro.
-    fuera = 0
-    if zone_polygon:
-        dentro = []
-        for i, lot in enumerate(lots):
-            geom = lot["_geom"]
-            if geom is None:
-                in_zone = zone_polygon.contains(Point(lot["_lon"], lot["_lat"]))
-            else:
-                in_zone = zone_polygon.intersects(geom)
+    parcial = (not scan_completo) or (not detalle_completo)
+    logger.info(
+        f"SmartGIS: insert {inserted}, update {updated}, fuera {fuera}, "
+        f"procesados {procesados}/{len(unique_ids)}, parcial={parcial}"
+    )
 
-            # Log detallado para los primeros 3 lotes (diagnóstico)
-            if i < 3:
-                codigo = _parse_codigo(lot)
-                if geom is not None:
-                    b = geom.bounds
-                    logger.info(
-                        f"  Lote {codigo}: geom.bounds=lng[{b[0]:.4f},{b[2]:.4f}] "
-                        f"lat[{b[1]:.4f},{b[3]:.4f}] → {'DENTRO' if in_zone else 'FUERA'}"
-                    )
-                else:
-                    logger.info(
-                        f"  Lote {codigo}: centroide=({lot['_lon']:.4f},{lot['_lat']:.4f}) "
-                        f"→ {'DENTRO' if in_zone else 'FUERA'}"
-                    )
-
-            if in_zone:
-                dentro.append(lot)
-            else:
-                fuera += 1
-        lots = dentro
-
-    logger.info(f"SmartGIS: {len(lots)} dentro de zona, {fuera} fuera")
-    inserted, updated = _upsert_lots(lots, input.region_id, input.survey_id)
+    err = None
+    if parcial:
+        err = (
+            f"smartgis-fetcher: parcial por presupuesto de tiempo ({input.max_runtime_s}s). "
+            f"Guardadas {inserted + updated} parcelas de ~{len(unique_ids)} halladas en la zona "
+            f"(scan {'completo' if scan_completo else 'parcial'}). Re-ejecutar el agente acumula "
+            f"el resto sin perder lo guardado (upsert idempotente por cca_code)."
+        )
 
     return SmartGISOutput(
         ok=True,
@@ -500,4 +594,6 @@ def run(input: SmartGISInput) -> SmartGISOutput:
         parcelas_actualizadas=updated,
         lotes_escaneados=len(unique_ids),
         fuera_de_zona=fuera,
+        parcial=parcial,
+        error=err,
     )
