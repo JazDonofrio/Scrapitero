@@ -118,12 +118,16 @@ def _parse_bci(text: str) -> dict:
             r["tipologia"] = Counter(t.upper() for t in tipologias).most_common(1)[0][0]
 
     # ── Dirección ──────────────────────────────────────────────────────────────
-    # Línea: "CODE  LOGRADOURO  [NUMBER]  NN.NNN-NNN"
+    # Línea: "CODE  LOGRADOURO  [NUMBER]  CEP"
     m = re.search(r'C[OÓ]DIGO\s+LOGRADOURO\s+N[UÚ]MERO\s+CEP\s*\n(.+)', text, re.I)
     if m:
         line = m.group(1).strip()
-        # Buscar CEP al final (NN.NNN-NNN)
-        cep_m = re.search(r'([\d]{2}\.?[\d]{3}-[\d]{3})\s*$', line)
+        # Buscar CEP al final. El CEP brasileño son 8 dígitos (NNNNN-NNN) pero el BCI
+        # lo imprime con separadores inconsistentes: "78115-060", "78.115-060",
+        # "78.115.660" (puntos) o "78110841" (sin separador). Toleramos cualquier
+        # combinación de '.'/'-' entre los grupos; si exigimos solo "NN.NNN-NNN" se
+        # descarta toda la línea (y se pierde el número de puerta que sí está presente).
+        cep_m = re.search(r'(\d{2}[.\-]?\d{3}[.\-]?\d{3})\s*$', line)
         if cep_m:
             r["codigo_postal"] = re.sub(r'[.\-]', '', cep_m.group(1))
             before = line[:cep_m.start()].strip()
