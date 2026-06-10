@@ -11,6 +11,7 @@ Centraliza lo que antes estaba hardcodeado por zona en varios agentes:
 from __future__ import annotations
 
 import os
+import unicodedata
 from typing import Optional
 
 import httpx
@@ -173,3 +174,59 @@ def detect_country(lat: float, lng: float) -> Optional[str]:
     if not iso3:
         logger.warning(f"detect_country: sin mapeo ISO-3 para '{iso2}' ({lat:.4f},{lng:.4f})")
     return iso3
+
+
+# ── Detección de municipio IBGE (Brasil) ───────────────────────────────────────
+
+_IBGE_MUNICIPIOS_URL = "https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
+
+
+def _norm(s: Optional[str]) -> str:
+    """Normaliza para comparar nombres: sin acentos, minúsculas, sin espacios extra."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(s.split()).lower()
+
+
+def _nominatim_municipio_uf(lat: float, lng: float) -> tuple[Optional[str], Optional[str]]:
+    """(nombre_municipio, sigla_UF) vía Nominatim. (None, None) si falla."""
+    try:
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as c:
+            r = c.get(_NOMINATIM_URL, params={"format": "jsonv2", "lat": lat, "lon": lng, "zoom": 10})
+        if r.status_code == 200:
+            addr = r.json().get("address") or {}
+            uf = None
+            iso = addr.get("ISO3166-2-lvl4")          # p.ej. "BR-MT"
+            if iso and "-" in iso:
+                uf = iso.split("-")[-1].upper()
+            nombre = (addr.get("municipality") or addr.get("city") or addr.get("town")
+                      or addr.get("village") or addr.get("county"))
+            return nombre, uf
+    except httpx.HTTPError:
+        pass
+    return None, None
+
+
+def detect_municipio_br(lat: float, lng: float) -> Optional[str]:
+    """Código IBGE de 7 dígitos del municipio (Brasil) que contiene el punto. None si no se pudo.
+
+    Reverse-geocoding (Nominatim) para municipio + UF, y luego match contra la lista
+    OFICIAL de municipios del IBGE de esa UF (servicodados.ibge.gov.br). Pensado para
+    guardar `municipio_codigo` al crear una zona de Brasil, evitando que el orquestador lo
+    adivine (un código inválido rompe IBGECensus/Logradouros). Solo aplica a Brasil."""
+    nombre, uf = _nominatim_municipio_uf(lat, lng)
+    if not nombre or not uf:
+        logger.warning(f"detect_municipio_br: sin municipio/UF para ({lat:.4f},{lng:.4f})")
+        return None
+    try:
+        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as c:
+            r = c.get(_IBGE_MUNICIPIOS_URL.format(uf=uf))
+        if r.status_code == 200:
+            target = _norm(nombre)
+            for m in r.json():
+                if _norm(m.get("nome")) == target:
+                    return str(m.get("id"))
+    except httpx.HTTPError:
+        pass
+    logger.warning(f"detect_municipio_br: no se encontró código IBGE para {nombre!r} ({uf})")
+    return None

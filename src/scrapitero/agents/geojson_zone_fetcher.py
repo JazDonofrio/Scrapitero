@@ -93,11 +93,11 @@ def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
 
     logger.info(f"GeoJSON zona: bbox={bbox}")
 
+    centro_lat = (bbox["south"] + bbox["north"]) / 2.0
+    centro_lng = (bbox["west"] + bbox["east"]) / 2.0
+
     # País: autodetectado del centroide de la zona (cualquier país) salvo override explícito.
-    country = input.country_code or geo.detect_country(
-        (bbox["south"] + bbox["north"]) / 2.0,
-        (bbox["west"] + bbox["east"]) / 2.0,
-    )
+    country = input.country_code or geo.detect_country(centro_lat, centro_lng)
     if not country:
         return GeoJSONZoneOutput(ok=False, error=(
             "No se pudo autodetectar el país del GeoJSON (reverse-geocoding falló). "
@@ -106,6 +106,14 @@ def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
     logger.info(f"País de la zona: {country}"
                 f"{' (autodetectado)' if not input.country_code else ' (explícito)'}")
 
+    # Municipio IBGE (solo Brasil): se guarda para que IBGECensus/Logradouros usen el
+    # código correcto sin que el orquestador lo adivine (un código inválido los rompe).
+    municipio_codigo = None
+    if country == "BRA":
+        municipio_codigo = geo.detect_municipio_br(centro_lat, centro_lng)
+        if municipio_codigo:
+            logger.info(f"Municipio IBGE de la zona: {municipio_codigo}")
+
     region_id = input.region_id or f"zona-{_slugify(input.region_nombre)}"
     bbox_wkt = _bbox_to_wkt(bbox)
     engine = get_engine()
@@ -113,14 +121,15 @@ def run(input: GeoJSONZoneInput) -> GeoJSONZoneOutput:
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO regions (region_id, name, country_code, zone_geojson, bbox_wkt)
-                VALUES (:rid, :name, :cc, :geojson, :bbox)
+                INSERT INTO regions (region_id, name, country_code, municipio_codigo, zone_geojson, bbox_wkt)
+                VALUES (:rid, :name, :cc, :muni, :geojson, :bbox)
                 ON CONFLICT (region_id) DO UPDATE
                     SET name = EXCLUDED.name,
                         zone_geojson = EXCLUDED.zone_geojson,
-                        bbox_wkt = EXCLUDED.bbox_wkt
+                        bbox_wkt = EXCLUDED.bbox_wkt,
+                        municipio_codigo = COALESCE(regions.municipio_codigo, EXCLUDED.municipio_codigo)
             """), {"rid": region_id, "name": input.region_nombre,
-                   "cc": country, "geojson": input.geojson_str,
+                   "cc": country, "muni": municipio_codigo, "geojson": input.geojson_str,
                    "bbox": bbox_wkt})
 
             survey_id = str(uuid.uuid4())

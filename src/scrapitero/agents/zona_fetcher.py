@@ -89,18 +89,26 @@ def _slugify(text: str) -> str:
     return s.strip("-")
 
 
-def _ensure_region(conn, region_id: str, nombre: str, country_code: str) -> None:
+def _ensure_region(conn, region_id: str, nombre: str, country_code: str,
+                   municipio_codigo: Optional[str] = None) -> None:
     exists = conn.execute(
         text("SELECT 1 FROM regions WHERE region_id = :rid"),
         {"rid": region_id}
     ).fetchone()
     if not exists:
         conn.execute(text("""
-            INSERT INTO regions (region_id, name, country_code)
-            VALUES (:rid, :name, :cc)
+            INSERT INTO regions (region_id, name, country_code, municipio_codigo)
+            VALUES (:rid, :name, :cc, :muni)
             ON CONFLICT (region_id) DO NOTHING
-        """), {"rid": region_id, "name": nombre, "cc": country_code})
-        logger.info(f"Región creada: {region_id} ({nombre}) — país {country_code}")
+        """), {"rid": region_id, "name": nombre, "cc": country_code, "muni": municipio_codigo})
+        logger.info(f"Región creada: {region_id} ({nombre}) — país {country_code}"
+                    f"{f' — municipio {municipio_codigo}' if municipio_codigo else ''}")
+    elif municipio_codigo:
+        # Región ya existe: completar municipio_codigo si estaba en NULL (no pisar uno seteado).
+        conn.execute(text("""
+            UPDATE regions SET municipio_codigo = :muni
+            WHERE region_id = :rid AND municipio_codigo IS NULL
+        """), {"rid": region_id, "muni": municipio_codigo})
 
 
 @agent_run
@@ -117,6 +125,12 @@ def run(input: ZonaInput) -> ZonaOutput:
         ))
     iso2 = geo.country_iso2(country) or "xx"
 
+    # Municipio IBGE (solo Brasil): se guarda para que IBGECensus/Logradouros usen el
+    # código correcto sin que el orquestador lo adivine.
+    municipio_codigo = geo.detect_municipio_br(input.lat, input.lng) if country == "BRA" else None
+    if municipio_codigo:
+        logger.info(f"Municipio IBGE del centro: {municipio_codigo}")
+
     # Nombre y region_id (el sufijo ISO-2 lo usa address-resolver para el idioma)
     nombre = input.region_nombre or _reverse_geocode(input.lat, input.lng)
     region_id = input.region_id or f"zona-{_slugify(nombre)}-{iso2}"
@@ -127,7 +141,7 @@ def run(input: ZonaInput) -> ZonaOutput:
     # Crear región y reusar o crear survey
     try:
         with engine.begin() as conn:
-            _ensure_region(conn, region_id, nombre, country)
+            _ensure_region(conn, region_id, nombre, country, municipio_codigo)
             # Reusar el survey más reciente si ya existe para esta región
             existing = conn.execute(text("""
                 SELECT survey_id::text FROM surveys

@@ -81,10 +81,15 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 **Genericidad / multi-país:** el sistema debe poder relevar **cualquier región del mundo**.
 - El **país se autodetecta** (reverse-geocoding) al crear la zona, tanto en la web como en
   los agentes de creación — no se hardcodea ni se pide a mano (la web igual deja forzarlo).
+- En **Brasil además se autodetecta y guarda el `municipio_codigo` IBGE** del centroide al
+  crear la zona (`GeoJSONZoneFetcher`/`ZonaFetcher` → `geo.detect_municipio_br`). Es clave:
+  IBGECensusFetcher/IBGELogradourosFetcher lo necesitan, y si la región lo tiene en NULL el
+  orquestador puede adivinar un código inválido (rompe esos pasos). Si está en NULL, completarlo.
 - Las utilidades geográficas comunes están en `src/scrapitero/agents/geo.py`:
   `area_m2`/`area_km2` (proyectan al **huso UTM correcto según la posición**, válido en
-  todo el planeta — no usar husos fijos como 21S/20S), `utm_epsg`, `detect_country` (ISO-3)
-  y `country_iso2`. Cualquier cálculo de área nuevo debe usar `geo`, no un EPSG fijo.
+  todo el planeta — no usar husos fijos como 21S/20S), `utm_epsg`, `detect_country` (ISO-3),
+  `country_iso2` y `detect_municipio_br` (código IBGE de un punto en Brasil). Cualquier
+  cálculo de área nuevo debe usar `geo`, no un EPSG fijo.
 - Las **fuentes** sí son por-zona (abaco=VG, IDEMSA/IDESA=Salta, ARBA=PBA): se agregan con
   el patrón **registry por fuente/región** (como `manzana_catastral.py`), y el orquestador
   elige la fuente según país/región.
