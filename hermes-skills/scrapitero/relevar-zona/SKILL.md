@@ -47,7 +47,7 @@ Con el output decidís qué ejecutar:
 | `parcelas == 0` y otro país | `osm-building-fetcher` |
 | `parcelas > 0` y hay cca_codes sin PDF | `varzea-bci-fetcher` |
 | PDFs descargados pero parcelas sin `uso_principal` | `bci-parser` |
-| `uso_principal`/`uf` ya cargados (después de bci-parser) | `establecimiento-agrupador` (agrupa fábrica/colegio/iglesia sobre varias parcelas → 1 UF) |
+| BRA: ya corrió `bci-parser` (uso/UF cargados) | `establecimiento-agrupador` — **paso estándar de VG/Brasil, no opcional**. Agrupa parcelas de un mismo establecimiento (fábrica/colegio/iglesia/galpón) para no contar N UF donde hay 1. Correr una vez después de bci-parser, antes de exportar |
 | `cobertura_direccion_pct < 0.90` | `address-resolver` |
 | `logradouros_count == 0` y BRA | `ibge-logradouros-fetcher` antes de address-resolver |
 

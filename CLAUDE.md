@@ -104,7 +104,9 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 4. BCIParser           → extraer uso/UF/dirección de los PDFs (sin LLM, regex)
 5. EstablecimientoAgrupador → agrupar parcelas de un mismo establecimiento (fábrica/colegio/…) → 1 UF
 6. CoverageReporter    → verificar estado
-→ Desde Web UI: botón "▶ Iniciar" ejecuta pasos 2-4 automáticamente.
+→ Desde Web UI: botón "▶ Iniciar" delega en Hermes, que ejecuta los pasos 2-5
+  automáticamente siguiendo la skill `relevar-zona` (EstablecimientoAgrupador es paso
+  estándar del flujo VG, después de BCIParser).
 ```
 
 **Regla VG:** SmartGISFetcher SIEMPRE primero. El `CODIGO_IMOVEL_AGRUPADO` de SmartGIS = `cca_code` en DB = número para descargar BCI en `vg.abaco.com.br`. La zona se respeta automáticamente desde `regions.zone_geojson`.
