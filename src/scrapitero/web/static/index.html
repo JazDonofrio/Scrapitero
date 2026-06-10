@@ -271,6 +271,10 @@
   <div class="header-right">
     <span id="status-dot" title="DB conectada"></span>
     <button class="btn btn-ghost op-only" onclick="toggleForm()">+ Nuevo relevamiento</button>
+    <span id="session-info" style="display:none;font-size:.8rem;color:#94a3b8;align-items:center;gap:.5rem">
+      <span id="session-role"></span>
+      <a href="/logout" class="btn btn-ghost btn-sm" title="Cerrar sesión">Salir</a>
+    </span>
   </div>
 </header>
 
@@ -1257,6 +1261,19 @@ let refreshTimer = null;
 function scheduleRefresh(ms) { clearTimeout(refreshTimer); refreshTimer = setTimeout(loadSurveys, ms); }
 
 loadSurveys();
+
+/* ── Sesión: mostrar rol + botón Salir si la auth está activa ─── */
+(async function initSession() {
+  try {
+    const cfg = await _getConfig();
+    if (cfg && cfg.auth) {
+      const info = document.getElementById('session-info');
+      const role = document.getElementById('session-role');
+      if (role) role.textContent = cfg.role === 'operador' ? '👤 Operador' : '👁 Cliente';
+      if (info) info.style.display = 'inline-flex';
+    }
+  } catch (_) {}
+})();
 
 /* ── Activity bar (SSE) — solo en modo operador ──────────────── */
 (function initActivityBar() {

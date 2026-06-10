@@ -17,8 +17,9 @@ from collections import deque
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse, StreamingResponse)
 from loguru import logger
 from sqlalchemy import text
 
@@ -44,6 +45,73 @@ def _pisos_estimados(area_terreno: Optional[float], area_construida: Optional[fl
 
 HERMES_WEBHOOK_URL = os.getenv("HERMES_WEBHOOK_URL", "http://localhost:8644/webhooks/relevar")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+# ── Autenticación (login con 2 roles) ─────────────────────────────────────────
+# Dos contraseñas en el entorno: la de operador habilita la vista completa y las
+# operaciones de escritura; la de cliente, solo lectura. Si NO se setea OPERADOR_PASSWORD,
+# la auth queda DESACTIVADA (modo abierto, útil en local) — en el VPS público hay que
+# setearla. El cookie de sesión se firma con HMAC (no se puede falsificar el rol).
+OPERADOR_PASSWORD = os.getenv("OPERADOR_PASSWORD", "")
+CLIENTE_PASSWORD = os.getenv("CLIENTE_PASSWORD", "")
+_AUTH_SECRET = (os.getenv("WEB_AUTH_SECRET") or WEBHOOK_SECRET
+                or "scrapitero-dev-secret-cambiar-en-prod")
+_AUTH_COOKIE = "scrap_auth"
+_AUTH_MAX_AGE = 7 * 24 * 3600          # 7 días
+_AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico"}
+
+
+def _auth_enabled() -> bool:
+    return bool(OPERADOR_PASSWORD)
+
+
+def _sign_role(role: str) -> str:
+    sig = hmac.new(_AUTH_SECRET.encode(), role.encode(), hashlib.sha256).hexdigest()
+    return f"{role}:{sig}"
+
+
+def _verify_cookie(value: Optional[str]) -> Optional[str]:
+    """Devuelve el rol ('operador'/'cliente') si el cookie es válido, si no None."""
+    if not value or ":" not in value:
+        return None
+    role, sig = value.rsplit(":", 1)
+    expected = hmac.new(_AUTH_SECRET.encode(), role.encode(), hashlib.sha256).hexdigest()
+    if hmac.compare_digest(sig, expected) and role in ("operador", "cliente"):
+        return role
+    return None
+
+
+def _role_for_password(pw: str) -> Optional[str]:
+    """Mapea una contraseña al rol. Comparación en tiempo constante."""
+    if OPERADOR_PASSWORD and hmac.compare_digest(pw, OPERADOR_PASSWORD):
+        return "operador"
+    if CLIENTE_PASSWORD and hmac.compare_digest(pw, CLIENTE_PASSWORD):
+        return "cliente"
+    return None
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if not _auth_enabled():
+        return await call_next(request)            # auth desactivada (sin OPERADOR_PASSWORD)
+
+    path = request.url.path
+    if path in _AUTH_PUBLIC_PATHS:
+        return await call_next(request)
+
+    role = _verify_cookie(request.cookies.get(_AUTH_COOKIE))
+    if not role:
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "Autenticación requerida"}, status_code=401)
+        return RedirectResponse(f"/login?next={path}", status_code=302)
+
+    # Rol: la vista /operador y toda escritura (POST/DELETE/PUT/PATCH) requieren 'operador'.
+    if path == "/operador" and role != "operador":
+        return RedirectResponse("/login?err=1", status_code=302)
+    if request.method not in ("GET", "HEAD", "OPTIONS") and role != "operador":
+        return JSONResponse({"error": "Requiere rol operador"}, status_code=403)
+
+    request.state.role = role
+    return await call_next(request)
 
 # ── Activity log (loguru sink → SSE + per-survey) ─────────────────────────────
 
@@ -257,12 +325,75 @@ async def operador() -> FileResponse:
     return _serve_spa()
 
 
+def _login_page(error: bool = False, next_url: str = "/") -> HTMLResponse:
+    err_html = ('<p class="err">Contraseña incorrecta o sin permiso.</p>' if error else "")
+    html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scrapitero — Acceso</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; }}
+  body {{ background: #0f172a; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+  .card {{ background: #1e293b; padding: 2rem 2.25rem; border-radius: 12px; width: 320px; box-shadow: 0 10px 40px rgba(0,0,0,.4); }}
+  h1 {{ font-size: 1.4rem; margin-bottom: .25rem; }} h1 span {{ color: #38bdf8; }}
+  p.sub {{ color: #94a3b8; font-size: .85rem; margin-bottom: 1.25rem; }}
+  label {{ display:block; font-size:.8rem; color:#94a3b8; margin-bottom:.35rem; }}
+  input {{ width:100%; padding:.6rem .7rem; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:.95rem; }}
+  button {{ width:100%; margin-top:1rem; padding:.65rem; border:0; border-radius:8px; background:#38bdf8; color:#0f172a; font-weight:700; font-size:.95rem; cursor:pointer; }}
+  button:hover {{ background:#0ea5e9; }}
+  .err {{ color:#fca5a5; font-size:.82rem; margin-bottom:.75rem; }}
+</style></head><body>
+  <form class="card" method="post" action="/login">
+    <h1>Scrapi<span>tero</span></h1>
+    <p class="sub">Ingresá tu contraseña para continuar</p>
+    {err_html}
+    <input type="hidden" name="next" value="{next_url}">
+    <label>Contraseña</label>
+    <input type="password" name="password" autofocus required>
+    <button type="submit">Ingresar</button>
+  </form>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/login")
+async def login_get(next: str = "/", err: str = "") -> HTMLResponse:
+    if not _auth_enabled():
+        return RedirectResponse("/", status_code=302)   # auth desactivada
+    return _login_page(error=bool(err), next_url=next or "/")
+
+
+@app.post("/login")
+async def login_post(password: str = Form(...), next: str = Form("/")):
+    role = _role_for_password(password)
+    if not role:
+        return _login_page(error=True, next_url=next or "/")
+    # destino: operador → /operador por default; cliente siempre a la raíz
+    dest = next if next and next.startswith("/") else "/"
+    if role == "cliente":
+        dest = "/"
+    elif dest in ("/", "/login"):
+        dest = "/operador"
+    resp = RedirectResponse(dest, status_code=302)
+    resp.set_cookie(_AUTH_COOKIE, _sign_role(role), max_age=_AUTH_MAX_AGE,
+                    httponly=True, samesite="lax", path="/")
+    return resp
+
+
+@app.get("/logout")
+async def logout():
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(_AUTH_COOKIE, path="/")
+    return resp
+
+
 @app.get("/api/config")
-async def get_config() -> dict:
-    """Config pública para el frontend. Expone la API key de Google Maps (key de
-    cliente: restringirla por dominio/referrer en Google Cloud Console) para habilitar
-    las capas Google Maps en el mapa. Si no está seteada, el front se queda con Esri/OSM."""
-    return {"google_maps_key": os.environ.get("GOOGLE_MAPS_API_KEY", "")}
+async def get_config(request: Request) -> dict:
+    """Config para el frontend: API key de Google Maps (key de cliente: restringirla por
+    dominio/referrer en Google Cloud Console) + estado de auth y rol de la sesión actual."""
+    return {
+        "google_maps_key": os.environ.get("GOOGLE_MAPS_API_KEY", ""),
+        "auth": _auth_enabled(),
+        "role": getattr(request.state, "role", None),
+    }
 
 
 @app.get("/api/surveys")
