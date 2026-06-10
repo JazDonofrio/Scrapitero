@@ -658,24 +658,32 @@ function initMap(sid) {
   // Si ya existe un mapa para este sid, solo invalidar tamaño
   if (maps[sid]) { maps[sid].invalidateSize(); return; }
 
-  const map = L.map(el, {zoomControl: true});   // usar el elemento directamente
+  // maxZoom 22 con maxNativeZoom = último nivel real de cada proveedor: Leaflet
+  // sigue acercando (zoom digital, upscaling) más allá del tile nativo → más zoom.
+  const map = L.map(el, {zoomControl: true, maxZoom: 22});
 
   const satellite = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    {attribution: 'Tiles © Esri', maxZoom: 20}
+    {attribution: 'Tiles © Esri', maxZoom: 22, maxNativeZoom: 20}
   );
   const labels = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-    {maxZoom: 20, opacity: 0.8}
+    {maxZoom: 22, maxNativeZoom: 20, opacity: 0.8}
   );
   const osm = L.tileLayer(
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {attribution: '© OpenStreetMap', maxZoom: 19}
+    {attribution: '© OpenStreetMap', maxZoom: 22, maxNativeZoom: 19}
   );
 
   satellite.addTo(map);
   labels.addTo(map);
-  L.control.layers({'🛰 Satélite': satellite, '🗺 Mapa': osm}, {'Etiquetas': labels}, {position: 'topleft'}).addTo(map);
+  const layersCtl = L.control.layers(
+    {'🛰 Satélite': satellite, '🗺 Mapa': osm}, {'Etiquetas': labels}, {position: 'topleft'}
+  ).addTo(map);
+
+  // Google Maps (opcional): si hay API key configurada, se agregan como capas base
+  // seleccionables vía Leaflet.GoogleMutant. Da imágenes de Google y más zoom nativo.
+  addGoogleLayers(map, layersCtl);
 
   const geoStr = zoneData[sid];
   if (geoStr) {
@@ -691,6 +699,44 @@ function initMap(sid) {
 
   maps[sid] = map;
   loadParcelasMap(sid);   // carga inicial
+}
+
+// ── Capas Google Maps (opcionales, vía Leaflet.GoogleMutant) ──────────────────
+let _cfgPromise = null;
+function _getConfig() {
+  if (!_cfgPromise) _cfgPromise = fetch('/api/config').then(r => r.json()).catch(() => ({}));
+  return _cfgPromise;
+}
+function _loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+let _gmapsPromise = null;
+function _ensureGoogle(key) {
+  if (_gmapsPromise) return _gmapsPromise;
+  _gmapsPromise = (async () => {
+    await _loadScript(`https://maps.googleapis.com/maps/api/js?key=${key}&v=weekly`);
+    await _loadScript('https://unpkg.com/leaflet.gridlayer.googlemutant@0.14.0/dist/Leaflet.GoogleMutant.js');
+  })();
+  return _gmapsPromise;
+}
+// Agrega Google satélite/mapa como capas base seleccionables si hay API key.
+async function addGoogleLayers(map, layersCtl) {
+  try {
+    const cfg = await _getConfig();
+    if (!cfg || !cfg.google_maps_key) return;       // sin key → se queda con Esri/OSM
+    await _ensureGoogle(cfg.google_maps_key);
+    if (!(L.gridLayer && L.gridLayer.googleMutant)) return;
+    const gHybrid = L.gridLayer.googleMutant({type: 'hybrid',  maxZoom: 22});
+    const gRoad   = L.gridLayer.googleMutant({type: 'roadmap', maxZoom: 22});
+    layersCtl.addBaseLayer(gHybrid, '🛰 Google (satélite)');
+    layersCtl.addBaseLayer(gRoad,   '🗺 Google (mapa)');
+  } catch (e) {
+    console.warn('Google Maps no disponible (se mantiene Esri/OSM):', e);
+  }
 }
 
 async function loadParcelasMap(sid) {

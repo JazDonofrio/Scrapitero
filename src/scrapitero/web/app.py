@@ -243,6 +243,14 @@ async def root() -> FileResponse:
     )
 
 
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Config pública para el frontend. Expone la API key de Google Maps (key de
+    cliente: restringirla por dominio/referrer en Google Cloud Console) para habilitar
+    las capas Google Maps en el mapa. Si no está seteada, el front se queda con Esri/OSM."""
+    return {"google_maps_key": os.environ.get("GOOGLE_MAPS_API_KEY", "")}
+
+
 @app.get("/api/surveys")
 async def list_surveys() -> list[dict]:
     engine = get_engine()
