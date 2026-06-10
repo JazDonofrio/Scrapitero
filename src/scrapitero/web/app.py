@@ -233,14 +233,28 @@ async def _cleanup_orphaned_surveys() -> None:
         logger.info(f"Startup: {len(orphans)} survey(s) huérfanos marcados como 'stopped'")
 
 
-@app.get("/")
-async def root() -> FileResponse:
+def _serve_spa() -> FileResponse:
     # no-cache: el dashboard es una SPA de un solo HTML; sin esto el navegador
     # (o un túnel intermedio) sirve una versión vieja del JS y rompe la UI.
     return FileResponse(
         STATIC_DIR / "index.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+@app.get("/")
+async def root() -> FileResponse:
+    """Raíz = vista CLIENTE (solo lectura): lista de relevamientos con progreso/estado y
+    análisis (mapa/KPIs/CSV). Sin logs, sin cuadro de actividad, sin crear/parar/relanzar."""
+    return _serve_spa()
+
+
+@app.get("/operador")
+async def operador() -> FileResponse:
+    """Vista OPERADOR (completa, 'escondida' en esta URL): incluye crear/iniciar/parar/
+    re-escanear, cuadro de actividad y log del pipeline. El mismo HTML decide el modo
+    según el pathname."""
+    return _serve_spa()
 
 
 @app.get("/api/config")

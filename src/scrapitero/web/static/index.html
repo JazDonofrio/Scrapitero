@@ -6,6 +6,12 @@
   <title>Scrapitero</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Modo de la UI lo antes posible (evita parpadeo de controles solo-operador):
+       raíz "/" = cliente; "/operador" = operador completo. -->
+  <script>
+    if (!location.pathname.replace(/\/+$/, '').endsWith('/operador'))
+      document.documentElement.classList.add('cliente');
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #222; }
@@ -179,6 +185,9 @@
 
     .detail-footer { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
 
+    /* En vista CLIENTE (raíz) se ocultan los elementos solo-operador. */
+    .cliente .op-only { display: none !important; }
+
     /* ── Activity bar ── */
     #activity-bar {
       background: #0f172a;
@@ -261,18 +270,18 @@
   <h1>Scrapi<span>tero</span></h1>
   <div class="header-right">
     <span id="status-dot" title="DB conectada"></span>
-    <button class="btn btn-ghost" onclick="toggleForm()">+ Nuevo relevamiento</button>
+    <button class="btn btn-ghost op-only" onclick="toggleForm()">+ Nuevo relevamiento</button>
   </div>
 </header>
 
-<div id="activity-bar">
+<div id="activity-bar" class="op-only">
   <span id="activity-dot"></span>
   <span id="activity-ts"></span>
   <span id="activity-text">Sin actividad reciente</span>
 </div>
 
 <main>
-  <div id="form-wrapper">
+  <div id="form-wrapper" class="op-only">
     <div class="form-header">
       <h2>Nueva zona de relevamiento</h2>
       <button class="btn btn-ghost btn-sm" onclick="toggleForm()">✕ Cerrar</button>
@@ -317,6 +326,12 @@
 </main>
 
 <script>
+// Modo de la UI según la URL: la raíz "/" es la vista CLIENTE (solo lectura);
+// "/operador" es la vista completa (crear/iniciar/parar/re-escanear, actividad, logs).
+const OPERADOR = location.pathname.replace(/\/+$/, '').endsWith('/operador');
+const CLIENTE = !OPERADOR;
+// La clase .cliente ya la setea un script temprano en <head> sobre <html>.
+
 const maps = {};
 const zoneData = {};
 const surveyCache = {}; // sid → objeto survey completo (pipeline, status, etc.)
@@ -541,7 +556,7 @@ function renderCard(s) {
 
   return `
     <div class="survey-card" id="card-${sid}" data-status="${s.status}">
-      ${runningBanner}
+      ${OPERADOR ? runningBanner : ''}
       <div class="card-top">
         <div class="card-expand" onclick="toggleDetail('${sid}')">
           <div class="card-info">
@@ -554,8 +569,8 @@ function renderCard(s) {
             <div class="kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_comercio)}</div><div class="kpi-lbl">UF Comercio${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
           </div>
         </div>
-        ${btnAccion}
-        ${btnEliminar}
+        ${OPERADOR ? btnAccion : ''}
+        ${OPERADOR ? btnEliminar : ''}
         <span class="status-pill s-${s.status}">${statusLabel(s.status)}</span>
         <span class="chevron" id="chev-${sid}" onclick="toggleDetail('${sid}')">▾</span>
       </div>
@@ -580,14 +595,15 @@ function renderCard(s) {
             <div class="progress-bar-bg"><div class="progress-bar" style="width:${pct}%"></div></div>
           </div>
 
-          ${renderPipelineSteps(s.pipeline, s.status, s.country_code)}
+          ${OPERADOR ? renderPipelineSteps(s.pipeline, s.status, s.country_code) : ''}
 
+          ${OPERADOR ? `
           <div class="actlog-section">
             <p class="pipeline-title">Actividad</p>
             <div class="actlog-lines" id="actlog-${sid}">
               <span class="alog-empty">Abrí el detalle para cargar el historial…</span>
             </div>
-          </div>
+          </div>` : ''}
 
           <div class="dasi-section">
             <div class="dasi-head">
@@ -595,9 +611,9 @@ function renderCard(s) {
                 <p class="pipeline-title" style="margin-bottom:.15rem">👥 Habitantes por manzana</p>
                 <span class="dasi-sub">Estimación adicional por desagregación dasimétrica — menos exacta que el relevamiento</span>
               </div>
-              <button class="btn btn-sm" style="background:#ede9fe;color:#5b21b6;padding:.25rem .6rem;font-size:.72rem;border:1px solid #ddd6fe"
+              ${OPERADOR ? `<button class="btn btn-sm" style="background:#ede9fe;color:#5b21b6;padding:.25rem .6rem;font-size:.72rem;border:1px solid #ddd6fe"
                 onclick="runDasimetrico('${sid}', this)"
-                title="Repartir la población censal entre las manzanas (técnica dasimétrica). Requiere censo + parcelas con uso/UF.">▶ Estimar habitantes</button>
+                title="Repartir la población censal entre las manzanas (técnica dasimétrica). Requiere censo + parcelas con uso/UF.">▶ Estimar habitantes</button>` : ''}
             </div>
             <div class="dasi-body" id="dasi-${sid}">
               <span class="alog-empty">Sin estimación todavía. Tocá "Estimar habitantes".</span>
@@ -1105,8 +1121,10 @@ function toggleDetail(sid) {
       }
       if (isActive) startMapPolling(sid);
     }, 80);
-    if (isActive) startActlogPolling(sid);
-    else fetchActlog(sid);
+    if (OPERADOR) {                       // el cuadro de actividad solo existe en modo operador
+      if (isActive) startActlogPolling(sid);
+      else fetchActlog(sid);
+    }
     loadManzanas(sid);
   }
 }
@@ -1122,7 +1140,7 @@ async function loadSurveys() {
     const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));
 
     if (!list.length) {
-      container.innerHTML = '<div class="empty-state"><p>No hay relevamientos aún</p><p style="font-size:.9rem">Creá el primero con el botón de arriba.</p></div>';
+      container.innerHTML = `<div class="empty-state"><p>No hay relevamientos aún</p><p style="font-size:.9rem">${OPERADOR ? 'Creá el primero con el botón de arriba.' : 'Todavía no hay relevamientos para mostrar.'}</p></div>`;
       return;
     }
 
@@ -1146,14 +1164,15 @@ async function loadSurveys() {
         const sv = list.find(s => s.survey_id === sid);
         const isActive = sv && (sv.status === 'running' || sv.status === 'stopping');
         setTimeout(() => { initMap(sid); if (isActive) startMapPolling(sid); }, 80);
-        // Re-renderizar log desde estado en memoria
-        renderActlog(sid);
-        // Sincronizar polling según status actual
-        const survey = list.find(s => s.survey_id === sid);
-        if (survey && (survey.status === 'running' || survey.status === 'stopping')) {
-          startActlogPolling(sid);
-        } else {
-          stopActlogPolling(sid);
+        if (OPERADOR) {
+          // Re-renderizar log desde estado en memoria + sincronizar polling según status
+          renderActlog(sid);
+          const survey = list.find(s => s.survey_id === sid);
+          if (survey && (survey.status === 'running' || survey.status === 'stopping')) {
+            startActlogPolling(sid);
+          } else {
+            stopActlogPolling(sid);
+          }
         }
       }
     });
@@ -1239,8 +1258,9 @@ function scheduleRefresh(ms) { clearTimeout(refreshTimer); refreshTimer = setTim
 
 loadSurveys();
 
-/* ── Activity bar (SSE) ─────────────────────────────────────── */
+/* ── Activity bar (SSE) — solo en modo operador ──────────────── */
 (function initActivityBar() {
+  if (CLIENTE) return;                 // el cliente no ve el cuadro de actividad ni consume el stream
   const bar = document.getElementById('activity-bar');
   const ts  = document.getElementById('activity-ts');
   const txt = document.getElementById('activity-text');
