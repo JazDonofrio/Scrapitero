@@ -79,6 +79,9 @@
     .s-completed { background: #dcfce7; color: #166534; }
     .s-failed   { background: #fee2e2; color: #991b1b; }
     .s-stopped  { background: #f3f4f6; color: #6b7280; }
+    .estado-select { font-size: .7rem; padding: .15rem .3rem; border-radius: 6px; border: 1px solid #d1d5db;
+                     background: #fff; color: #374151; cursor: pointer; flex-shrink: 0; }
+    .estado-select:hover { border-color: #9ca3af; }
     .chevron { color: #d1d5db; font-size: 1rem; transition: transform .2s; flex-shrink: 0; cursor: pointer; }
     .chevron.open { transform: rotate(180deg); }
 
@@ -504,6 +507,23 @@ async function pararRelevamiento(surveyId, btn) {
   } catch(err) { alert(`Error de red: ${err.message}`); btn.disabled=false; btn.textContent='⏹ Parar'; }
 }
 
+// Cambia el estado del relevamiento manualmente (solo operador). No corre ni detiene
+// el pipeline: solo actualiza la etiqueta de estado en la DB.
+async function cambiarEstado(surveyId, status) {
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}/estado`, {
+      method: 'POST',
+      body: new URLSearchParams({status}),
+    });
+    const data = await res.json();
+    if (!data.ok) alert(`Error: ${data.error || 'desconocido'}`);
+  } catch(err) {
+    alert(`Error de red: ${err.message}`);
+  } finally {
+    loadSurveys();   // refrescar para reflejar el nuevo estado (pill, botones, etc.)
+  }
+}
+
 async function eliminarSurvey(surveyId, nombre) {
   if (!confirm(`¿Eliminar el relevamiento "${nombre}"?\nSe borrarán todas las parcelas, edificios y datos asociados.\nEsta acción no se puede deshacer.`)) return;
   try {
@@ -576,6 +596,11 @@ function renderCard(s) {
         ${OPERADOR ? btnAccion : ''}
         ${OPERADOR ? btnEliminar : ''}
         <span class="status-pill s-${s.status}">${statusLabel(s.status)}</span>
+        ${OPERADOR ? `<select class="estado-select op-only" title="Cambiar el estado manualmente (no corre ni detiene el pipeline)"
+          onchange="cambiarEstado('${sid}', this.value)" onclick="event.stopPropagation()">
+          ${['running','stopping','stopped','partial','completed','failed'].map(st =>
+            `<option value="${st}"${st === s.status ? ' selected' : ''}>${statusLabel(st)}</option>`).join('')}
+        </select>` : ''}
         <span class="chevron" id="chev-${sid}" onclick="toggleDetail('${sid}')">▾</span>
       </div>
 

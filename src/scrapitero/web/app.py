@@ -805,6 +805,34 @@ async def parar_relevamiento(survey_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "message": "Stop solicitado — Hermes detendrá el relevamiento"})
 
 
+_ESTADOS_VALIDOS = {"running", "stopping", "stopped", "partial", "completed", "failed"}
+
+
+@app.post("/api/surveys/{survey_id}/estado")
+async def set_estado(survey_id: str, status: str = Form(...)) -> JSONResponse:
+    """Fija manualmente el estado del relevamiento (solo operador — POST gateado por el
+    middleware de auth). No corre ni detiene el pipeline; solo cambia la etiqueta de estado.
+    Para estados finales sella `finished_at`; al pasar a 'running' lo limpia."""
+    if status not in _ESTADOS_VALIDOS:
+        return JSONResponse(
+            {"ok": False, "error": f"Estado inválido: {status!r}. "
+             f"Válidos: {', '.join(sorted(_ESTADOS_VALIDOS))}"}, status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        exists = conn.execute(text("SELECT 1 FROM surveys WHERE survey_id=:sid"),
+                              {"sid": survey_id}).fetchone()
+        if not exists:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+        if status == "running":
+            conn.execute(text("UPDATE surveys SET status=:s, finished_at=NULL WHERE survey_id=:sid"),
+                         {"s": status, "sid": survey_id})
+        else:
+            conn.execute(text("UPDATE surveys SET status=:s, finished_at=NOW() WHERE survey_id=:sid"),
+                         {"s": status, "sid": survey_id})
+    logger.info(f"Estado de survey {survey_id} cambiado manualmente a '{status}'")
+    return JSONResponse({"ok": True, "status": status})
+
+
 @app.get("/api/surveys/{survey_id}/export/csv")
 async def export_csv(survey_id: str) -> StreamingResponse:
     """Descarga un CSV con todas las parcelas del relevamiento."""
