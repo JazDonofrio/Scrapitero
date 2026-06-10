@@ -65,6 +65,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 | AddressResolver | `address_resolver` | Cuando falta `calle` OR `numero` en parcelas. Cualquier país. Idioma automático. Brasil: IBGE gratis primero, Google Maps fallback. ARG: directo a Google (`es-AR`) |
 | GooglePlacesFetcher | `google_places_fetcher` | Comercios de Google Maps (cualquier país). **Después de UnidadesEstimator.** Baja POIs comerciales por teselas adaptativas, los vincula a parcela (`ST_Contains`) y aporta el **conteo real de `uf_comercio`** (cada comercio = +1 UF, `uf_fuente='google'`) + señal de uso (parcela con comercio → comercial/mixto, `uso_fuente='google'`). Caro (~USD 0,032/req): tope `max_requests` + Telegram |
 | UsoClassifier | `uso_classifier` | Clasificar `uso_principal` (residencial/comercial/mixto) por parcela |
+| EstablecimientoAgrupador | `establecimiento_agrupador` | **Después de uso/UF.** Agrupa parcelas que son UN solo establecimiento (fábrica/colegio/iglesia/galpón). La UF de la entidad = la del **miembro más desarrollado** (mín. 1), no la suma: una fábrica sobre 6 lotes de 1 UF → 1; pero una parcela con `uf_comercio=5` NO se colapsa (la entidad hereda esas 5). Regla: mismo `propietario_documento` real (CNPJ priorizado, sin sentinelas) + parcelas **contiguas** (componente conexa, `ST_DWithin`) + **uso no enteramente residencial**. CPF: solo agrupa sus parcelas con actividad (comercial/industrial/mixto/equipamiento), nunca sus viviendas; CNPJ: agrupa todo el bloque contiguo (incl. vivienda/baldío del predio). Escribe `establecimientos` + estampa `parcelas.establecimiento_id`. Idempotente por survey |
 
 ### Estimaciones adicionales (opcional — fuera del relevamiento principal)
 | Agente | RPC | Cuándo usarlo |
@@ -101,7 +102,8 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 2. SmartGISFetcher     → inscripciones + geometría → parcelas en DB (cca_code = ID para BCI)
 3. VGBCIFetcher        → descargar PDFs BCI (reutiliza reporte_*.pdf existentes en pdf_downloads/<ciudad>/)
 4. BCIParser           → extraer uso/UF/dirección de los PDFs (sin LLM, regex)
-5. CoverageReporter    → verificar estado
+5. EstablecimientoAgrupador → agrupar parcelas de un mismo establecimiento (fábrica/colegio/…) → 1 UF
+6. CoverageReporter    → verificar estado
 → Desde Web UI: botón "▶ Iniciar" ejecuta pasos 2-4 automáticamente.
 ```
 
@@ -267,6 +269,15 @@ Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca
 o sobre la línea de origen del popup, un tooltip explica cómo se estimó.** El CSV incluye
 la columna **UF Fuente**.
 `bci`=exacto (BCIParser, Brasil); `osm`/`proxy`/`uso`=estimado (UnidadesEstimator).
+
+**Establecimientos (1 entidad sobre N parcelas):** cuando una fábrica/colegio/iglesia/galpón
+ocupa varias parcelas catastrales, `EstablecimientoAgrupador` las agrupa en la tabla
+`establecimientos` y el conteo de UF de la web/CSV/reporter cuenta el establecimiento por la
+UF de su **parcela más desarrollada** (no la suma de sus miembros). Así una fábrica sobre 6
+lotes de 1 UF cuenta 1, pero una parcela con varias UF reales (`uf_comercio=5`) NO se colapsa.
+Las parcelas miembro conservan sus datos y quedan vinculadas por `parcelas.establecimiento_id`;
+en el mapa el popup las marca como "parte de establecimiento". El CSV trae las columnas
+**Establecimiento (tipo)** y **(nombre)**.
 
 **Origen de los datos (data lineage):** el relevamiento final deja registrado de dónde
 salió cada dato, en 4 columnas de origen por parcela (todas exportadas en el CSV de la web):

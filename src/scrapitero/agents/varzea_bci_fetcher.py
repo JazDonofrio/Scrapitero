@@ -149,11 +149,17 @@ def _load_zone_polygon(region_id: str) -> Optional[object]:
 def _get_pending_inscripciones(region_id: str,
                                 zone_polygon: Optional[object],
                                 batch_size: int) -> list[int]:
-    """Devuelve lista de codigos (int) para descargar, dentro de la zona."""
+    """Devuelve lista de codigos (int) para descargar, dentro de la zona.
+
+    Una parcela se considera DENTRO de la zona si su geometría **intersecta** el polígono
+    (toca cualquier parte), no si su centroide cae adentro: el GeoJSON subido puede recortar
+    un pedazo de una parcela cuyo centroide queda afuera, y esa parcela igual pertenece a la
+    zona. Sólo se cae al centroide si la parcela no tiene geometría.
+    """
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT cca_code, centroid_lat, centroid_lng
+            SELECT cca_code, centroid_lat, centroid_lng, ST_AsGeoJSON(geometry) AS geom
             FROM parcelas
             WHERE region_id = :rid
               AND cca_code IS NOT NULL
@@ -164,14 +170,20 @@ def _get_pending_inscripciones(region_id: str,
 
     codigos = []
     fuera = 0
-    for cca, lat, lng in rows:
+    for cca, lat, lng, geom_json in rows:
         try:
             codigo = int(cca.strip())
         except (ValueError, AttributeError):
             continue
-        if zone_polygon and not zone_polygon.contains(Point(lng, lat)):
-            fuera += 1
-            continue
+        if zone_polygon:
+            try:
+                parcela_geom = shape(json.loads(geom_json)) if geom_json else Point(lng, lat)
+                dentro = zone_polygon.intersects(parcela_geom)
+            except Exception:
+                dentro = zone_polygon.contains(Point(lng, lat))
+            if not dentro:
+                fuera += 1
+                continue
         codigos.append(codigo)
 
     if zone_polygon and fuera:

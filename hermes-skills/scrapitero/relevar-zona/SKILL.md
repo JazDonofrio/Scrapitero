@@ -47,6 +47,7 @@ Con el output decidís qué ejecutar:
 | `parcelas == 0` y otro país | `osm-building-fetcher` |
 | `parcelas > 0` y hay cca_codes sin PDF | `varzea-bci-fetcher` |
 | PDFs descargados pero parcelas sin `uso_principal` | `bci-parser` |
+| `uso_principal`/`uf` ya cargados (después de bci-parser) | `establecimiento-agrupador` (agrupa fábrica/colegio/iglesia sobre varias parcelas → 1 UF) |
 | `cobertura_direccion_pct < 0.90` | `address-resolver` |
 | `logradouros_count == 0` y BRA | `ibge-logradouros-fetcher` antes de address-resolver |
 
@@ -74,6 +75,7 @@ cat /tmp/addr_out.json
 **Dependencias reales:**
 - BCI depende de SmartGIS (necesita `cca_code` para descargar PDFs)
 - Parser depende de BCI (necesita los PDFs descargados)
+- EstablecimientoAgrupador depende del Parser (usa uso/UF + propietario que llena el BCI)
 - Address resolver es independiente de BCI/Parser
 - IBGELogradouros es independiente de SmartGIS/BCI
 
@@ -89,6 +91,7 @@ Skills disponibles:
   - `scrapitero.rpc.smartgis_fetcher` → `{"region_id":"...","survey_id":"..."}`
   - `scrapitero.rpc.varzea_bci_fetcher` → `{"region_id":"...","survey_id":"..."}`
 - `scrapitero.rpc.bci_parser` → `{"region_id":"...","survey_id":"..."}`
+- `scrapitero.rpc.establecimiento_agrupador` → `{"region_id":"...","survey_id":"..."}` (agrupa parcelas de un mismo establecimiento → 1 UF; correr después de bci-parser)
 - `scrapitero.rpc.osm_building_fetcher` → `{"region_id":"...","survey_id":"...","bbox_south":...,"bbox_west":...,"bbox_north":...,"bbox_east":...}`
 - `scrapitero.rpc.arba_carto_fetcher` → ver skill arba-carto-fetcher
 - `scrapitero.rpc.arba_cadastral_fetcher` → `{"region_id":"...","survey_id":"..."}`

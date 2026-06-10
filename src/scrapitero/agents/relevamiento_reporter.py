@@ -84,22 +84,33 @@ def run(input: ReporterInput) -> RelevamientoReport:
                 nomenclatura_catastral,
                 partida_inmobiliaria,
                 cca_code,
-                fuente_parcela
+                fuente_parcela,
+                establecimiento_id::text
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
         """), {"sid": survey_id}).fetchall()
+
+        # UF aportada por establecimientos (cada uno cuenta como 1, no la suma de
+        # sus parcelas miembro, que quedan excluidas del conteo de UF abajo).
+        est_uf = conn.execute(text("""
+            SELECT COALESCE(SUM(uf_vivienda + uf_comercio), 0)
+            FROM establecimientos WHERE survey_id = :sid
+        """), {"sid": survey_id}).scalar() or 0
 
     parcelas_out = []
     total_uf = 0
     area_total = 0.0
 
     for r in rows:
-        pid, calle, numero, area, uf, nomencla, partida, cca, fuente = r
+        pid, calle, numero, area, uf, nomencla, partida, cca, fuente, est_id = r
         calle = calle or ""
         numero = numero or ""
         direccion = f"{calle} {numero}".strip() if calle else "(sin dirección)"
-        total_uf += uf or 0
+        # Las parcelas miembro de un establecimiento no suman UF por separado;
+        # el establecimiento aporta su UF una sola vez (est_uf, abajo).
+        if not est_id:
+            total_uf += uf or 0
         area_total += area or 0.0
 
         parcelas_out.append(ParcelaResumen(
@@ -115,6 +126,7 @@ def run(input: ReporterInput) -> RelevamientoReport:
             fuente=fuente or "",
         ))
 
+    total_uf += est_uf
     total = len(rows)
     con_dir = sum(1 for p in parcelas_out if p.calle)
     con_uf = sum(1 for p in parcelas_out if p.unidades_funcionales is not None)

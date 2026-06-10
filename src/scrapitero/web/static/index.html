@@ -764,6 +764,9 @@ async function loadParcelasMap(sid) {
       (p.anio ? '<br><span style="color:#6b7280;font-size:.72rem">Año constr.: ' + p.anio + '</span>' : '') +
       (p.propietario ? '<br><span style="color:#9ca3af;font-size:.72rem">👤 ' + escHtml(p.propietario) + (p.propietario_doc ? ' <span style="color:#6b7280">(' + escHtml(p.propietario_doc) + ')</span>' : '') + '</span>' : '') +
       (p.contrib_sec ? '<br><span style="color:#6b7280;font-size:.7rem">Co-resp.: ' + escHtml(p.contrib_sec) + '</span>' : '') +
+      (p.est_id ? '<br><span style="color:#a78bfa;font-weight:700;font-size:.72rem">🏭 Parte de establecimiento' + (p.est_tipo ? ' (' + escHtml(p.est_tipo) + ')' : '') + '</span>'
+            + (p.est_nombre ? '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.est_nombre) + '</span>' : '')
+            + '<br><span style="color:#6b7280;font-size:.7rem">' + p.est_n_parcelas + ' parcelas = 1 establecimiento (UF contada una vez)</span>' : '') +
       '</div>',
       {maxWidth: 240}
     );

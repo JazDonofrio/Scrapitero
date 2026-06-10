@@ -264,22 +264,28 @@ async def list_surveys() -> list[dict]:
                 r.zone_geojson,
                 COALESCE(ed.total_edificios, 0)                                    AS total_edificios,
                 COALESCE(pa.total_parcelas, 0)                                     AS total_parcelas,
-                COALESCE(pa.total_uf_vivienda, 0)                                  AS total_uf_vivienda,
-                COALESCE(pa.total_uf_comercio, 0)                                  AS total_uf_comercio,
+                -- UF: la parcela suelta cuenta su UF; cada establecimiento (varias
+                -- parcelas = 1 entidad) cuenta como 1, no la suma de sus miembros.
+                COALESCE(pa.total_uf_vivienda, 0) + COALESCE(es.est_uf_v, 0)        AS total_uf_vivienda,
+                COALESCE(pa.total_uf_comercio, 0) + COALESCE(es.est_uf_c, 0)        AS total_uf_comercio,
                 COALESCE(pa.uf_estimado, false)                                    AS uf_estimado,
                 COALESCE(pa.con_direccion, 0)                                      AS con_direccion,
                 pa.area_total_m2                                                   AS area_total_m2,
-                COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion
+                COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion,
+                COALESCE(es.n_est, 0)                                              AS total_establecimientos
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
             LEFT JOIN (
                 SELECT survey_id,
                        COUNT(*)                                                    AS total_parcelas,
+                       -- sólo parcelas NO agrupadas en un establecimiento
                        COALESCE(SUM(CASE
                            WHEN uf_vivienda IS NULL AND uf_comercio IS NULL
                            THEN COALESCE(unidades_funcionales_estimadas, 0)
-                           ELSE COALESCE(uf_vivienda, 0) END), 0)                  AS total_uf_vivienda,
-                       COALESCE(SUM(uf_comercio), 0)                               AS total_uf_comercio,
+                           ELSE COALESCE(uf_vivienda, 0) END)
+                           FILTER (WHERE establecimiento_id IS NULL), 0)           AS total_uf_vivienda,
+                       COALESCE(SUM(uf_comercio)
+                           FILTER (WHERE establecimiento_id IS NULL), 0)           AS total_uf_comercio,
                        BOOL_OR(
                            (uf_fuente IS NOT NULL AND uf_fuente <> 'bci')
                            OR (uf_vivienda IS NULL AND uf_comercio IS NULL
@@ -291,6 +297,13 @@ async def list_surveys() -> list[dict]:
                 FROM parcelas
                 GROUP BY survey_id
             ) pa ON pa.survey_id = s.survey_id
+            LEFT JOIN (
+                SELECT survey_id,
+                       COALESCE(SUM(uf_vivienda), 0) AS est_uf_v,
+                       COALESCE(SUM(uf_comercio), 0) AS est_uf_c,
+                       COUNT(*) AS n_est
+                FROM establecimientos GROUP BY survey_id
+            ) es ON es.survey_id = s.survey_id
             LEFT JOIN (
                 SELECT survey_id, COUNT(*) AS total_edificios
                 FROM edificios GROUP BY survey_id
@@ -323,6 +336,7 @@ async def list_surveys() -> list[dict]:
             "con_direccion": int(r[13] or 0),
             "area_total_m2": float(r[14]) if r[14] else None,
             "con_inscripcion": int(r[15] or 0),
+            "total_establecimientos": int(r[16] or 0),
         })
     return result
 
@@ -430,8 +444,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.valor_venal_terreno, p.valor_venal_construccion,
                    p.valor_venal_total, p.aliquota, p.anio_construccion,
                    p.propietario_nombre, p.propietario_documento,
-                   p.contribuyente_secundario
+                   p.contribuyente_secundario,
+                   p.establecimiento_id::text, e.tipo, e.nombre, e.n_parcelas
             FROM parcelas p
+            LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             WHERE p.survey_id = :sid
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
             ORDER BY p.calle NULLS LAST
@@ -474,6 +490,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "propietario": r[19] or "",
             "propietario_doc": r[20] or "",
             "contrib_sec": r[21] or "",
+            "est_id": r[22] or None,
+            "est_tipo": r[23] or None,
+            "est_nombre": r[24] or None,
+            "est_n_parcelas": int(r[25]) if r[25] else None,
         })
     return out
 
@@ -653,7 +673,12 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 anio_construccion,
                 propietario_nombre,
                 propietario_documento,
-                contribuyente_secundario
+                contribuyente_secundario,
+                (SELECT e.tipo FROM establecimientos e
+                   WHERE e.establecimiento_id = parcelas.establecimiento_id),
+                (SELECT e.nombre FROM establecimientos e
+                   WHERE e.establecimiento_id = parcelas.establecimiento_id),
+                establecimiento_id::text
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -680,6 +705,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Valor Venal Terreno", "Valor Venal Construcción", "Valor Venal Total",
             "Alícuota", "Año Construcción",
             "Propietario", "Documento (CPF/CNPJ)", "Contribuyente Secundario",
+            "Establecimiento (tipo)", "Establecimiento (nombre)",
         ])
         for r in rows:
             w.writerow([
@@ -701,6 +727,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 f"{r[26]:.4f}" if r[26] else "",
                 r[27] or "",
                 r[28] or "", r[29] or "", r[30] or "",
+                r[31] or "", r[32] or "",
             ])
         yield buf.getvalue()
 

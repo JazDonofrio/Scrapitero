@@ -144,6 +144,11 @@ class Parcela(Base):
     propietario_documento: Mapped[Optional[str]] = mapped_column(String(30))    # PII (CPF/CNPJ)
     contribuyente_secundario: Mapped[Optional[str]] = mapped_column(String(200))  # PII
 
+    # Agrupación en establecimiento (migración 013): parcelas con el mismo
+    # establecimiento_id son partes de una única entidad (fábrica/colegio/iglesia…)
+    establecimiento_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("establecimientos.establecimiento_id"))
+
     # Auditoría
     fuente_parcela: Mapped[Optional[str]] = mapped_column(String(30))
     fecha_relevamiento: Mapped[date] = mapped_column(Date, server_default=func.current_date())
@@ -258,6 +263,32 @@ class ManzanaHabitantes(Base):
     n_parcelas: Mapped[int] = mapped_column(Integer, default=0)
     metodo: Mapped[Optional[str]] = mapped_column(String(40))
     fecha_estimacion: Mapped[date] = mapped_column(Date, server_default=func.current_date())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Establecimiento(Base):
+    """Una entidad real (fábrica/colegio/iglesia/comercio grande…) que ocupa VARIAS
+    parcelas catastrales. Cada establecimiento cuenta como 1 UF en vez de la suma de
+    sus parcelas miembro (que se vinculan por `parcelas.establecimiento_id`).
+    Lo detecta EstablecimientoAgrupador por propietario + adyacencia + uso. Migración 013.
+    """
+    __tablename__ = "establecimientos"
+
+    establecimiento_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                          default=uuid.uuid4)
+    survey_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+                                                  ForeignKey("surveys.survey_id"))
+    region_id: Mapped[str] = mapped_column(String(50), ForeignKey("regions.region_id"))
+    tipo: Mapped[Optional[str]] = mapped_column(String(40))
+    nombre: Mapped[Optional[str]] = mapped_column(String(250))
+    uso_principal: Mapped[Optional[str]] = mapped_column(String(30))
+    uf_vivienda: Mapped[int] = mapped_column(Integer, default=0)
+    uf_comercio: Mapped[int] = mapped_column(Integer, default=0)
+    n_parcelas: Mapped[int] = mapped_column(Integer, default=0)
+    area_m2: Mapped[Optional[float]] = mapped_column(Float)
+    propietario_documento: Mapped[Optional[str]] = mapped_column(String(30))
+    fuente: Mapped[Optional[str]] = mapped_column(String(30), default="agrupador_propietario")
+    geometry: Mapped[Optional[object]] = mapped_column(Geometry("MULTIPOLYGON", srid=4326))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
