@@ -6,9 +6,13 @@ Formato: Boletim de Cadastramento Imobiliário — Prefeitura de Várzea Grande 
 Extrae sin LLM usando regex sobre el texto del PDF:
   - Tipo do imóvel (Predial / Territorial)
   - Unidades funcionales: cantidad, uso (RESIDENCIAL / COMERCIAL), tipología
-  - Área construída total
-  - Dirección (logradouro, número, CEP, bairro)
+  - Área construída total y área do terreno (de fato)
+  - Dirección (logradouro, número, complemento, CEP, bairro)
+  - Nomenclatura catastral completa (setor/quadra/lote/unidade)
   - Número de matrícula del registro de imóveis
+  - Valor venal (terreno / construção / imóvel) y alíquota (IPTU) — migración 012
+  - Año de construcción (el más antiguo entre las unidades) — migración 012
+  - Proprietário: nombre + CPF/CNPJ y contribuyente secundario — migración 012 (PII)
 """
 
 from __future__ import annotations
@@ -61,6 +65,14 @@ def _pdf_text(path: Path) -> str:
     return "\n".join(pages)
 
 
+def _br_num(s: str) -> Optional[float]:
+    """Número en formato brasileño → float: '43.857,04'→43857.04, '0,4000'→0.4."""
+    try:
+        return float(str(s).strip().replace(".", "").replace(",", "."))
+    except (ValueError, AttributeError):
+        return None
+
+
 # ── Parser de campos ───────────────────────────────────────────────────────────
 
 def _parse_bci(text: str) -> dict:
@@ -72,12 +84,24 @@ def _parse_bci(text: str) -> dict:
         "uf_comercio": 0,
         "uf_total": 0,
         "area_m2_construida": None,
+        "area_m2_terreno": None,
         "calle": None,
         "numero": None,
+        "complemento": None,
         "barrio": None,
         "codigo_postal": None,
+        "nomenclatura_catastral": None,
         "partida_inmobiliaria": None,
         "tipologia": None,
+        # migración 012
+        "valor_venal_terreno": None,
+        "valor_venal_construccion": None,
+        "valor_venal_total": None,
+        "aliquota": None,
+        "anio_construccion": None,
+        "propietario_nombre": None,
+        "propietario_documento": None,
+        "contribuyente_secundario": None,
     }
 
     # ── Tipo do imóvel ─────────────────────────────────────────────────────────
@@ -155,6 +179,78 @@ def _parse_bci(text: str) -> dict:
         if mats:
             r["partida_inmobiliaria"] = mats[0]
 
+    # ── Nomenclatura catastral completa ─────────────────────────────────────────
+    # "INSCRIÇÃO SETOR QUADRA LOTE UNIDADE ZONA FISCAL\n000000000030894 202 0145 0203 2 4"
+    m = re.search(
+        r'INSCRI[CÇ][AÃ]O\s+SETOR\s+QUADRA\s+LOTE\s+UNIDADE\s+ZONA\s+FISCAL\s*\n'
+        r'\s*\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', text, re.I)
+    if m:
+        setor, quadra, lote, unidade, zona = m.groups()
+        r["nomenclatura_catastral"] = f"{setor}-{quadra}-{lote}-{unidade} ZF{zona}"
+
+    # ── Complemento (BLOCO / APTO) ──────────────────────────────────────────────
+    m = re.search(r'COMPLEMENTO\s+BLOCO\s+APTO\s*\n(.+)', text, re.I)
+    if m:
+        comp = m.group(1).strip()
+        # Si la parcela no tiene complemento, la línea siguiente es el header "BAIRRO"
+        if comp and not re.match(r'^BAIRRO\b', comp, re.I):
+            r["complemento"] = comp[:100]
+
+    # ── Área do terreno (de fato) ───────────────────────────────────────────────
+    # "MÉTRICA TESTADA (M) ÁREA DO TERRENO DE FATO ÁREA ... DIREITO\n675 12,50 284,62 0,00"
+    m = re.search(
+        r'M[ÉE]TRICA\s+TESTADA\s*\(M\)\s+[ÁA]REA\s+DO\s+TERRENO\s+DE\s+FATO.*?\n'
+        r'\s*[\d.,]+\s+[\d.,]+\s+([\d.,]+)\s+[\d.,]+', text, re.I)
+    if m:
+        area_t = _br_num(m.group(1))
+        if area_t and area_t > 0:
+            r["area_m2_terreno"] = area_t
+
+    # ── Valor venal + alíquota ──────────────────────────────────────────────────
+    # "VALOR VENAL DO TERRENO ... ALÍQUOTA\n43.857,04 98.489,31 142.346,35 0,4000"
+    m = re.search(
+        r'VALOR\s+VENAL\s+DO\s+TERRENO.*?AL[IÍ]QUOTA\s*\n'
+        r'\s*([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', text, re.I)
+    if m:
+        r["valor_venal_terreno"] = _br_num(m.group(1))
+        r["valor_venal_construccion"] = _br_num(m.group(2))
+        r["valor_venal_total"] = _br_num(m.group(3))
+        r["aliquota"] = _br_num(m.group(4))
+
+    # ── Año de construcción (el más antiguo entre las unidades) ─────────────────
+    anos = [int(a) for a in re.findall(r'ANO\s+CONSTRU[CÇ][AÃ]O:?\s*(\d{4})', text, re.I)
+            if a != "0000" and int(a) > 1800]
+    if anos:
+        r["anio_construccion"] = min(anos)
+
+    # ── Proprietário principal: nombre + CPF/CNPJ ───────────────────────────────
+    # "CÓD. CONTRIBUINTE CPF / CNPJ CONTRIBUINTE PRINCIPAL / Proprietário\n
+    #  9188910 111.309.971-20 TEREZINHA ALVES BARRETO DOS SANTOS"
+    m = re.search(r'C[OÓ]D\.?\s+CONTRIBUINTE\s+CPF\s*/\s*CNPJ.*?Propriet[aá]rio\s*\n(.+)',
+                  text, re.I)
+    if m:
+        line = m.group(1).strip()
+        doc_m = re.search(r'(\d{3}\.\d{3}\.\d{3}-\d{2}|\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})', line)
+        if doc_m:
+            r["propietario_documento"] = doc_m.group(1)
+            nombre = line[doc_m.end():].strip()
+        else:
+            # Sin documento: el nombre es lo que sigue al cód. contribuinte (1er token num.)
+            nombre = re.sub(r'^\d+\s+', '', line).strip()
+        r["propietario_nombre"] = (nombre[:200] or None)
+
+    # ── Contribuyente secundario (nombre) ───────────────────────────────────────
+    # "CONTRIBUINTE SECUNDÁRIO CPF/CNPJ TIPO CONTRIBUINTE\n
+    #  EDENILCE FATIMA DA COSTA 48672912187 Co-Responsável"
+    m = re.search(r'CONTRIBUINTE\s+SECUND[AÁ]RIO\s+CPF\s*/?\s*CNPJ\s+TIPO\s+CONTRIBUINTE\s*\n(.+)',
+                  text, re.I)
+    if m:
+        line = m.group(1).strip()
+        # Nombre = texto antes del documento (8+ dígitos, con o sin separadores)
+        sec_m = re.match(r'(.+?)\s+\d[\d.\-/]{7,}\b', line)
+        if sec_m and not re.match(r'^IDENTIFICA', line, re.I):
+            r["contribuyente_secundario"] = sec_m.group(1).strip()[:200]
+
     return r
 
 
@@ -224,11 +320,22 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                 uf_fuente                   = 'bci',
                 unidades_funcionales_estimadas = :uf_tot,
                 area_m2_construida          = COALESCE(:area, area_m2_construida),
+                area_m2_terreno             = COALESCE(:area_terr, area_m2_terreno),
                 calle                       = COALESCE(:calle, calle),
                 numero                      = COALESCE(:nro, numero),
+                complemento                 = COALESCE(:comp, complemento),
                 barrio                      = COALESCE(:barrio, barrio),
                 codigo_postal               = COALESCE(:cep, codigo_postal),
+                nomenclatura_catastral      = COALESCE(:nomen, nomenclatura_catastral),
                 partida_inmobiliaria        = COALESCE(:mat, partida_inmobiliaria),
+                valor_venal_terreno         = COALESCE(:vv_terr, valor_venal_terreno),
+                valor_venal_construccion    = COALESCE(:vv_con, valor_venal_construccion),
+                valor_venal_total           = COALESCE(:vv_tot, valor_venal_total),
+                aliquota                    = COALESCE(:aliq, aliquota),
+                anio_construccion           = COALESCE(:anio, anio_construccion),
+                propietario_nombre          = COALESCE(:prop, propietario_nombre),
+                propietario_documento       = COALESCE(:prop_doc, propietario_documento),
+                contribuyente_secundario    = COALESCE(:prop_sec, contribuyente_secundario),
                 direccion_source            = CASE WHEN :calle IS NOT NULL
                                              THEN 'bci_pdf' ELSE direccion_source END,
                 direccion_confidence        = CASE WHEN :calle IS NOT NULL
@@ -241,11 +348,22 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
             "uf_com": d["uf_comercio"],
             "uf_tot": d["uf_total"] or None,
             "area": d["area_m2_construida"],
+            "area_terr": d["area_m2_terreno"],
             "calle": d["calle"],
             "nro": d["numero"],
+            "comp": d["complemento"],
             "barrio": d["barrio"],
             "cep": d["codigo_postal"],
+            "nomen": d["nomenclatura_catastral"],
             "mat": d["partida_inmobiliaria"],
+            "vv_terr": d["valor_venal_terreno"],
+            "vv_con": d["valor_venal_construccion"],
+            "vv_tot": d["valor_venal_total"],
+            "aliq": d["aliquota"],
+            "anio": d["anio_construccion"],
+            "prop": d["propietario_nombre"],
+            "prop_doc": d["propietario_documento"],
+            "prop_sec": d["contribuyente_secundario"],
         })
 
 

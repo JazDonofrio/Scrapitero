@@ -760,6 +760,10 @@ async function loadParcelasMap(sid) {
           ? '<br><span style="color:#ea580c;font-weight:700;font-size:.72rem">🏪 ' + p.comercios.length + ' comercio' + (p.comercios.length > 1 ? 's' : '') + ' (Google)</span>'
             + '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.comercios.slice(0, 8).join(', ')) + (p.comercios.length > 8 ? '…' : '') + '</span>'
           : '') +
+      (p.vv_total ? '<br><span style="color:#34d399;font-size:.72rem">R$ ' + p.vv_total.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' valor venal</span>' + (p.aliquota ? '<span style="color:#6b7280;font-size:.7rem"> · alíq. ' + (p.aliquota * 100).toLocaleString('pt-BR', {maximumFractionDigits: 2}) + '%</span>' : '') : '') +
+      (p.anio ? '<br><span style="color:#6b7280;font-size:.72rem">Año constr.: ' + p.anio + '</span>' : '') +
+      (p.propietario ? '<br><span style="color:#9ca3af;font-size:.72rem">👤 ' + escHtml(p.propietario) + (p.propietario_doc ? ' <span style="color:#6b7280">(' + escHtml(p.propietario_doc) + ')</span>' : '') + '</span>' : '') +
+      (p.contrib_sec ? '<br><span style="color:#6b7280;font-size:.7rem">Co-resp.: ' + escHtml(p.contrib_sec) + '</span>' : '') +
       '</div>',
       {maxWidth: 240}
     );

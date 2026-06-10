@@ -426,7 +426,11 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                        SELECT array_agg(c.nombre ORDER BY c.nombre)
                        FROM comercios c
                        WHERE c.parcela_id = p.parcela_id AND c.nombre IS NOT NULL
-                   ), '{}') AS comercios
+                   ), '{}') AS comercios,
+                   p.valor_venal_terreno, p.valor_venal_construccion,
+                   p.valor_venal_total, p.aliquota, p.anio_construccion,
+                   p.propietario_nombre, p.propietario_documento,
+                   p.contribuyente_secundario
             FROM parcelas p
             WHERE p.survey_id = :sid
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
@@ -462,6 +466,14 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                 float(r[10]) if r[10] else None,
                 float(r[11]) if r[11] else None,
             ),
+            "vv_terreno": round(float(r[14]), 2) if r[14] else None,
+            "vv_construccion": round(float(r[15]), 2) if r[15] else None,
+            "vv_total": round(float(r[16]), 2) if r[16] else None,
+            "aliquota": round(float(r[17]), 4) if r[17] else None,
+            "anio": int(r[18]) if r[18] else None,
+            "propietario": r[19] or "",
+            "propietario_doc": r[20] or "",
+            "contrib_sec": r[21] or "",
         })
     return out
 
@@ -633,7 +645,15 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                     SELECT string_agg(c.nombre, ' | ' ORDER BY c.nombre)
                     FROM comercios c
                     WHERE c.parcela_id = parcelas.parcela_id AND c.nombre IS NOT NULL
-                ), '') AS comercios
+                ), '') AS comercios,
+                valor_venal_terreno,
+                valor_venal_construccion,
+                valor_venal_total,
+                aliquota,
+                anio_construccion,
+                propietario_nombre,
+                propietario_documento,
+                contribuyente_secundario
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -657,6 +677,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Área Terreno m²", "Área Construida m²", "Pisos",
             "Matrícula", "Fuente", "Fuente dirección",
             "Lat", "Lng", "Comercios (Google)",
+            "Valor Venal Terreno", "Valor Venal Construcción", "Valor Venal Total",
+            "Alícuota", "Año Construcción",
+            "Propietario", "Documento (CPF/CNPJ)", "Contribuyente Secundario",
         ])
         for r in rows:
             w.writerow([
@@ -672,6 +695,12 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 f"{r[18]:.6f}" if r[18] else "",
                 f"{r[19]:.6f}" if r[19] else "",
                 r[22] or "",
+                f"{r[23]:.2f}" if r[23] else "",
+                f"{r[24]:.2f}" if r[24] else "",
+                f"{r[25]:.2f}" if r[25] else "",
+                f"{r[26]:.4f}" if r[26] else "",
+                r[27] or "",
+                r[28] or "", r[29] or "", r[30] or "",
             ])
         yield buf.getvalue()
 

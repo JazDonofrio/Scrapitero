@@ -134,6 +134,16 @@ class Parcela(Base):
     nomenclatura_catastral: Mapped[Optional[str]] = mapped_column(String(100))
     partida_inmobiliaria: Mapped[Optional[str]] = mapped_column(String(100))
 
+    # Valuación fiscal + propietario, del BCI (migración 012)
+    valor_venal_terreno: Mapped[Optional[float]] = mapped_column(Float)
+    valor_venal_construccion: Mapped[Optional[float]] = mapped_column(Float)
+    valor_venal_total: Mapped[Optional[float]] = mapped_column(Float)
+    aliquota: Mapped[Optional[float]] = mapped_column(Float)
+    anio_construccion: Mapped[Optional[int]] = mapped_column(Integer)
+    propietario_nombre: Mapped[Optional[str]] = mapped_column(String(200))      # PII
+    propietario_documento: Mapped[Optional[str]] = mapped_column(String(30))    # PII (CPF/CNPJ)
+    contribuyente_secundario: Mapped[Optional[str]] = mapped_column(String(200))  # PII
+
     # Auditoría
     fuente_parcela: Mapped[Optional[str]] = mapped_column(String(30))
     fecha_relevamiento: Mapped[date] = mapped_column(Date, server_default=func.current_date())
