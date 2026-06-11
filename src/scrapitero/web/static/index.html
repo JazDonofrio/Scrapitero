@@ -113,28 +113,22 @@
       transition: background .15s; text-decoration: none;
     }
     .map-gmaps-btn:hover { background: rgba(15,23,42,1); }
-    /* Comentarios sobre el mapa (sugerencias/correcciones del cliente) */
-    .map-comment-btn {
-      position: absolute; top: 44px; right: 8px; z-index: 1000;
-      background: rgba(15,23,42,.75); color: #e2e8f0; border: none;
-      border-radius: 6px; height: 28px; padding: 0 9px; font-size: .72rem; font-weight: 700;
-      cursor: pointer; display: flex; align-items: center; gap: 4px;
-      transition: background .15s;
-    }
-    .map-comment-btn:hover { background: rgba(15,23,42,1); }
-    .map-comment-btn.active { background: #f59e0b; color: #0f172a; }
+    /* Comentarios sobre parcelas (sugerencias/correcciones del cliente) */
     .cmt-pin {
       width: 26px; height: 26px; border-radius: 50% 50% 50% 4px;
       display: flex; align-items: center; justify-content: center;
       font-size: .85rem; border: 2px solid #0f172a;
-      background: #fbbf24; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+      background: #fbbf24; box-shadow: 0 1px 4px rgba(0,0,0,.4); cursor: pointer;
     }
     .cmt-pin.resuelto { background: #86efac; opacity: .75; }
-    .cmt-form textarea {
-      width: 230px; height: 70px; resize: vertical; font-size: .8rem;
-      padding: .4rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: inherit;
+    .cmt-section { border-top: 1px solid #e5e7eb; margin-top: .45rem; padding-top: .4rem;
+                   font-size: .76rem; line-height: 1.45; }
+    .cmt-item { background: #f9fafb; border-radius: 6px; padding: .3rem .45rem; margin-bottom: .3rem; }
+    .cmt-textarea {
+      width: 100%; box-sizing: border-box; height: 64px; resize: vertical; font-size: .78rem;
+      padding: .35rem; border: 1px solid #d1d5db; border-radius: 6px; font-family: inherit;
     }
-    .cmt-meta { font-size: .68rem; color: #6b7280; margin-top: .3rem; }
+    .cmt-meta { font-size: .66rem; color: #6b7280; margin-top: .2rem; }
     .cmt-estado-pill { display: inline-block; padding: .05rem .45rem; border-radius: 10px;
                        font-size: .62rem; font-weight: 700; }
     .cmt-estado-pill.pendiente { background: #fef3c7; color: #92400e; }
@@ -761,8 +755,6 @@ function renderCard(s) {
           <div id="${mapId}" style="width:100%;height:100%"></div>
           <button class="map-gmaps-btn" title="Abrir esta ubicación en Google Maps (con nombres de calles)" onclick="openGoogleMaps('${sid}')">📍 Google Maps</button>
           <button class="map-fs-btn" title="Pantalla completa" onclick="toggleMapFullscreen('${sid}')">⛶</button>
-          <button class="map-comment-btn" id="cmtbtn-${sid}" onclick="toggleCommentMode('${sid}', this)"
-            title="Dejá un comentario (sugerencia o corrección) en un punto del mapa: activá y hacé clic donde quieras comentar">💬 Comentar</button>
           <div class="map-parcel-count" id="mcount-${sid}"></div>
         </div>
         <div class="detail-body">
@@ -898,69 +890,76 @@ function initMap(sid) {
   loadComentarios(sid);   // comentarios del cliente (sugerencias/correcciones)
 }
 
-/* ── Comentarios sobre el mapa (sugerencias/correcciones del cliente) ───────── */
-const commentMarkers = {};   // sid → array de L.marker en el mapa
+/* ── Comentarios sobre parcelas (sugerencias/correcciones del cliente) ──────── */
+const surveyComments = {};   // sid → {parcela_id → [comentarios]}
+const commentMarkers = {};   // sid → pins 💬 indicadores sobre parcelas comentadas
+const parcelaMarkers = {};   // sid → {parcela_id → circleMarker de la parcela}
 
-// Activa/desactiva el modo "dejar comentario": el próximo clic en el mapa abre el form.
-function toggleCommentMode(sid, btn) {
-  const map = maps[sid];
-  if (!map) return;
-  if (map._cmtClickHandler) {            // ya estaba activo → desactivar
-    map.off('click', map._cmtClickHandler);
-    delete map._cmtClickHandler;
-    map.getContainer().style.cursor = '';
-    btn.classList.remove('active');
-    return;
-  }
-  btn.classList.add('active');
-  map.getContainer().style.cursor = 'crosshair';
-  map._cmtClickHandler = (e) => {
-    // un solo comentario por activación: salir del modo y abrir el form en el punto
-    map.off('click', map._cmtClickHandler);
-    delete map._cmtClickHandler;
-    map.getContainer().style.cursor = '';
-    btn.classList.remove('active');
-    const {lat, lng} = e.latlng;
-    L.popup({maxWidth: 280, closeButton: true})
-      .setLatLng(e.latlng)
-      .setContent(`
-        <div class="cmt-form">
-          <div style="font-weight:700;font-size:.8rem;margin-bottom:.3rem">💬 Nuevo comentario</div>
-          <textarea id="cmt-text-${sid}" maxlength="2000"
-            placeholder="Sugerencia o corrección para este punto…"></textarea>
-          <div style="margin-top:.4rem;text-align:right">
-            <button class="btn btn-sm btn-primary" style="padding:.25rem .7rem;font-size:.72rem"
-              onclick="guardarComentario('${sid}', ${lat}, ${lng}, this)">Guardar</button>
-          </div>
-        </div>`)
-      .openOn(map);
-    setTimeout(() => { const ta = document.getElementById('cmt-text-' + sid); ta && ta.focus(); }, 50);
-  };
-  map.on('click', map._cmtClickHandler);
+// Sección "💬 Comentarios" del popup de detalle de una parcela. Se evalúa al ABRIR
+// el popup (bindPopup recibe una función), así siempre refleja el estado actual.
+function comentariosSectionHtml(sid, pid) {
+  if (!pid) return '';
+  const lista = (surveyComments[sid] || {})[pid] || [];
+  const items = lista.map(c => {
+    const fecha = c.created_at ? fmtDate(c.created_at) : '';
+    const autor = c.autor_rol === 'operador' ? 'operador' : 'cliente';
+    const opLinks = OPERADOR ? ` · ${c.estado === 'pendiente'
+        ? `<a href="#" style="color:#16a34a" title="Marcar como resuelto"
+             onclick="setComentarioEstado('${c.comentario_id}','${sid}','${pid}','resuelto');return false">✔ resolver</a>`
+        : `<a href="#" style="color:#6b7280" title="Volver a pendiente"
+             onclick="setComentarioEstado('${c.comentario_id}','${sid}','${pid}','pendiente');return false">↩ reabrir</a>`}
+      · <a href="#" style="color:#dc2626" title="Eliminar comentario"
+           onclick="eliminarComentario('${c.comentario_id}','${sid}','${pid}');return false">🗑</a>` : '';
+    return `<div class="cmt-item">
+      <div style="white-space:pre-wrap">${escHtml(c.texto)}</div>
+      <div class="cmt-meta"><span class="cmt-estado-pill ${c.estado}">${c.estado}</span> ${autor} · ${fecha}${opLinks}</div>
+    </div>`;
+  }).join('');
+  return `<div class="cmt-section">
+      ${lista.length ? `<div style="font-weight:700;font-size:.72rem;margin-bottom:.25rem">💬 Comentarios (${lista.length})</div>${items}` : ''}
+      <button class="btn btn-sm btn-outline" style="padding:.2rem .55rem;font-size:.7rem"
+        title="Dejá una sugerencia o corrección sobre esta dirección"
+        onclick="document.getElementById('cform-${pid}').style.display='block';this.style.display='none';document.getElementById('ctext-${pid}').focus()">💬 Comentar</button>
+      <div id="cform-${pid}" style="display:none;margin-top:.3rem">
+        <textarea id="ctext-${pid}" class="cmt-textarea" maxlength="2000"
+          placeholder="Sugerencia o corrección sobre esta dirección…"></textarea>
+        <div style="text-align:right;margin-top:.25rem">
+          <button class="btn btn-sm btn-primary" style="padding:.2rem .6rem;font-size:.7rem"
+            onclick="guardarComentario('${sid}','${pid}', this)">Guardar</button>
+        </div>
+      </div>
+    </div>`;
 }
 
-async function guardarComentario(sid, lat, lng, btn) {
-  const ta = document.getElementById('cmt-text-' + sid);
+// Re-renderiza el popup de la parcela si está abierto (tras crear/resolver/eliminar).
+function refreshParcelaPopup(sid, pid) {
+  const mk = (parcelaMarkers[sid] || {})[pid];
+  if (mk && mk.isPopupOpen()) { mk.closePopup(); mk.openPopup(); }
+}
+
+async function guardarComentario(sid, pid, btn) {
+  const ta = document.getElementById('ctext-' + pid);
   const texto = (ta ? ta.value : '').trim();
   if (!texto) { ta && ta.focus(); return; }
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
     const res = await fetch(`/api/surveys/${sid}/comentarios`, {
       method: 'POST',
-      body: new URLSearchParams({lat: String(lat), lng: String(lng), texto}),
+      body: new URLSearchParams({parcela_id: pid, texto}),
     });
     const data = await res.json();
-    if (data.ok) {
-      maps[sid] && maps[sid].closePopup();
-      loadComentarios(sid);
-    } else {
+    if (!data.ok) {
       alert(`Error: ${data.error || 'desconocido'}`);
       btn.disabled = false; btn.textContent = 'Guardar';
+      return;
     }
   } catch(err) {
     alert(`Error de red: ${err.message}`);
     btn.disabled = false; btn.textContent = 'Guardar';
+    return;
   }
+  await loadComentarios(sid);
+  refreshParcelaPopup(sid, pid);
 }
 
 async function loadComentarios(sid) {
@@ -974,48 +973,37 @@ async function loadComentarios(sid) {
   } catch(_) { return; }
   if (maps[sid] !== map) return;          // el mapa fue reemplazado durante el await
 
+  const porParcela = {};
+  for (const c of comentarios) {
+    if (!c.parcela_id) continue;
+    (porParcela[c.parcela_id] = porParcela[c.parcela_id] || []).push(c);
+  }
+  surveyComments[sid] = porParcela;
+
+  // Pins 💬 sobre las parcelas comentadas (indicador visual; el detalle y la gestión
+  // viven en el popup del círculo). Ámbar = hay pendientes, verde = todos resueltos.
   if (commentMarkers[sid]) {
     commentMarkers[sid].forEach(m => { try { map.removeLayer(m); } catch(_) {} });
   }
   commentMarkers[sid] = [];
-
-  for (const c of comentarios) {
+  for (const [pid, lista] of Object.entries(porParcela)) {
+    const pendientes = lista.some(c => c.estado === 'pendiente');
     const icon = L.divIcon({
       className: '',
-      html: `<div class="cmt-pin ${c.estado}">💬</div>`,
-      iconSize: [26, 26], iconAnchor: [13, 24],
+      html: `<div class="cmt-pin ${pendientes ? '' : 'resuelto'}" title="${lista.length} comentario${lista.length > 1 ? 's' : ''} — clic para ver">💬</div>`,
+      iconSize: [26, 26], iconAnchor: [13, 30],
     });
-    const m = L.marker([c.lat, c.lng], {icon, zIndexOffset: 500});
-    const fecha = c.created_at ? fmtDate(c.created_at) : '';
-    const autor = c.autor_rol === 'operador' ? 'operador' : 'cliente';
-    const opBtns = OPERADOR ? `
-      <div style="margin-top:.4rem;display:flex;gap:.35rem;justify-content:flex-end">
-        ${c.estado === 'pendiente'
-          ? `<button class="btn btn-sm" style="background:#dcfce7;color:#166534;padding:.2rem .55rem;font-size:.68rem"
-               onclick="setComentarioEstado('${c.comentario_id}','${sid}','resuelto')">✔ Resuelto</button>`
-          : `<button class="btn btn-sm btn-outline" style="padding:.2rem .55rem;font-size:.68rem"
-               onclick="setComentarioEstado('${c.comentario_id}','${sid}','pendiente')">↩ Reabrir</button>`}
-        <button class="btn btn-sm btn-outline" style="padding:.2rem .55rem;font-size:.68rem"
-          onclick="eliminarComentario('${c.comentario_id}','${sid}')">🗑</button>
-      </div>` : '';
-    m.bindPopup(`
-      <div style="max-width:240px">
-        <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
-          <span style="font-weight:700;font-size:.8rem">💬 Comentario</span>
-          <span class="cmt-estado-pill ${c.estado}">${c.estado}</span>
-        </div>
-        <div style="font-size:.8rem;white-space:pre-wrap">${escHtml(c.texto)}</div>
-        <div class="cmt-meta">
-          ${autor} · ${fecha}${c.parcela_direccion ? ` · 📍 ${escHtml(c.parcela_direccion)}` : ''}
-        </div>
-        ${opBtns}
-      </div>`);
+    const m = L.marker([lista[0].lat, lista[0].lng], {icon, zIndexOffset: 500});
+    m.on('click', () => {
+      const mk = (parcelaMarkers[sid] || {})[pid];
+      if (mk) mk.openPopup();
+    });
     m.addTo(map);
     commentMarkers[sid].push(m);
   }
 }
 
-async function setComentarioEstado(cid, sid, estado) {
+async function setComentarioEstado(cid, sid, pid, estado) {
   try {
     const res = await fetch(`/api/comentarios/${cid}/estado`, {
       method: 'POST', body: new URLSearchParams({estado}),
@@ -1023,17 +1011,19 @@ async function setComentarioEstado(cid, sid, estado) {
     const data = await res.json();
     if (!data.ok) alert(`Error: ${data.error || 'desconocido'}`);
   } catch(err) { alert(`Error de red: ${err.message}`); }
-  loadComentarios(sid);
+  await loadComentarios(sid);
+  refreshParcelaPopup(sid, pid);
 }
 
-async function eliminarComentario(cid, sid) {
+async function eliminarComentario(cid, sid, pid) {
   if (!confirm('¿Eliminar este comentario?')) return;
   try {
     const res = await fetch(`/api/comentarios/${cid}`, {method: 'DELETE'});
     const data = await res.json();
     if (!data.ok) alert(`Error: ${data.error || 'desconocido'}`);
   } catch(err) { alert(`Error de red: ${err.message}`); }
-  loadComentarios(sid);
+  await loadComentarios(sid);
+  refreshParcelaPopup(sid, pid);
 }
 
 // ── Capas Google Maps (opcionales, vía Leaflet.GoogleMutant) ──────────────────
@@ -1098,6 +1088,7 @@ async function loadParcelasMap(sid) {
 
   const counts = {};
   const markers = [];
+  const byPid = {};
 
   for (const p of parcelas) {
     const uso = p.uso || 'sin clasificar';
@@ -1127,7 +1118,7 @@ async function loadParcelasMap(sid) {
           ? '<br><span style="color:#6b7280;font-size:.7rem;' + (desc ? 'cursor:help;border-bottom:1px dotted #9ca3af' : '') + '"'
             + (desc ? ' title="' + escHtml(desc) + '"' : '') + '>UF: ' + UF_FUENTE_LBL[p.uf_fuente] + '</span>'
           : '');
-    m.bindPopup(
+    const baseHtml =
       '<div style="font-size:.83rem;line-height:1.8;min-width:165px">' +
       '<b>' + escHtml(addr) + '</b>' +
       (p.barrio ? '<br><span style="color:#9ca3af">' + escHtml(p.barrio) + '</span>' : '') +
@@ -1147,10 +1138,11 @@ async function loadParcelasMap(sid) {
       (p.contrib_sec ? '<br><span style="color:#6b7280;font-size:.7rem">Co-resp.: ' + escHtml(p.contrib_sec) + '</span>' : '') +
       (p.est_id ? '<br><span style="color:#a78bfa;font-weight:700;font-size:.72rem">🏭 Parte de establecimiento' + (p.est_tipo ? ' (' + escHtml(p.est_tipo) + ')' : '') + '</span>'
             + (p.est_nombre ? '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.est_nombre) + '</span>' : '')
-            + '<br><span style="color:#6b7280;font-size:.7rem">' + p.est_n_parcelas + ' parcelas = 1 establecimiento (UF contada una vez)</span>' : '') +
-      '</div>',
-      {maxWidth: 240}
-    );
+            + '<br><span style="color:#6b7280;font-size:.7rem">' + p.est_n_parcelas + ' parcelas = 1 establecimiento (UF contada una vez)</span>' : '');
+    // El contenido se evalúa al abrir: la sección de comentarios siempre al día.
+    m.bindPopup(() => baseHtml + comentariosSectionHtml(sid, p.parcela_id) + '</div>',
+                {maxWidth: 260});
+    if (p.parcela_id) byPid[p.parcela_id] = m;
     // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
     if (p.uf_total > 0) {
       m.bindTooltip(String(p.uf_total), {
@@ -1163,6 +1155,7 @@ async function loadParcelasMap(sid) {
   }
 
   activeMarkers[sid] = markers;
+  parcelaMarkers[sid] = byPid;
 
   // Contador visible en el mapa
   const cntEl = document.getElementById('mcount-' + sid);

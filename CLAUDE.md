@@ -264,17 +264,20 @@ Al tocar mensajería, aplicar el cambio en `CLAUDE.md` **y** en las skills `rele
 
 Dashboard para gestionar relevamientos. Corre en `http://localhost:8765`.
 
-**Comentarios del cliente (sugerencias/correcciones sobre el mapa):** el cliente (y el
-operador) puede dejar comentarios georreferenciados en puntos del mapa de un relevamiento
-(botón "💬 Comentar" sobre el mapa → clic en el punto → texto). Se guardan en la tabla
-`comentarios_cliente` (migración 015: POINT 4326, texto, `autor_rol`, `estado`
-pendiente/resuelto) y, si el punto cae dentro de una parcela del survey, quedan vinculados
-(`parcela_id`, ST_Contains). Es la **única escritura permitida al rol cliente** (excepción
-explícita en el middleware de auth). Cada comentario nuevo dispara un **aviso por Telegram
-al operador** (región, parcela si corresponde, coordenadas y texto). El operador gestiona
-desde el popup del marcador: ✔ Resuelto / ↩ Reabrir / 🗑 Eliminar. Endpoints:
-`GET|POST /api/surveys/{id}/comentarios`, `POST /api/comentarios/{id}/estado`,
-`DELETE /api/comentarios/{id}`.
+**Comentarios del cliente (sugerencias/correcciones sobre direcciones relevadas):** el
+cliente (y el operador) puede dejar comentarios sobre **una parcela relevada** — uno de los
+círculos de color del mapa. Se crean y se leen en el **mismo popup de detalle de la
+parcela** (botón "💬 Comentar" dentro del popup → texto). Se guardan en la tabla
+`comentarios_cliente` (migración 015: `parcela_id` obligatorio en la práctica, POINT 4326
+en el centroide de la parcela, texto, `autor_rol`, `estado` pendiente/resuelto). Es la
+**única escritura permitida al rol cliente** (excepción explícita en el middleware de
+auth); el backend valida que la parcela pertenezca al survey. Las parcelas comentadas
+muestran un pin 💬 (ámbar=pendiente, verde=resuelto) que al clickearlo abre el popup de la
+parcela. Cada comentario nuevo dispara un **aviso por Telegram al operador** (región,
+dirección de la parcela, coordenadas y texto). El operador gestiona desde la misma sección
+del popup: ✔ resolver / ↩ reabrir / 🗑 eliminar. Endpoints:
+`GET|POST /api/surveys/{id}/comentarios` (POST con `parcela_id`+`texto`),
+`POST /api/comentarios/{id}/estado`, `DELETE /api/comentarios/{id}`.
 
 **Visibilidad en vista cliente (tilde "👁 Cliente"):** cada tarjeta de la lista del
 operador tiene un tilde que controla si ese relevamiento se muestra en la vista

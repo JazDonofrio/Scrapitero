@@ -638,7 +638,8 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.valor_venal_total, p.aliquota, p.anio_construccion,
                    p.propietario_nombre, p.propietario_documento,
                    p.contribuyente_secundario,
-                   p.establecimiento_id::text, e.tipo, e.nombre, e.n_parcelas
+                   p.establecimiento_id::text, e.tipo, e.nombre, e.n_parcelas,
+                   p.parcela_id::text
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             WHERE p.survey_id = :sid
@@ -687,6 +688,7 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "est_tipo": r[23] or None,
             "est_nombre": r[24] or None,
             "est_n_parcelas": int(r[25]) if r[25] else None,
+            "parcela_id": r[26],
         })
     return out
 
@@ -891,7 +893,7 @@ async def list_comentarios(survey_id: str) -> list[dict]:
             SELECT c.comentario_id::text,
                    ST_Y(c.geometry) AS lat, ST_X(c.geometry) AS lng,
                    c.texto, c.autor_rol, c.estado, c.created_at, c.resuelto_at,
-                   p.calle, p.numero
+                   p.calle, p.numero, c.parcela_id::text
             FROM comentarios_cliente c
             LEFT JOIN parcelas p ON p.parcela_id = c.parcela_id
             WHERE c.survey_id = :sid
@@ -906,16 +908,17 @@ async def list_comentarios(survey_id: str) -> list[dict]:
         "created_at": r[6].isoformat() if r[6] else None,
         "resuelto_at": r[7].isoformat() if r[7] else None,
         "parcela_direccion": " ".join(str(x) for x in (r[8], r[9]) if x) or None,
+        "parcela_id": r[10],
     } for r in rows]
 
 
 @app.post("/api/surveys/{survey_id}/comentarios")
 async def crear_comentario(survey_id: str, request: Request,
-                           lat: float = Form(...), lng: float = Form(...),
+                           parcela_id: str = Form(...),
                            texto: str = Form(...)) -> JSONResponse:
-    """Crea un comentario (sugerencia/corrección) en un punto del mapa. Es la única
-    escritura permitida al rol cliente (excepción en el middleware de auth). Si el
-    punto cae dentro de una parcela del survey, queda vinculado a ella."""
+    """Crea un comentario (sugerencia/corrección) sobre UNA parcela relevada del survey
+    (uno de los puntos del mapa). Se abre desde el popup de detalle del círculo. Es la
+    única escritura permitida al rol cliente (excepción en el middleware de auth)."""
     texto = texto.strip()
     if not texto:
         return JSONResponse({"ok": False, "error": "El comentario está vacío"},
@@ -924,9 +927,6 @@ async def crear_comentario(survey_id: str, request: Request,
         return JSONResponse(
             {"ok": False, "error": f"Comentario demasiado largo (máx. {_COMENTARIO_MAX_LEN} caracteres)"},
             status_code=400)
-    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
-        return JSONResponse({"ok": False, "error": "Coordenadas inválidas"},
-                            status_code=400)
 
     rol = getattr(request.state, "role", None)
     engine = get_engine()
@@ -936,43 +936,48 @@ async def crear_comentario(survey_id: str, request: Request,
             JOIN regions r ON r.region_id = s.region_id
             WHERE s.survey_id = :sid
         """), {"sid": survey_id}).fetchone()
-        if not survey:
-            return JSONResponse({"ok": False, "error": "Survey no encontrado"},
-                                status_code=404)
-        if rol == "cliente" and not survey[1]:
+        if not survey or (rol == "cliente" and not survey[1]):
             # un survey oculto no existe para el cliente
             return JSONResponse({"ok": False, "error": "Survey no encontrado"},
                                 status_code=404)
+        # la parcela debe ser una de las relevadas en ESTE survey
+        parcela = conn.execute(text("""
+            SELECT TRIM(CONCAT(calle, ' ', numero)), centroid_lat, centroid_lng
+            FROM parcelas WHERE parcela_id = :pid AND survey_id = :sid
+        """), {"pid": parcela_id, "sid": survey_id}).fetchone()
+        if not parcela:
+            return JSONResponse(
+                {"ok": False, "error": "La parcela no pertenece a este relevamiento"},
+                status_code=404)
         row = conn.execute(text("""
             INSERT INTO comentarios_cliente
                    (comentario_id, survey_id, parcela_id, geometry, texto, autor_rol)
-            VALUES (:cid, :sid,
-                    (SELECT parcela_id FROM parcelas
-                     WHERE survey_id = :sid
-                       AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
-                     LIMIT 1),
-                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), :texto, :rol)
-            RETURNING comentario_id::text, parcela_id::text, created_at,
-                      (SELECT TRIM(CONCAT(p.calle, ' ', p.numero)) FROM parcelas p
-                       WHERE p.parcela_id = comentarios_cliente.parcela_id)
-        """), {"cid": str(uuid.uuid4()), "sid": survey_id,
-               "lat": lat, "lng": lng, "texto": texto, "rol": rol}).fetchone()
+            SELECT :cid, :sid, :pid,
+                   COALESCE(ST_SetSRID(ST_MakePoint(centroid_lng, centroid_lat), 4326),
+                            ST_PointOnSurface(geometry)),
+                   :texto, :rol
+            FROM parcelas WHERE parcela_id = :pid
+            RETURNING comentario_id::text, created_at
+        """), {"cid": str(uuid.uuid4()), "sid": survey_id, "pid": parcela_id,
+               "texto": texto, "rol": rol}).fetchone()
 
     region_nombre = survey[0]
-    direccion = row[3] or None
+    direccion = parcela[0] or "(sin dirección)"
     logger.info(f"Nuevo comentario ({rol or 'sin auth'}) en survey {survey_id}"
-                f"{f' — parcela {direccion}' if direccion else ''}: {texto[:120]}")
+                f" — parcela {direccion}: {texto[:120]}")
     # Aviso al operador: el comentario del cliente es accionable (sugerencia/corrección).
+    coords = (f"{parcela[1]:.6f}, {parcela[2]:.6f}"
+              if parcela[1] is not None and parcela[2] is not None else "—")
     asyncio.get_running_loop().run_in_executor(None, _telegram_notify, (
         f"💬 <b>Nuevo comentario del cliente</b>\n"
         f"Relevamiento: {region_nombre}\n"
-        + (f"Parcela: {direccion}\n" if direccion else "")
-        + f"Punto: {lat:.6f}, {lng:.6f}\n"
+        f"Parcela: {direccion}\n"
+        f"Punto: {coords}\n"
         f"«{texto}»"
     ))
     return JSONResponse({"ok": True, "comentario_id": row[0],
                          "parcela_direccion": direccion,
-                         "created_at": row[2].isoformat() if row[2] else None})
+                         "created_at": row[1].isoformat() if row[1] else None})
 
 
 @app.post("/api/comentarios/{comentario_id}/estado")
