@@ -58,6 +58,9 @@ _AUTH_SECRET = (os.getenv("WEB_AUTH_SECRET") or WEBHOOK_SECRET
 _AUTH_COOKIE = "scrap_auth"
 _AUTH_MAX_AGE = 7 * 24 * 3600          # 7 días
 _AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico"}
+# Única escritura permitida al rol cliente: dejar comentarios (sugerencias/correcciones)
+# en puntos del mapa de un relevamiento.
+_CLIENTE_POST_RE = re.compile(r"^/api/surveys/[0-9a-fA-F-]+/comentarios$")
 
 
 def _auth_enabled() -> bool:
@@ -107,7 +110,8 @@ async def _auth_middleware(request: Request, call_next):
     # Rol: la vista /operador y toda escritura (POST/DELETE/PUT/PATCH) requieren 'operador'.
     if path == "/operador" and role != "operador":
         return RedirectResponse("/login?err=1", status_code=302)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and role != "operador":
+    if (request.method not in ("GET", "HEAD", "OPTIONS") and role != "operador"
+            and not (request.method == "POST" and _CLIENTE_POST_RE.match(path))):
         return JSONResponse({"error": "Requiere rol operador"}, status_code=403)
 
     request.state.role = role
@@ -855,6 +859,156 @@ async def set_visibilidad(survey_id: str, visible: bool = Form(...)) -> JSONResp
     return JSONResponse({"ok": True, "visible_cliente": visible})
 
 
+# ── Comentarios del cliente (sugerencias/correcciones sobre el mapa) ──────────
+
+def _telegram_notify(msg: str) -> None:
+    """Aviso al operador por Telegram (best-effort, no bloquea si falla)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps({"chat_id": chat_id, "text": msg,
+                             "parse_mode": "HTML"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        logger.warning(f"No se pudo notificar por Telegram: {e}")
+
+
+_COMENTARIO_MAX_LEN = 2000
+
+
+@app.get("/api/surveys/{survey_id}/comentarios")
+async def list_comentarios(survey_id: str) -> list[dict]:
+    """Comentarios del relevamiento (ambos roles los ven en el mapa)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT c.comentario_id::text,
+                   ST_Y(c.geometry) AS lat, ST_X(c.geometry) AS lng,
+                   c.texto, c.autor_rol, c.estado, c.created_at, c.resuelto_at,
+                   p.calle, p.numero
+            FROM comentarios_cliente c
+            LEFT JOIN parcelas p ON p.parcela_id = c.parcela_id
+            WHERE c.survey_id = :sid
+            ORDER BY c.created_at
+        """), {"sid": survey_id}).fetchall()
+    return [{
+        "comentario_id": r[0],
+        "lat": float(r[1]), "lng": float(r[2]),
+        "texto": r[3],
+        "autor_rol": r[4],
+        "estado": r[5],
+        "created_at": r[6].isoformat() if r[6] else None,
+        "resuelto_at": r[7].isoformat() if r[7] else None,
+        "parcela_direccion": " ".join(str(x) for x in (r[8], r[9]) if x) or None,
+    } for r in rows]
+
+
+@app.post("/api/surveys/{survey_id}/comentarios")
+async def crear_comentario(survey_id: str, request: Request,
+                           lat: float = Form(...), lng: float = Form(...),
+                           texto: str = Form(...)) -> JSONResponse:
+    """Crea un comentario (sugerencia/corrección) en un punto del mapa. Es la única
+    escritura permitida al rol cliente (excepción en el middleware de auth). Si el
+    punto cae dentro de una parcela del survey, queda vinculado a ella."""
+    texto = texto.strip()
+    if not texto:
+        return JSONResponse({"ok": False, "error": "El comentario está vacío"},
+                            status_code=400)
+    if len(texto) > _COMENTARIO_MAX_LEN:
+        return JSONResponse(
+            {"ok": False, "error": f"Comentario demasiado largo (máx. {_COMENTARIO_MAX_LEN} caracteres)"},
+            status_code=400)
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return JSONResponse({"ok": False, "error": "Coordenadas inválidas"},
+                            status_code=400)
+
+    rol = getattr(request.state, "role", None)
+    engine = get_engine()
+    with engine.begin() as conn:
+        survey = conn.execute(text("""
+            SELECT r.name, s.visible_cliente FROM surveys s
+            JOIN regions r ON r.region_id = s.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).fetchone()
+        if not survey:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"},
+                                status_code=404)
+        if rol == "cliente" and not survey[1]:
+            # un survey oculto no existe para el cliente
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"},
+                                status_code=404)
+        row = conn.execute(text("""
+            INSERT INTO comentarios_cliente
+                   (comentario_id, survey_id, parcela_id, geometry, texto, autor_rol)
+            VALUES (:cid, :sid,
+                    (SELECT parcela_id FROM parcelas
+                     WHERE survey_id = :sid
+                       AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
+                     LIMIT 1),
+                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), :texto, :rol)
+            RETURNING comentario_id::text, parcela_id::text, created_at,
+                      (SELECT TRIM(CONCAT(p.calle, ' ', p.numero)) FROM parcelas p
+                       WHERE p.parcela_id = comentarios_cliente.parcela_id)
+        """), {"cid": str(uuid.uuid4()), "sid": survey_id,
+               "lat": lat, "lng": lng, "texto": texto, "rol": rol}).fetchone()
+
+    region_nombre = survey[0]
+    direccion = row[3] or None
+    logger.info(f"Nuevo comentario ({rol or 'sin auth'}) en survey {survey_id}"
+                f"{f' — parcela {direccion}' if direccion else ''}: {texto[:120]}")
+    # Aviso al operador: el comentario del cliente es accionable (sugerencia/corrección).
+    asyncio.get_running_loop().run_in_executor(None, _telegram_notify, (
+        f"💬 <b>Nuevo comentario del cliente</b>\n"
+        f"Relevamiento: {region_nombre}\n"
+        + (f"Parcela: {direccion}\n" if direccion else "")
+        + f"Punto: {lat:.6f}, {lng:.6f}\n"
+        f"«{texto}»"
+    ))
+    return JSONResponse({"ok": True, "comentario_id": row[0],
+                         "parcela_direccion": direccion,
+                         "created_at": row[2].isoformat() if row[2] else None})
+
+
+@app.post("/api/comentarios/{comentario_id}/estado")
+async def set_comentario_estado(comentario_id: str, estado: str = Form(...)) -> JSONResponse:
+    """Marca un comentario como resuelto (o lo reabre). Solo operador (middleware)."""
+    if estado not in ("pendiente", "resuelto"):
+        return JSONResponse({"ok": False, "error": f"Estado inválido: {estado!r}. "
+                             "Válidos: pendiente, resuelto"}, status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            UPDATE comentarios_cliente
+            SET estado = :e,
+                resuelto_at = CASE WHEN CAST(:e AS varchar) = 'resuelto' THEN NOW() ELSE NULL END
+            WHERE comentario_id = :cid RETURNING 1
+        """), {"e": estado, "cid": comentario_id}).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "Comentario no encontrado"},
+                            status_code=404)
+    return JSONResponse({"ok": True, "estado": estado})
+
+
+@app.delete("/api/comentarios/{comentario_id}")
+async def eliminar_comentario(comentario_id: str) -> JSONResponse:
+    """Elimina un comentario. Solo operador (middleware)."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "DELETE FROM comentarios_cliente WHERE comentario_id = :cid RETURNING 1"),
+            {"cid": comentario_id}).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "Comentario no encontrado"},
+                            status_code=404)
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/surveys/{survey_id}/export/csv")
 async def export_csv(survey_id: str) -> StreamingResponse:
     """Descarga un CSV con todas las parcelas del relevamiento."""
@@ -994,6 +1148,7 @@ async def eliminar_survey(survey_id: str) -> JSONResponse:
                 )
             """), {"sid": survey_id})
             conn.execute(text("DELETE FROM edificios WHERE survey_id = :sid"), {"sid": survey_id})
+            conn.execute(text("DELETE FROM comentarios_cliente WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM parcelas  WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM orchestrator_log WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM surveys WHERE survey_id = :sid"), {"sid": survey_id})

@@ -162,6 +162,30 @@ class Parcela(Base):
     edificios: Mapped[list["Edificio"]] = relationship("Edificio", back_populates="parcela")
 
 
+# ── Comentarios del cliente (sugerencias/correcciones sobre el mapa) ──────────
+
+class ComentarioCliente(Base):
+    """Comentario georreferenciado que el cliente deja en un punto del mapa de un
+    relevamiento (sugerencia/corrección). Migración 015. Si el punto cae dentro de
+    una parcela del survey queda vinculado (`parcela_id`); el operador lo gestiona
+    con `estado` (pendiente → resuelto)."""
+    __tablename__ = "comentarios_cliente"
+
+    comentario_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                      default=uuid.uuid4)
+    survey_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True),
+                                                  ForeignKey("surveys.survey_id"))
+    parcela_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True),
+                                                             ForeignKey("parcelas.parcela_id"))
+    geometry: Mapped[object] = mapped_column(Geometry("POINT", srid=4326))
+    texto: Mapped[str] = mapped_column(Text)
+    autor_rol: Mapped[Optional[str]] = mapped_column(String(20))   # cliente/operador; NULL=sin auth
+    estado: Mapped[str] = mapped_column(String(20), default="pendiente",
+                                        server_default="pendiente")  # pendiente | resuelto
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    resuelto_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+
 # ── Edificios (tabla interna) ──────────────────────────────────────────────────
 
 class Edificio(Base):
