@@ -38,6 +38,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 ### Fuentes de parcelas — Brasil
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
+| VGPipelineRunner | `vg_pipeline_runner` | **VG: PREFERIDO.** Happy path compilado: SmartGIS→BCI(parse inline)→Parser→Agrupador en UNA llamada determinista. Registra pasos en `surveys.notes`, honra stop, marca completed. `parcial:true` ⇒ re-invocar (continúa). Los agentes de abajo quedan para correr pasos sueltos/debug |
 | SmartGISFetcher | `smartgis_fetcher` | **VG: SIEMPRE primero.** Parcelas Várzea Grande: inscripción+geometría desde SmartGIS |
 | VGBCIFetcher | `varzea_bci_fetcher` | VG: Después de SmartGIS. Descarga PDFs BCI (reutiliza existentes en `pdf_downloads/`) **y parsea cada uno apenas baja** (`parse_inline`=true: uso/UF/dirección a DB de a uno). Presupuesto de tiempo (`max_runtime_s`=840): frena con gracia antes del timeout de Hermes (~900s) y devuelve `parcial:true` + `pdfs_pendientes` — re-ejecutar continúa donde quedó (NO es error) |
 | BCIParser | `bci_parser` | VG: Después de VGBCIFetcher, como **red de seguridad** (idempotente): re-parsea PDFs con inline fallido o preexistentes sin parsear. Extrae uso/UF/dirección de PDFs sin LLM |
@@ -104,15 +105,16 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 
 ```
 1. GeoJSONZoneFetcher  → crear región con zone_geojson (via Web UI o RPC)
-2. SmartGISFetcher     → inscripciones + geometría → parcelas en DB (cca_code = ID para BCI)
-3. VGBCIFetcher        → descargar PDFs BCI (reutiliza reporte_*.pdf existentes en pdf_downloads/<ciudad>/)
-4. BCIParser           → extraer uso/UF/dirección de los PDFs (sin LLM, regex)
-5. EstablecimientoAgrupador → agrupar parcelas de un mismo establecimiento (fábrica/colegio/…) → 1 UF
-6. CoverageReporter    → verificar estado
-→ Desde Web UI: botón "▶ Iniciar" delega en Hermes, que ejecuta los pasos 2-5
-  automáticamente siguiendo la skill `relevar-zona` (EstablecimientoAgrupador es paso
-  estándar del flujo VG, después de BCIParser).
+2. VGPipelineRunner    → TODO el resto en una llamada determinista:
+   SmartGIS → BCI (parseo inline por PDF) → Parser (red de seguridad) → Agrupador
+   → marca completed. parcial:true ⇒ re-invocar con el mismo input (continúa).
+3. CoverageReporter    → verificar estado
+→ Desde Web UI: botón "▶ Iniciar" delega en Hermes, que invoca `vg-pipeline-runner`
+  (skill preferida para BRA/VG; los pasos sueltos quedan como fallback/debug).
 ```
+
+Pasos individuales (fallback/debug — el runner los ejecuta en este orden):
+SmartGISFetcher → VGBCIFetcher → BCIParser → EstablecimientoAgrupador.
 
 **Regla VG:** SmartGISFetcher SIEMPRE primero. El `CODIGO_IMOVEL_AGRUPADO` de SmartGIS = `cca_code` en DB = número para descargar BCI en `vg.abaco.com.br`. La zona se respeta automáticamente desde `regions.zone_geojson`.
 

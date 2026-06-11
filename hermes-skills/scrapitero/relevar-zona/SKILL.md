@@ -37,7 +37,8 @@ Con el output decidís qué ejecutar:
 
 | Condición | Skill a usar |
 |---|---|
-| `parcelas == 0` y país BRA | `smartgis-fetcher` |
+| país BRA (Várzea Grande) | **`vg-pipeline-runner`** — UNA sola llamada corre SmartGIS→BCI→Parser→Agrupador y marca completed. Re-invocar mientras `parcial:true`. NO orquestar estos pasos a mano salvo que el runner falle |
+| `parcelas == 0` y país BRA (fallback manual) | `smartgis-fetcher` |
 | `parcelas == 0` y país AR y provincia Buenos Aires | `arba-carto-fetcher` (si JSESSIONID disponible) o `arba-cadastral-fetcher` |
 | `parcelas == 0` y país AR y provincia Salta | `salta-catastro-fetcher` |
 | `parcelas > 0` y Salta interior y `uso_principal` null | `salta-registro-fetcher` (marca rural/club de campo) |
@@ -104,6 +105,7 @@ python3 -m scrapitero.rpc.<nombre> <<< '<JSON>'
 ```
 
 Skills disponibles:
+  - `scrapitero.rpc.vg_pipeline_runner` → `{"region_id":"...","survey_id":"..."}` (**preferido para BRA/VG**: pipeline completo en una llamada; re-invocar mientras `parcial:true`)
   - `scrapitero.rpc.smartgis_fetcher` → `{"region_id":"...","survey_id":"..."}`
   - `scrapitero.rpc.varzea_bci_fetcher` → `{"region_id":"...","survey_id":"..."}`
 - `scrapitero.rpc.bci_parser` → `{"region_id":"...","survey_id":"..."}`

@@ -74,6 +74,14 @@ dentro del bbox — si `edificios_insertados > 0`, saltar directo al Paso 3.
 
 ## PASO 2 — Loop hasta cobertura aceptable
 
+> **Atajo Várzea Grande:** si la región es VG (o cualquier ciudad de ábaco), usar
+> **`vg-pipeline-runner`** en lugar del loop: una sola llamada corre
+> SmartGIS→BCI→Parser→Agrupador, registra los pasos y marca completed.
+> Re-invocar con el mismo input mientras devuelva `parcial:true` (no es error).
+> ```bash
+> python3 -m scrapitero.rpc.vg_pipeline_runner <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
+> ```
+
 Repetir hasta máximo 20 iteraciones:
 
 **a) Leer estado actual:**
