@@ -23,7 +23,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from loguru import logger
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -106,6 +106,10 @@ class BCIInput(BaseModel):
     # para que el corte nunca parezca un error ni pierda el resultado del paso. Los PDFs
     # ya bajados quedan en disco: re-ejecutar saltea los existentes y sigue con el resto.
     max_runtime_s: int = 840
+    # Parsear cada BCI apenas se descarga (reusa BCIParser por-PDF): el uso/UF/dirección
+    # llegan a la DB de a uno en vez de esperar a que estén TODOS los PDFs. El paso
+    # bci-parser posterior sigue siendo la red de seguridad (idempotente, re-parsea).
+    parse_inline: bool = True
 
 
 class BCIOutput(BaseModel):
@@ -114,6 +118,8 @@ class BCIOutput(BaseModel):
     pdfs_ya_existentes: int = 0
     pdfs_fallidos: int = 0
     parcelas_procesadas: int = 0
+    # Parcelas actualizadas en DB por el parseo inline (uso/UF/dirección del BCI).
+    parcelas_parseadas: int = 0
     # PDFs que quedaron sin intentar porque se agotó el presupuesto de tiempo (o stop).
     # parcial=True ⇒ re-ejecutar este agente continúa donde quedó (no es un error).
     pdfs_pendientes: int = 0
@@ -206,6 +212,46 @@ def _get_pending_inscripciones(region_id: str,
     return codigos
 
 
+def _make_inline_parser(region_id: str, pdf_dir: Path) -> Optional[Callable[[int], bool]]:
+    """Prepara el callback que parsea un BCI recién descargado y lo persiste en parcelas.
+
+    Reusa las funciones por-PDF de BCIParser (mismo parseo, mismo UPDATE idempotente).
+    Devuelve None si no se puede preparar (sin pdfplumber, sin parcelas) — en ese caso
+    la descarga sigue igual y el paso bci-parser posterior hace todo el trabajo.
+    """
+    try:
+        from scrapitero.agents.bci_parser import _parse_bci, _pdf_text, _update_parcela
+    except Exception as e:
+        logger.warning(f"BCI: parseo inline desactivado (no se pudo importar BCIParser): {e}")
+        return None
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT cca_code, parcela_id::text FROM parcelas
+            WHERE region_id = :rid AND cca_code IS NOT NULL
+              AND fuente_parcela IN ('smartgis_vg', 'catastro')
+        """), {"rid": region_id}).fetchall()
+    por_cca: dict[int, str] = {}
+    for cca, pid in rows:
+        try:
+            por_cca[int(str(cca).strip())] = pid
+        except (ValueError, AttributeError):
+            continue
+    if not por_cca:
+        return None
+
+    def parse_one(codigo: int) -> bool:
+        pid = por_cca.get(codigo)
+        if not pid:
+            return False
+        data = _parse_bci(_pdf_text(pdf_dir / f"reporte_{codigo}.pdf"))
+        _update_parcela(pid, data)
+        return True
+
+    return parse_one
+
+
 # ── Playwright download ────────────────────────────────────────────────────────
 
 async def _run_downloads(codigos: list[int], pdf_dir: str,
@@ -213,8 +259,13 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
                           pausa_cada_n: int, pausa_minutos: int,
                           headless: bool,
                           region_id: str = "",
-                          deadline: Optional[float] = None) -> tuple[int, int, int, int]:
-    """Descarga BCIs. Returns (descargados, ya_existentes, fallidos, pendientes).
+                          deadline: Optional[float] = None,
+                          parse_cb: Optional[Callable[[int], bool]] = None,
+                          ) -> tuple[int, int, int, int, int]:
+    """Descarga BCIs. Returns (descargados, ya_existentes, fallidos, pendientes, parseados).
+
+    `parse_cb(codigo)` (opcional) se invoca tras cada descarga exitosa para parsear y
+    persistir ese BCI al instante; si falla, la descarga continúa (bci-parser lo retoma).
 
     `deadline` es un instante de `time.monotonic()`: al alcanzarlo se frena con gracia
     (los códigos no intentados se devuelven como `pendientes`). También se frena si un
@@ -223,7 +274,7 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
     """
     os.makedirs(pdf_dir, exist_ok=True)
     descargados = ya_existentes = fallidos = 0
-    pendientes = 0
+    pendientes = parseados = 0
 
     def _sin_presupuesto(extra_s: float = 0.0) -> bool:
         return deadline is not None and time.monotonic() + extra_s >= deadline
@@ -381,6 +432,19 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
                     download_n += 1
                     logger.info(f"  ✓ reporte_{codigo}.pdf OK")
 
+                    # Parseo inline: el dato llega a la DB con el PDF recién bajado,
+                    # sin esperar a que estén todos. Un fallo acá NO corta la descarga.
+                    if parse_cb is not None:
+                        try:
+                            if parse_cb(codigo):
+                                parseados += 1
+                                logger.info(f"  ✓ BCI {codigo} parseado → parcela actualizada")
+                        except Exception as e:
+                            logger.warning(
+                                f"  Parse inline falló para {codigo} "
+                                f"(bci-parser lo retomará después): {e}"
+                            )
+
                     if pausa_cada_n > 0 and download_n % pausa_cada_n == 0:
                         logger.info(f"Pausa de {pausa_minutos}min tras {download_n} descargas…")
                         seguir = await _throttle(pausa_minutos * 60)
@@ -413,7 +477,7 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
         await context.close()
         await browser.close()
 
-    return descargados, ya_existentes, fallidos, pendientes
+    return descargados, ya_existentes, fallidos, pendientes, parseados
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -478,7 +542,9 @@ def run(input: BCIInput) -> BCIOutput:
     # (Hermes, ~900s) mate el proceso. Lo bajado queda en disco; re-ejecutar continúa.
     deadline = time.monotonic() + input.max_runtime_s if input.max_runtime_s > 0 else None
 
-    descargados, ya_en_run, fallidos, pendientes = asyncio.run(_run_downloads(
+    parse_cb = _make_inline_parser(input.region_id, pdf_dir) if input.parse_inline else None
+
+    descargados, ya_en_run, fallidos, pendientes, parseados = asyncio.run(_run_downloads(
         codigos_faltantes,
         str(pdf_dir),
         input.min_delay_secs,
@@ -488,16 +554,19 @@ def run(input: BCIInput) -> BCIOutput:
         input.headless,
         input.region_id,
         deadline,
+        parse_cb,
     ))
 
     total_existentes = ya_existentes_previo + ya_en_run
     parcial = pendientes > 0
 
+    linea_parse = (f"🔎 Parseados a DB: {parseados}\n" if parseados else "")
     if parcial:
         _telegram_notify(
             f"<b>VG BCI Fetcher — PARCIAL</b> — {input.region_id}\n"
             f"⏱ Frenado por presupuesto de tiempo ({input.max_runtime_s}s) — no es un error.\n"
             f"✅ Descargados: {descargados}\n"
+            f"{linea_parse}"
             f"📁 Ya existían: {total_existentes}\n"
             f"❌ Fallidos: {fallidos}\n"
             f"⏳ Pendientes: {pendientes} — re-ejecutar continúa donde quedó."
@@ -506,6 +575,7 @@ def run(input: BCIInput) -> BCIOutput:
         _telegram_notify(
             f"<b>VG BCI Fetcher — COMPLETO</b> — {input.region_id}\n"
             f"✅ Descargados: {descargados}\n"
+            f"{linea_parse}"
             f"📁 Ya existían: {total_existentes}\n"
             f"❌ Fallidos: {fallidos}"
         )
@@ -516,6 +586,7 @@ def run(input: BCIInput) -> BCIOutput:
         pdfs_ya_existentes=total_existentes,
         pdfs_fallidos=fallidos,
         parcelas_procesadas=len(codigos),
+        parcelas_parseadas=parseados,
         pdfs_pendientes=pendientes,
         parcial=parcial,
     )

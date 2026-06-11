@@ -53,6 +53,11 @@ Con el output decidís qué ejecutar:
 
 Podés ejecutar varios en secuencia o en paralelo según las dependencias.
 
+**BCI parsea inline:** `varzea-bci-fetcher` ya parsea cada PDF apenas lo descarga
+(`parcelas_parseadas` en su output) — el uso/UF/dirección llegan a la DB progresivamente.
+`bci-parser` igual se corre después como **red de seguridad** (idempotente): cubre PDFs
+con parseo inline fallido y PDFs preexistentes de corridas anteriores.
+
 **Salidas PARCIALES (`"parcial": true`) — NO son errores ni timeouts.**
 `smartgis-fetcher` y `varzea-bci-fetcher` tienen presupuesto de tiempo interno
 (`max_runtime_s`, default 840s): frenan con gracia antes de que el timeout del comando

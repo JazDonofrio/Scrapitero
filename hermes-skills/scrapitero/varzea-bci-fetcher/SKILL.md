@@ -48,11 +48,20 @@ env $(cat /opt/scrapitero/.env | xargs) python3 -m scrapitero.rpc.varzea_bci_fet
   "pdfs_ya_existentes": 210,
   "pdfs_fallidos": 3,
   "parcelas_procesadas": 260,
+  "parcelas_parseadas": 47,
   "pdfs_pendientes": 0,
   "parcial": false,
   "error": null
 }
 ```
+
+### Parseo inline (por PDF, default ON)
+Cada BCI se **parsea y persiste apenas se descarga** (`parse_inline: true` por default,
+reusa el parseo de `bci-parser` por PDF): uso/UF/dirección van llegando a la DB de a uno,
+sin esperar a que estén todos los PDFs. `parcelas_parseadas` cuenta cuántas se
+actualizaron. **Igual hay que correr `bci-parser` al final** como red de seguridad
+(es idempotente y barato): cubre PDFs cuyo parseo inline falló y los ya existentes
+de corridas previas sin parsear.
 
 ### Salida PARCIAL (presupuesto de tiempo) — NO es un error
 El agente tiene un presupuesto interno (`max_runtime_s`, default 840s) y **frena con
@@ -76,6 +85,7 @@ gracia antes** de que el timeout del comando (~900s) lo mate. Si devuelve
 | `pausa_cada_n` | int | 20 | Pausa larga cada N descargas |
 | `pausa_minutos` | int | 2 | Minutos de pausa larga |
 | `max_runtime_s` | int | 840 | Presupuesto de tiempo: frena con gracia antes del timeout externo (~900s) y devuelve `parcial:true` + `pdfs_pendientes`. 0 = sin límite |
+| `parse_inline` | bool | true | Parsea cada BCI apenas se descarga (uso/UF/dirección a DB de a uno). `false` = solo descargar |
 
 ## Notas
 - ⚠️ **`pdf_dir` debe ser ABSOLUTO y el MISMO que BCIParser.** El default es relativo solo
