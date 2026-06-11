@@ -416,6 +416,103 @@ const PIPELINE_BY_COUNTRY = {
   BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']],
 };
 
+/* ── Avance real del pipeline (barra de progreso) ─────────────────
+   Hermes registra los pasos con nombres libres ('descarga_parcelas_smartgis',
+   'varzea_bci_fetcher'…); acá se canonicalizan por token para medir
+   "pasos hechos / pasos del plan" sin depender del nombre exacto. */
+const STEP_MATCHERS = [
+  ['smartgis',           k => k.includes('smartgis')],
+  ['parser',             k => k.includes('parser')],            // antes que 'bci': bci_parser → parser
+  ['bci',                k => k.includes('bci')],
+  ['agrupador',          k => k.includes('agrupador') || k.includes('establecimiento')],
+  ['salta_catastro',     k => k.includes('catastro')],
+  ['salta_registro',     k => k.includes('registro') || k.includes('sigsa')],
+  ['salta_zonificacion', k => k.includes('zonific') || k.includes('cpua')],
+  ['salta_rentas',       k => k.includes('rentas')],
+  ['unidades',           k => k.includes('unidades') || k.includes('estimator')],
+  ['arba',               k => k.includes('arba')],
+  ['osm',                k => k.includes('osm')],
+  ['address',            k => k.includes('address') || k.includes('direccion')],
+  ['uso',                k => k.includes('uso')],
+  ['ibge_census',        k => k.includes('census') || k.includes('setores')],
+  ['ibge_logradouros',   k => k.includes('logradouro')],
+  ['places',             k => k.includes('places')],
+];
+// Plan esperado por flujo (CLAUDE.md): pasos que producen datos del relevamiento.
+const PLAN_STEPS = {
+  vg:    ['smartgis', 'bci', 'parser', 'agrupador'],
+  salta: ['salta_catastro', 'osm', 'address', 'salta_registro', 'salta_zonificacion', 'salta_rentas', 'unidades'],
+  pba:   ['arba', 'osm', 'address', 'uso'],
+};
+// Claves de control/reportes: no son pasos productivos, no cuentan para el avance.
+const PROGRESS_META = new Set(['completado', 'error', 'detenido', 'sin_pipeline',
+  'diagnostico_inicial', 'coverage_reporter', 'coverage', 'relevamiento_csv',
+  'relevamiento_reporter', 'relevamiento_pdf', 'csv', 'survey_step_update']);
+
+function canonStep(key) {
+  const k = normStep(key).replace(/_fallido$/, '');
+  for (const [canon, test] of STEP_MATCHERS) if (test(k)) return canon;
+  return k;
+}
+
+function pipelineProgress(s) {
+  const pl = s.pipeline || {};
+  const pasos = pl.pasos || {};
+  const running = s.status === 'running' || s.status === 'stopping';
+
+  // Estado por paso canónico: un éxito no se pisa con un reintento fallido.
+  const estado = new Map();
+  for (const [k, r] of Object.entries(pasos)) {
+    const c = canonStep(k);
+    if (PROGRESS_META.has(c)) continue;
+    if (estado.get(c) === 'ok') continue;
+    estado.set(c, (r && _stepFailed(r)) ? 'fail' : 'ok');
+  }
+
+  const canonKeys = [...estado.keys()];
+  let plan = [];
+  if (s.country_code === 'BRA') plan = PLAN_STEPS.vg;
+  else if (s.country_code === 'ARG') {
+    const esSalta = (s.region_id || '').toLowerCase().includes('salta')
+                 || canonKeys.some(c => c.startsWith('salta_'));
+    plan = esSalta ? PLAN_STEPS.salta : PLAN_STEPS.pba;
+  }
+
+  // Universo = plan del flujo ∪ pasos que realmente corrieron (la realidad manda).
+  const todos = new Set([...plan, ...canonKeys]);
+  const actual = canonStep(pl.paso_actual || '');
+  if (running && actual && !PROGRESS_META.has(actual)) todos.add(actual);
+
+  let total = todos.size, hechos = 0, fallidos = 0;
+  for (const c of todos) {
+    if (estado.get(c) === 'ok') hechos++;
+    else if (estado.get(c) === 'fail') fallidos++;
+  }
+  let unidades = hechos;
+  if (running && todos.has(actual) && estado.get(actual) !== 'ok') unidades += 0.5;
+
+  let pct = total > 0 ? Math.round(unidades / total * 100) : 0;
+  if (s.status === 'completed') { pct = 100; hechos = total; fallidos = 0; }
+  return { pct: Math.min(100, pct), hechos, fallidos, total };
+}
+
+function renderProgressRow(s) {
+  const prog = pipelineProgress(s);
+  if (prog.total === 0 && s.status !== 'completed') return '';
+  const color = s.status === 'failed' ? '#ef4444'
+              : prog.fallidos > 0     ? '#f59e0b'
+              : prog.pct >= 100       ? '#22c55e'
+              : '#38bdf8';
+  const detalle = `${prog.hechos} de ${prog.total} pasos`
+                + (prog.fallidos ? ` · ${prog.fallidos} con error` : '')
+                + ` (${prog.pct}%)`;
+  return `
+          <div class="progress-row">
+            <div class="progress-label"><span>Avance del relevamiento</span><span>${detalle}</span></div>
+            <div class="progress-bar-bg"><div class="progress-bar" style="width:${prog.pct}%;background:${color}"></div></div>
+          </div>`;
+}
+
 function renderPipelineSteps(pipeline, status, countryCode) {
   if (!pipeline || Object.keys(pipeline).length === 0) return '';
   const actual = pipeline.paso_actual || '';
@@ -538,7 +635,6 @@ async function eliminarSurvey(surveyId, nombre) {
 function renderCard(s) {
   const sid = s.survey_id;
   const mapId = 'map-' + sid.replace(/-/g,'');
-  const pct = s.total_parcelas > 0 ? Math.round(s.con_direccion / s.total_parcelas * 100) : 0;
   const areaKm = s.area_total_m2 ? (s.area_total_m2/1e6).toFixed(2)+' km²' : '—';
   const isRunning = s.status === 'running';
   const isStopping = s.status === 'stopping';
@@ -619,10 +715,7 @@ function renderCard(s) {
             <div class="detail-kpi"><div class="detail-kpi-val">${areaKm}</div><div class="detail-kpi-lbl">Área relevada</div></div>
           </div>
 
-          <div class="progress-row">
-            <div class="progress-label"><span>Con dirección</span><span>${fmt(s.con_direccion)} / ${fmt(s.total_parcelas)} (${pct}%)</span></div>
-            <div class="progress-bar-bg"><div class="progress-bar" style="width:${pct}%"></div></div>
-          </div>
+          ${renderProgressRow(s)}
 
           ${OPERADOR ? renderPipelineSteps(s.pipeline, s.status, s.country_code) : ''}
 
