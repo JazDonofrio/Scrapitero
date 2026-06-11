@@ -426,7 +426,11 @@ async def get_config(request: Request) -> dict:
 
 
 @app.get("/api/surveys")
-async def list_surveys() -> list[dict]:
+async def list_surveys(request: Request) -> list[dict]:
+    # El rol 'cliente' solo ve los surveys con visible_cliente=true (el operador los
+    # tilda en su lista). Con auth desactivada no hay rol: se devuelve todo y la SPA
+    # filtra según la vista.
+    solo_visibles = getattr(request.state, "role", None) == "cliente"
     engine = get_engine()
     with engine.connect() as conn:
         # NOTA: edificios y parcelas se agregan por SEPARADO (subconsultas) para evitar
@@ -454,7 +458,8 @@ async def list_surveys() -> list[dict]:
                 COALESCE(pa.con_direccion, 0)                                      AS con_direccion,
                 pa.area_total_m2                                                   AS area_total_m2,
                 COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion,
-                COALESCE(es.n_est, 0)                                              AS total_establecimientos
+                COALESCE(es.n_est, 0)                                              AS total_establecimientos,
+                s.visible_cliente
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
             LEFT JOIN (
@@ -490,8 +495,9 @@ async def list_surveys() -> list[dict]:
                 SELECT survey_id, COUNT(*) AS total_edificios
                 FROM edificios GROUP BY survey_id
             ) ed ON ed.survey_id = s.survey_id
+            WHERE (:solo_visibles = false OR s.visible_cliente)
             ORDER BY s.started_at DESC
-        """)).fetchall()
+        """), {"solo_visibles": solo_visibles}).fetchall()
 
     result = []
     for r in rows:
@@ -519,6 +525,7 @@ async def list_surveys() -> list[dict]:
             "area_total_m2": float(r[14]) if r[14] else None,
             "con_inscripcion": int(r[15] or 0),
             "total_establecimientos": int(r[16] or 0),
+            "visible_cliente": bool(r[17]),
         })
     return result
 
@@ -831,6 +838,21 @@ async def set_estado(survey_id: str, status: str = Form(...)) -> JSONResponse:
                          {"s": status, "sid": survey_id})
     logger.info(f"Estado de survey {survey_id} cambiado manualmente a '{status}'")
     return JSONResponse({"ok": True, "status": status})
+
+
+@app.post("/api/surveys/{survey_id}/visibilidad")
+async def set_visibilidad(survey_id: str, visible: bool = Form(...)) -> JSONResponse:
+    """Tilda/destilda el relevamiento en la vista CLIENTE (solo operador — POST gateado
+    por el middleware de auth). El rol cliente solo ve surveys con visible_cliente=true."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "UPDATE surveys SET visible_cliente=:v WHERE survey_id=:sid RETURNING 1"),
+            {"v": visible, "sid": survey_id}).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    logger.info(f"Survey {survey_id} {'visible' if visible else 'oculto'} para la vista cliente")
+    return JSONResponse({"ok": True, "visible_cliente": visible})
 
 
 @app.get("/api/surveys/{survey_id}/export/csv")

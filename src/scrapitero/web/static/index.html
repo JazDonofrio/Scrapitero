@@ -82,6 +82,11 @@
     .estado-select { font-size: .7rem; padding: .15rem .3rem; border-radius: 6px; border: 1px solid #d1d5db;
                      background: #fff; color: #374151; cursor: pointer; flex-shrink: 0; }
     .estado-select:hover { border-color: #9ca3af; }
+    /* Tilde "visible para el cliente" (solo operador) */
+    .vis-cliente { display: flex; align-items: center; gap: .3rem; font-size: .7rem; font-weight: 600;
+                   color: #6b7280; cursor: pointer; flex-shrink: 0; white-space: nowrap; user-select: none; }
+    .vis-cliente input { accent-color: #22c55e; cursor: pointer; margin: 0; }
+    .vis-cliente:hover { color: #374151; }
     .chevron { color: #d1d5db; font-size: 1rem; transition: transform .2s; flex-shrink: 0; cursor: pointer; }
     .chevron.open { transform: rotate(180deg); }
 
@@ -621,6 +626,26 @@ async function cambiarEstado(surveyId, status) {
   }
 }
 
+// Tilda/destilda el relevamiento en la vista cliente (solo operador).
+async function toggleVisibilidad(surveyId, checkbox) {
+  const visible = checkbox.checked;
+  checkbox.disabled = true;
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}/visibilidad`, {
+      method: 'POST',
+      body: new URLSearchParams({visible: String(visible)}),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(`Error: ${data.error || 'desconocido'}`); checkbox.checked = !visible; }
+    else if (surveyCache[surveyId]) surveyCache[surveyId].visible_cliente = visible;
+  } catch(err) {
+    alert(`Error de red: ${err.message}`);
+    checkbox.checked = !visible;
+  } finally {
+    checkbox.disabled = false;
+  }
+}
+
 async function eliminarSurvey(surveyId, nombre) {
   if (!confirm(`¿Eliminar el relevamiento "${nombre}"?\nSe borrarán todas las parcelas, edificios y datos asociados.\nEsta acción no se puede deshacer.`)) return;
   try {
@@ -692,6 +717,11 @@ function renderCard(s) {
         ${OPERADOR ? btnAccion : ''}
         ${OPERADOR ? btnEliminar : ''}
         <span class="status-pill s-${s.status}">${statusLabel(s.status)}</span>
+        ${OPERADOR ? `<label class="vis-cliente op-only" onclick="event.stopPropagation()"
+          title="Tildado = este relevamiento se muestra en la vista cliente (raíz). Destildalo para ocultárselo al cliente.">
+          <input type="checkbox" ${s.visible_cliente !== false ? 'checked' : ''}
+            onchange="toggleVisibilidad('${sid}', this)"> 👁 Cliente
+        </label>` : ''}
         ${OPERADOR ? `<select class="estado-select op-only" title="Cambiar el estado manualmente (no corre ni detiene el pipeline)"
           onchange="cambiarEstado('${sid}', this.value)" onclick="event.stopPropagation()">
           ${['running','stopping','stopped','partial','completed','failed'].map(st =>
@@ -1256,7 +1286,10 @@ async function loadSurveys() {
   if (document.fullscreenElement) { scheduleRefresh(5000); return; }
   document.getElementById('status-dot').className = 'loading';
   try {
-    const list = await fetch('/api/surveys').then(r => r.json());
+    let list = await fetch('/api/surveys').then(r => r.json());
+    // Vista cliente: solo los relevamientos tildados por el operador. Con auth
+    // activada el server ya filtra por rol; esto cubre el modo abierto (sin auth).
+    if (CLIENTE) list = list.filter(s => s.visible_cliente !== false);
     document.getElementById('status-dot').className = '';
     const container = document.getElementById('list-container');
     const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));

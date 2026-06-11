@@ -264,6 +264,12 @@ Al tocar mensajería, aplicar el cambio en `CLAUDE.md` **y** en las skills `rele
 
 Dashboard para gestionar relevamientos. Corre en `http://localhost:8765`.
 
+**Visibilidad en vista cliente (tilde "👁 Cliente"):** cada tarjeta de la lista del
+operador tiene un tilde que controla si ese relevamiento se muestra en la vista
+cliente (raíz `/`). `surveys.visible_cliente` (migración 014, default `true`); el rol
+cliente solo recibe los visibles (filtro server-side en `GET /api/surveys`; toggle:
+`POST /api/surveys/{id}/visibilidad`, solo operador).
+
 **Habitantes por manzana (opción adicional):** en el detalle de cada relevamiento hay una
 sección aparte **"👥 Habitantes por manzana"** con un botón **"▶ Estimar habitantes"** que
 corre `DasymetricPopulation` in-process y muestra una tabla por manzana (Habitantes ≈ ·

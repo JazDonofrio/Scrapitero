@@ -50,6 +50,10 @@ class Survey(Base):
     llm_tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     llm_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    # Visible en la vista CLIENTE (raíz "/"); el operador lo controla con un tilde
+    # en su lista (migración 014).
+    visible_cliente: Mapped[bool] = mapped_column(Boolean, default=True,
+                                                  server_default="true")
 
     region: Mapped["Region"] = relationship("Region")
     parcelas: Mapped[list["Parcela"]] = relationship("Parcela", back_populates="survey")
