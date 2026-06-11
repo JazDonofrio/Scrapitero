@@ -43,16 +43,24 @@ def _build_csv(report: RelevamientoReport, csv_path: Path) -> None:
         writer.writerow(["Área total relevada (m²)", f"{report.area_total_m2:,.1f}" if report.area_total_m2 else "-"])
         writer.writerow([])
 
-        # Tabla de parcelas
-        writer.writerow(["N°", "Dirección", "Área m²", "UF", "Nomenclatura Catastral", "Partida Inmobiliaria"])
-        for i, p in enumerate(report.parcelas, 1):
+        # Tabla de parcelas — la dirección completa (calle+número+complemento) es el ID
+        writer.writerow([
+            "Dirección", "Uso", "UF Vivienda", "UF Comercio",
+            "Total UF", "Área m²", "Nomenclatura Catastral",
+            "Partida Inmobiliaria", "Inscripción", "Fuente",
+        ])
+        for p in report.parcelas:
             writer.writerow([
-                i,
                 p.direccion or "-",
-                f"{p.area_m2:.1f}" if p.area_m2 else "-",
+                p.uso_principal or "-",
+                p.uf_vivienda if p.uf_vivienda is not None else "-",
+                p.uf_comercio if p.uf_comercio is not None else "-",
                 p.unidades_funcionales if p.unidades_funcionales is not None else "-",
+                f"{p.area_m2:.1f}" if p.area_m2 else "-",
                 p.nomenclatura_catastral or "-",
                 p.partida_inmobiliaria or "-",
+                p.cca_code or "-",
+                p.fuente or "-",
             ])
 
 

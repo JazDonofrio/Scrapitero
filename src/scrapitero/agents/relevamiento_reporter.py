@@ -22,6 +22,10 @@ class ParcelaResumen(BaseModel):
     direccion: str
     calle: Optional[str]
     numero: Optional[str]
+    complemento: Optional[str] = None
+    uso_principal: Optional[str] = None
+    uf_vivienda: Optional[int] = None
+    uf_comercio: Optional[int] = None
     area_m2: Optional[float]
     unidades_funcionales: Optional[int]
     nomenclatura_catastral: Optional[str]
@@ -78,7 +82,8 @@ def run(input: ReporterInput) -> RelevamientoReport:
         rows = conn.execute(text("""
             SELECT
                 parcela_id::text,
-                calle, numero,
+                calle, numero, complemento,
+                uso_principal, uf_vivienda, uf_comercio,
                 area_m2_terreno,
                 unidades_funcionales_estimadas,
                 nomenclatura_catastral,
@@ -103,10 +108,14 @@ def run(input: ReporterInput) -> RelevamientoReport:
     area_total = 0.0
 
     for r in rows:
-        pid, calle, numero, area, uf, nomencla, partida, cca, fuente, est_id = r
+        (pid, calle, numero, complemento, uso, uf_viv, uf_com,
+         area, uf, nomencla, partida, cca, fuente, est_id) = r
         calle = calle or ""
         numero = numero or ""
-        direccion = f"{calle} {numero}".strip() if calle else "(sin dirección)"
+        complemento = complemento or ""
+        direccion = " ".join(s for s in (calle, numero, complemento) if s).strip()
+        if not direccion:
+            direccion = "(sin dirección)"
         # Las parcelas miembro de un establecimiento no suman UF por separado;
         # el establecimiento aporta su UF una sola vez (est_uf, abajo).
         if not est_id:
@@ -118,6 +127,10 @@ def run(input: ReporterInput) -> RelevamientoReport:
             direccion=direccion,
             calle=calle or None,
             numero=numero or None,
+            complemento=complemento or None,
+            uso_principal=uso,
+            uf_vivienda=uf_viv,
+            uf_comercio=uf_com,
             area_m2=area,
             unidades_funcionales=uf,
             nomenclatura_catastral=nomencla,

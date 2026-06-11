@@ -906,9 +906,10 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         w.writerow([f"Relevamiento: {region_nombre}", f"Survey: {survey_id}", f"Fecha: {fecha}"])
         w.writerow([])
         w.writerow([
-            "Inscripción", "Setor-Quadra-Lote", "Calle", "Número",
-            "Complemento", "Bairro", "Municipio", "CEP",
-            "Uso", "Uso Fuente", "UF Vivienda", "UF Comercio", "Total UF", "UF Fuente",
+            "Dirección", "Uso", "UF Vivienda", "UF Comercio",
+            "Total UF", "UF Fuente", "Uso Fuente",
+            "Bairro", "Municipio", "CEP",
+            "Inscripción", "Setor-Quadra-Lote",
             "Área Terreno m²", "Área Construida m²", "Pisos",
             "Matrícula", "Fuente", "Fuente dirección",
             "Lat", "Lng", "Comercios (Google)",
@@ -918,12 +919,13 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Establecimiento (tipo)", "Establecimiento (nombre)",
         ])
         for r in rows:
+            direccion = " ".join(s for s in (r[2], r[3], r[4]) if s).strip()
             w.writerow([
-                r[0] or "", r[1] or "",
-                r[2] or "", r[3] or "", r[4] or "",
+                direccion or "(sin dirección)",
+                r[8] or "", r[9] or 0, r[10] or 0,
+                r[11] or 0, r[20] or "", r[21] or "",
                 r[5] or "", r[6] or "", r[7] or "",
-                r[8] or "", r[21] or "", r[9] or 0, r[10] or 0,
-                r[11] or 0, r[20] or "",
+                r[0] or "", r[1] or "",
                 f"{r[12]:.2f}" if r[12] else "",
                 f"{r[13]:.2f}" if r[13] else "",
                 r[14] or "",

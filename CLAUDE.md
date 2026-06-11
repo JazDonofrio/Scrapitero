@@ -269,6 +269,11 @@ rango · UF Viv · UF Com · Parcelas) con total y **fecha de estimación**. Es 
 al relevamiento (menos exacta), claramente marcada como tal. Endpoints:
 `POST /api/surveys/{id}/dasimetrico` (correr) y `GET /api/surveys/{id}/manzanas` (leer).
 
+**Formato del CSV (web y RelevamientoCSV):** la primera columna es la **Dirección
+completa** (calle + número + complemento) y actúa como ID de la fila; siguen **Uso**,
+**UF Vivienda** y **UF Comercio**, y de ahí en adelante el resto de la información de la
+parcela. Sin dirección → `(sin dirección)`.
+
 **UF exacta vs estimada:** la web siempre muestra la cantidad de UF de vivienda y comercio.
 Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca con badge
 `est.` y prefijo `≈` en los KPIs, y el popup de cada parcela detalla el origen
