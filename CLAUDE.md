@@ -39,7 +39,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
 | SmartGISFetcher | `smartgis_fetcher` | **VG: SIEMPRE primero.** Parcelas Várzea Grande: inscripción+geometría desde SmartGIS |
-| VGBCIFetcher | `varzea_bci_fetcher` | VG: Después de SmartGIS. Descarga PDFs BCI (reutiliza existentes en `pdf_downloads/`) |
+| VGBCIFetcher | `varzea_bci_fetcher` | VG: Después de SmartGIS. Descarga PDFs BCI (reutiliza existentes en `pdf_downloads/`). Presupuesto de tiempo (`max_runtime_s`=840): frena con gracia antes del timeout de Hermes (~900s) y devuelve `parcial:true` + `pdfs_pendientes` — re-ejecutar continúa donde quedó (NO es error) |
 | BCIParser | `bci_parser` | VG: Después de VGBCIFetcher. Extrae uso/UF/dirección de PDFs sin LLM |
 | ONRLotesFetcher | `onr_lotes_fetcher` | Lotes urbanos Brasil (ciudades con cobertura ONR) |
 | ONRSigefFetcher | `onr_sigef_fetcher` | Predios rurales Brasil (SIGEF/INCRA, todo el país) |

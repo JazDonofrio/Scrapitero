@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -100,6 +101,11 @@ class BCIInput(BaseModel):
     pausa_cada_n: int = 20         # Pausa larga cada N descargas
     pausa_minutos: int = 2
     headless: bool = True
+    # Presupuesto de tiempo interno (mismo patrón que SmartGISFetcher). El comando que
+    # invoca al agente (Hermes) lo mata a los ~900s; frenamos con gracia ANTES de eso
+    # para que el corte nunca parezca un error ni pierda el resultado del paso. Los PDFs
+    # ya bajados quedan en disco: re-ejecutar saltea los existentes y sigue con el resto.
+    max_runtime_s: int = 840
 
 
 class BCIOutput(BaseModel):
@@ -108,6 +114,10 @@ class BCIOutput(BaseModel):
     pdfs_ya_existentes: int = 0
     pdfs_fallidos: int = 0
     parcelas_procesadas: int = 0
+    # PDFs que quedaron sin intentar porque se agotó el presupuesto de tiempo (o stop).
+    # parcial=True ⇒ re-ejecutar este agente continúa donde quedó (no es un error).
+    pdfs_pendientes: int = 0
+    parcial: bool = False
     error: Optional[str] = None
 
 
@@ -202,10 +212,28 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
                           min_delay: float, max_delay: float,
                           pausa_cada_n: int, pausa_minutos: int,
                           headless: bool,
-                          region_id: str = "") -> tuple[int, int, int]:
-    """Descarga BCIs. Returns (descargados, ya_existentes, fallidos)."""
+                          region_id: str = "",
+                          deadline: Optional[float] = None) -> tuple[int, int, int, int]:
+    """Descarga BCIs. Returns (descargados, ya_existentes, fallidos, pendientes).
+
+    `deadline` es un instante de `time.monotonic()`: al alcanzarlo se frena con gracia
+    (los códigos no intentados se devuelven como `pendientes`). También se frena si un
+    sleep de throttling no entra en el presupuesto — mejor cortar acá que dormir hasta
+    que el timeout externo (Hermes, 900s) mate el proceso a mitad de una descarga.
+    """
     os.makedirs(pdf_dir, exist_ok=True)
     descargados = ya_existentes = fallidos = 0
+    pendientes = 0
+
+    def _sin_presupuesto(extra_s: float = 0.0) -> bool:
+        return deadline is not None and time.monotonic() + extra_s >= deadline
+
+    async def _throttle(seconds: float) -> bool:
+        """Duerme `seconds`; devuelve False si el presupuesto no alcanza (hay que frenar)."""
+        if _sin_presupuesto(seconds):
+            return False
+        await asyncio.sleep(seconds)
+        return True
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -279,11 +307,21 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
 
         download_n = 0
 
-        for codigo in codigos:
+        for i, codigo in enumerate(codigos):
             # Chequear stop entre descargas
             if any(r in _stop_regions for r in (region_id, "")):
                 _stop_regions.discard(region_id)
+                pendientes = len(codigos) - i
                 logger.info(f"BCI: stop solicitado, deteniendo ({descargados} desc hasta ahora)")
+                break
+
+            # Presupuesto de tiempo agotado → frenar con gracia ANTES del timeout externo.
+            if _sin_presupuesto():
+                pendientes = len(codigos) - i
+                logger.info(
+                    f"BCI: presupuesto de tiempo agotado — frenando con gracia "
+                    f"({descargados} descargados, {pendientes} pendientes; re-ejecutar continúa)"
+                )
                 break
 
             dest = Path(pdf_dir) / f"reporte_{codigo}.pdf"
@@ -297,6 +335,7 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
             current["ok"] = False
             formatted = f"{codigo:015d}"
             logger.info(f"BCI {codigo}: iniciando ({formatted})")
+            seguir = True
 
             try:
                 await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
@@ -344,27 +383,37 @@ async def _run_downloads(codigos: list[int], pdf_dir: str,
 
                     if pausa_cada_n > 0 and download_n % pausa_cada_n == 0:
                         logger.info(f"Pausa de {pausa_minutos}min tras {download_n} descargas…")
-                        await asyncio.sleep(pausa_minutos * 60)
+                        seguir = await _throttle(pausa_minutos * 60)
                     else:
-                        await asyncio.sleep(random.uniform(min_delay, max_delay))
+                        seguir = await _throttle(random.uniform(min_delay, max_delay))
                 else:
                     fallidos += 1
                     logger.warning(f"  ✗ Sin PDF para {codigo} — revisar logs [resp] arriba")
-                    await asyncio.sleep(random.uniform(min_delay, max_delay))
+                    seguir = await _throttle(random.uniform(min_delay, max_delay))
 
             except PlaywrightTimeoutError:
                 fallidos += 1
                 logger.warning(f"  Timeout en {codigo}")
-                await asyncio.sleep(random.uniform(20, 45))
+                seguir = await _throttle(random.uniform(20, 45))
             except Exception as e:
                 fallidos += 1
                 logger.error(f"  Error en {codigo}: {e}")
-                await asyncio.sleep(random.uniform(10, 30))
+                seguir = await _throttle(random.uniform(10, 30))
+
+            # El throttle no entró en el presupuesto → frenar acá, con el resultado
+            # de este código ya contabilizado, antes de que el timeout externo nos mate.
+            if not seguir:
+                pendientes = len(codigos) - (i + 1)
+                logger.info(
+                    f"BCI: presupuesto de tiempo agotado en el throttling — frenando "
+                    f"({descargados} descargados, {pendientes} pendientes; re-ejecutar continúa)"
+                )
+                break
 
         await context.close()
         await browser.close()
 
-    return descargados, ya_existentes, fallidos
+    return descargados, ya_existentes, fallidos, pendientes
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -425,7 +474,11 @@ def run(input: BCIInput) -> BCIOutput:
             parcelas_procesadas=len(codigos),
         )
 
-    descargados, ya_en_run, fallidos = asyncio.run(_run_downloads(
+    # Presupuesto de tiempo: frenar con gracia antes de que el comando que nos invoca
+    # (Hermes, ~900s) mate el proceso. Lo bajado queda en disco; re-ejecutar continúa.
+    deadline = time.monotonic() + input.max_runtime_s if input.max_runtime_s > 0 else None
+
+    descargados, ya_en_run, fallidos, pendientes = asyncio.run(_run_downloads(
         codigos_faltantes,
         str(pdf_dir),
         input.min_delay_secs,
@@ -434,16 +487,28 @@ def run(input: BCIInput) -> BCIOutput:
         input.pausa_minutos,
         input.headless,
         input.region_id,
+        deadline,
     ))
 
     total_existentes = ya_existentes_previo + ya_en_run
+    parcial = pendientes > 0
 
-    _telegram_notify(
-        f"<b>VG BCI Fetcher — COMPLETO</b> — {input.region_id}\n"
-        f"✅ Descargados: {descargados}\n"
-        f"📁 Ya existían: {total_existentes}\n"
-        f"❌ Fallidos: {fallidos}"
-    )
+    if parcial:
+        _telegram_notify(
+            f"<b>VG BCI Fetcher — PARCIAL</b> — {input.region_id}\n"
+            f"⏱ Frenado por presupuesto de tiempo ({input.max_runtime_s}s) — no es un error.\n"
+            f"✅ Descargados: {descargados}\n"
+            f"📁 Ya existían: {total_existentes}\n"
+            f"❌ Fallidos: {fallidos}\n"
+            f"⏳ Pendientes: {pendientes} — re-ejecutar continúa donde quedó."
+        )
+    else:
+        _telegram_notify(
+            f"<b>VG BCI Fetcher — COMPLETO</b> — {input.region_id}\n"
+            f"✅ Descargados: {descargados}\n"
+            f"📁 Ya existían: {total_existentes}\n"
+            f"❌ Fallidos: {fallidos}"
+        )
 
     return BCIOutput(
         ok=True,
@@ -451,4 +516,6 @@ def run(input: BCIInput) -> BCIOutput:
         pdfs_ya_existentes=total_existentes,
         pdfs_fallidos=fallidos,
         parcelas_procesadas=len(codigos),
+        pdfs_pendientes=pendientes,
+        parcial=parcial,
     )

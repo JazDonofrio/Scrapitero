@@ -119,6 +119,11 @@ Reportar por Telegram:
 ## Notas
 - **Nunca instalar paquetes.** Usar siempre `python3` con `.hermes-packages` en PYTHONPATH.
 - Siempre enviar aviso parcial por Telegram cada vez que termina un agente.
+- **Salidas PARCIALES (`"parcial": true`) NO son errores ni timeouts:** `smartgis-fetcher`
+  y `varzea-bci-fetcher` frenan con gracia antes del timeout del comando (~900s) con
+  `ok: true` y lo avanzado persistido (BCI además devuelve `pdfs_pendientes`).
+  Re-ejecutar el mismo agente con el mismo input hasta `parcial: false`; recién entonces
+  pasar al paso siguiente. No avisar "reintentando por timeout": es funcionamiento esperado.
 - Si cualquier agente falla por login/sesión → consultar al usuario por Telegram antes de continuar.
 - Máximo 20 steps por corrida. Si se alcanza el límite: exportar lo disponible y notificar.
 

@@ -48,9 +48,21 @@ env $(cat /opt/scrapitero/.env | xargs) python3 -m scrapitero.rpc.varzea_bci_fet
   "pdfs_ya_existentes": 210,
   "pdfs_fallidos": 3,
   "parcelas_procesadas": 260,
+  "pdfs_pendientes": 0,
+  "parcial": false,
   "error": null
 }
 ```
+
+### Salida PARCIAL (presupuesto de tiempo) — NO es un error
+El agente tiene un presupuesto interno (`max_runtime_s`, default 840s) y **frena con
+gracia antes** de que el timeout del comando (~900s) lo mate. Si devuelve
+`"parcial": true` con `pdfs_pendientes > 0`:
+1. **No tratarlo como fallo ni como timeout** — `ok` es `true` y lo bajado quedó en disco.
+2. Registrar el paso con `survey-step-update` (resultado tal cual).
+3. **Re-ejecutar este mismo agente** con el mismo input: saltea los PDFs existentes y
+   continúa donde quedó. Repetir hasta que `parcial` sea `false`.
+4. Recién entonces seguir con `bci-parser`.
 
 ## Parámetros
 | Campo | Tipo | Default | Descripción |
@@ -63,6 +75,7 @@ env $(cat /opt/scrapitero/.env | xargs) python3 -m scrapitero.rpc.varzea_bci_fet
 | `max_delay_secs` | float | 6.0 | Delay máximo entre descargas |
 | `pausa_cada_n` | int | 20 | Pausa larga cada N descargas |
 | `pausa_minutos` | int | 2 | Minutos de pausa larga |
+| `max_runtime_s` | int | 840 | Presupuesto de tiempo: frena con gracia antes del timeout externo (~900s) y devuelve `parcial:true` + `pdfs_pendientes`. 0 = sin límite |
 
 ## Notas
 - ⚠️ **`pdf_dir` debe ser ABSOLUTO y el MISMO que BCIParser.** El default es relativo solo

@@ -53,6 +53,17 @@ Con el output decidís qué ejecutar:
 
 Podés ejecutar varios en secuencia o en paralelo según las dependencias.
 
+**Salidas PARCIALES (`"parcial": true`) — NO son errores ni timeouts.**
+`smartgis-fetcher` y `varzea-bci-fetcher` tienen presupuesto de tiempo interno
+(`max_runtime_s`, default 840s): frenan con gracia antes de que el timeout del comando
+(~900s) los mate, devolviendo `ok: true` con lo avanzado persistido (`parcial: true`,
+y en BCI además `pdfs_pendientes`). Ante un parcial:
+1. Registrar el paso con `survey-step-update` (resultado tal cual).
+2. **Re-ejecutar el mismo agente con el mismo input** — acumula/continúa donde quedó.
+3. Repetir hasta `parcial: false`; recién entonces avanzar al paso siguiente.
+No avisar "Reintentando por timeout" por Telegram: es el funcionamiento esperado
+(avisar avance parcial está bien: "BCI: X descargados, faltan Y, sigo en otra pasada").
+
 ---
 
 ## Paralelismo
