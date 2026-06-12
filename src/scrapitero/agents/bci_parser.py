@@ -8,6 +8,7 @@ Extrae sin LLM usando regex sobre el texto del PDF:
   - Unidades funcionales: cantidad, uso (RESIDENCIAL / COMERCIAL), tipología
   - Área construída total y área do terreno (de fato)
   - Dirección (logradouro, número, complemento, CEP, bairro)
+  - Código municipal del logradouro → codigo_logradouro (migración 016, CSV operadora)
   - Nomenclatura catastral completa (setor/quadra/lote/unidade)
   - Número de matrícula del registro de imóveis
   - Valor venal (terreno / construção / imóvel) y alíquota (IPTU) — migración 012
@@ -90,6 +91,7 @@ def _parse_bci(text: str) -> dict:
         "complemento": None,
         "barrio": None,
         "codigo_postal": None,
+        "codigo_logradouro": None,   # código municipal del logradouro (migración 016)
         "nomenclatura_catastral": None,
         "partida_inmobiliaria": None,
         "tipologia": None,
@@ -162,8 +164,14 @@ def _parse_bci(text: str) -> dict:
                 logradouro_raw = before[:num_m.start()].strip()
             else:
                 logradouro_raw = before
-            # Quitar el código de logradouro al inicio (número)
-            r["calle"] = re.sub(r'^\d+\s+', '', logradouro_raw).strip() or None
+            # Separar el código de logradouro al inicio (identificador municipal,
+            # se exporta en el CSV de operadora) del nombre de la calle
+            cod_m = re.match(r'^(\d+)\s+(.*)$', logradouro_raw)
+            if cod_m:
+                r["codigo_logradouro"] = cod_m.group(1)
+                r["calle"] = cod_m.group(2).strip() or None
+            else:
+                r["calle"] = logradouro_raw.strip() or None
 
     # ── Bairro ─────────────────────────────────────────────────────────────────
     m = re.search(r'\n\s*\d+\s*-\s*(?:BAIRRO\s+)?(.+?)\s*\nQUADRA', text, re.I)
@@ -326,6 +334,7 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                 complemento                 = COALESCE(:comp, complemento),
                 barrio                      = COALESCE(:barrio, barrio),
                 codigo_postal               = COALESCE(:cep, codigo_postal),
+                codigo_logradouro           = COALESCE(:cod_logr, codigo_logradouro),
                 nomenclatura_catastral      = COALESCE(:nomen, nomenclatura_catastral),
                 partida_inmobiliaria        = COALESCE(:mat, partida_inmobiliaria),
                 valor_venal_terreno         = COALESCE(:vv_terr, valor_venal_terreno),
@@ -354,6 +363,7 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
             "comp": d["complemento"],
             "barrio": d["barrio"],
             "cep": d["codigo_postal"],
+            "cod_logr": d["codigo_logradouro"],
             "nomen": d["nomenclatura_catastral"],
             "mat": d["partida_inmobiliaria"],
             "vv_terr": d["valor_venal_terreno"],

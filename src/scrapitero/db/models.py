@@ -114,6 +114,7 @@ class Parcela(Base):
     direccion_source: Mapped[Optional[str]] = mapped_column(String(30))
     # "catastro" | "osm" | "nominatim" | "google_geocode"
     direccion_confidence: Mapped[Optional[float]] = mapped_column(Float)
+    codigo_logradouro: Mapped[Optional[str]] = mapped_column(String(20))  # migración 016 (BCI)
 
     # Habitantes (siempre estimados)
     habitantes_estimados: Mapped[Optional[float]] = mapped_column(Float)

@@ -23,6 +23,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from loguru import logger
 from sqlalchemy import text
 
+from scrapitero.agents.logradouro_br import descomponer_logradouro
 from scrapitero.db.engine import get_engine
 
 app = FastAPI(title="Scrapitero")
@@ -1121,6 +1122,85 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[27] or "",
                 r[28] or "", r[29] or "", r[30] or "",
                 r[31] or "", r[32] or "",
+            ])
+        yield buf.getvalue()
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# Constantes del CSV de operadora (layout de base de logradouros, solo Brasil).
+# COD_OPERADORA fijo según definición del cliente; BASE/COD_LOG_PARA/abreviados
+# quedan en blanco por ahora; CEP_UNICO siempre 'N'.
+CSV_OPERADORA_COD = "858"
+
+
+@app.get("/api/surveys/{survey_id}/export/csv-operadora")
+async def export_csv_operadora(survey_id: str) -> StreamingResponse:
+    """CSV con el layout de base de logradouros de operadora (solo Brasil).
+
+    Una fila por parcela con dirección. Descompone `calle` en tipo/título/
+    preposição/nome oficial (heurística por diccionario — logradouro_br.py).
+    CODIGO_LOGRADOURO sale de parcelas.codigo_logradouro (BCI, migración 016);
+    vacío para parcelas parseadas antes de esa migración.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text("""
+            SELECT s.region_id, r.name, s.started_at, r.country_code
+            FROM surveys s JOIN regions r ON s.region_id = r.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).fetchone()
+        if not meta:
+            return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+        if (meta[3] or "").upper() != "BRA":
+            return JSONResponse(
+                {"error": "El CSV de operadora es solo para relevamientos en Brasil"},
+                status_code=400)
+
+        rows = conn.execute(text("""
+            SELECT municipio, estado_provincia, barrio, calle,
+                   codigo_postal, numero, codigo_logradouro
+            FROM parcelas
+            WHERE survey_id = :sid AND calle IS NOT NULL
+            ORDER BY calle, numero NULLS LAST
+        """), {"sid": survey_id}).fetchall()
+
+    fecha = meta[2].strftime("%Y-%m-%d") if meta[2] else ""
+    filename = f"operadora_{meta[0]}_{fecha}.csv".replace(" ", "_")
+
+    def _gen():
+        buf = io.StringIO()
+        buf.write("﻿")   # BOM para Excel
+        w = csv.writer(buf, delimiter=";")
+        w.writerow([
+            "COD_OPERADORA", "NOME_LOCALIDADE", "UF", "BAIRRO", "BAIRRO_ABREVIADO",
+            "NOME_TIPO_LOGR", "NOME_TITULO", "PREPOSICAO", "NOME_OFICIAL_LOGR",
+            "NOME_LOGR_ABREV", "CEP", "NUMERO", "CEP_UNICO", "CODIGO_LOGRADOURO",
+            "COD_LOG_PARA", "BASE",
+        ])
+        for municipio, uf, barrio, calle, cep, numero, cod_logr in rows:
+            d = descomponer_logradouro(calle)
+            w.writerow([
+                CSV_OPERADORA_COD,
+                (municipio or "").upper(),
+                (uf or "").upper(),
+                (barrio or "").upper(),
+                "",                       # BAIRRO_ABREVIADO — en blanco por ahora
+                d["tipo"],
+                d["titulo"],
+                d["preposicao"],
+                d["nome"],
+                "",                       # NOME_LOGR_ABREV — en blanco por ahora
+                cep or "",
+                numero or "",
+                "N",                      # CEP_UNICO — siempre N
+                cod_logr or "",
+                "",                       # COD_LOG_PARA — en blanco
+                "",                       # BASE — en blanco (sin valor definido)
             ])
         yield buf.getvalue()
 

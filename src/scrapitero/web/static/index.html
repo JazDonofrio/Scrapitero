@@ -796,6 +796,9 @@ function renderCard(s) {
             <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">↻ Actualizar</button>
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/csv" download
                style="text-decoration:none" title="Descargar CSV con todas las parcelas">⬇ CSV</a>
+            ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
+               style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
+               title="Descargar CSV con layout de base de logradouros de operadora (solo Brasil)">⬇ CSV Operadora</a>` : ''}
           </div>
         </div>
       </div>

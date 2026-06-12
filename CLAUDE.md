@@ -297,6 +297,18 @@ completa** (calle + número + complemento) y actúa como ID de la fila; siguen *
 **UF Vivienda** y **UF Comercio**, y de ahí en adelante el resto de la información de la
 parcela. Sin dirección → `(sin dirección)`.
 
+**CSV Operadora (solo Brasil):** botón verde Brasil "⬇ CSV Operadora" en el detalle de
+cada relevamiento (vistas cliente y operador), visible solo si `country_code='BRA'`.
+Endpoint `GET /api/surveys/{id}/export/csv-operadora`. Layout de base de logradouros de
+operadora: `COD_OPERADORA` (=858 fijo), `NOME_LOCALIDADE`, `UF`, `BAIRRO`,
+`BAIRRO_ABREVIADO` (vacío), `NOME_TIPO_LOGR`/`NOME_TITULO`/`PREPOSICAO`/
+`NOME_OFICIAL_LOGR` (descomposición heurística de `calle` —
+`agents/logradouro_br.py`), `NOME_LOGR_ABREV` (vacío), `CEP`, `NUMERO`,
+`CEP_UNICO` (='N' fijo), `CODIGO_LOGRADOURO` (código municipal del logradouro que
+BCIParser extrae del PDF — migración 016; vacío para parcelas parseadas antes),
+`COD_LOG_PARA` (vacío), `BASE` (vacío, sin valor definido aún). Una fila por parcela
+con `calle`; las sin calle se excluyen.
+
 **UF exacta vs estimada:** la web siempre muestra la cantidad de UF de vivienda y comercio.
 Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca con badge
 `est.` y prefijo `≈` en los KPIs, y el popup de cada parcela detalla el origen
