@@ -306,8 +306,10 @@ operadora: `COD_OPERADORA` (=858 fijo), `NOME_LOCALIDADE`, `UF`, `BAIRRO`,
 `agents/logradouro_br.py`), `NOME_LOGR_ABREV` (vacío), `CEP`, `NUMERO`,
 `CEP_UNICO` (='N' fijo), `CODIGO_LOGRADOURO` (código municipal del logradouro que
 BCIParser extrae del PDF — migración 016; vacío para parcelas parseadas antes),
-`COD_LOG_PARA` (vacío), `BASE` (vacío, sin valor definido aún). Una fila por parcela
-con `calle`; las sin calle se excluyen.
+`COD_LOG_PARA` (vacío), `BASE` (vacío, sin valor definido aún). **Una fila por
+dirección completa única** (calle+número+CEP+bairro deduplicados — varias parcelas con
+la misma dirección colapsan en un registro), ordenado por calle y número; las parcelas
+sin calle se excluyen.
 
 **UF exacta vs estimada:** la web siempre muestra la cantidad de UF de vivienda y comercio.
 Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca con badge

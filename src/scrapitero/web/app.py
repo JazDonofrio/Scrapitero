@@ -1161,12 +1161,17 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 {"error": "El CSV de operadora es solo para relevamientos en Brasil"},
                 status_code=400)
 
+        # Una fila por DIRECCIÓN COMPLETA única (no por parcela): varias parcelas
+        # con la misma calle+número+CEP+bairro colapsan en un solo registro.
         rows = conn.execute(text("""
             SELECT municipio, estado_provincia, barrio, calle,
-                   codigo_postal, numero, codigo_logradouro
+                   codigo_postal, numero, MAX(codigo_logradouro) AS codigo_logradouro
             FROM parcelas
             WHERE survey_id = :sid AND calle IS NOT NULL
-            ORDER BY calle, numero NULLS LAST
+            GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, numero
+            ORDER BY calle,
+                     NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
+                       NULLS LAST
         """), {"sid": survey_id}).fetchall()
 
     fecha = meta[2].strftime("%Y-%m-%d") if meta[2] else ""
