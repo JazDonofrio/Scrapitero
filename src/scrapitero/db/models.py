@@ -54,6 +54,10 @@ class Survey(Base):
     # en su lista (migración 014).
     visible_cliente: Mapped[bool] = mapped_column(Boolean, default=True,
                                                   server_default="true")
+    # Los relevamientos NUNCA se borran: el anterior siempre queda disponible como
+    # término de comparación. Archivado = oculto de la lista, comparable (migración 017).
+    archivado: Mapped[bool] = mapped_column(Boolean, default=False,
+                                            server_default="false")
 
     region: Mapped["Region"] = relationship("Region")
     parcelas: Mapped[list["Parcela"]] = relationship("Parcela", back_populates="survey")
@@ -319,6 +323,52 @@ class Establecimiento(Base):
     fuente: Mapped[Optional[str]] = mapped_column(String(30), default="agrupador_propietario")
     geometry: Mapped[Optional[object]] = mapped_column(Geometry("MULTIPOLYGON", srid=4326))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ── Baselines (relevamiento anterior importado — comparativa por dirección) ───
+
+class Baseline(Base):
+    """Relevamiento ANTERIOR del cliente, importado de un CSV externo (migración 017).
+
+    Sirve como término de comparación contra un survey actual de la misma región
+    (ComparativaReporter). `fecha_relevamiento` es la del relevamiento original,
+    cargada por el usuario al importar."""
+    __tablename__ = "baselines"
+
+    baseline_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                                   default=uuid.uuid4)
+    region_id: Mapped[str] = mapped_column(String(50), ForeignKey("regions.region_id"))
+    nombre: Mapped[str] = mapped_column(String(200))
+    fecha_relevamiento: Mapped[Optional[date]] = mapped_column(Date)
+    archivo_nombre: Mapped[Optional[str]] = mapped_column(String(255))
+    mapeo: Mapped[Optional[str]] = mapped_column(Text)        # JSON: columna CSV → campo
+    n_registros: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    direcciones: Mapped[list["BaselineDireccion"]] = relationship(
+        "BaselineDireccion", back_populates="baseline", cascade="all, delete-orphan")
+
+
+class BaselineDireccion(Base):
+    """Una fila por dirección del relevamiento anterior, con la clave normalizada
+    (`calle_norm` + `numero_norm`, agents/direccion_norm.py) usada para el matching."""
+    __tablename__ = "baseline_direcciones"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True,
+                                          default=uuid.uuid4)
+    baseline_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("baselines.baseline_id", ondelete="CASCADE"))
+    direccion_raw: Mapped[str] = mapped_column(Text)
+    calle: Mapped[Optional[str]] = mapped_column(Text)
+    numero: Mapped[Optional[str]] = mapped_column(String(30))
+    calle_norm: Mapped[Optional[str]] = mapped_column(Text)
+    numero_norm: Mapped[Optional[str]] = mapped_column(String(30))
+    uso: Mapped[Optional[str]] = mapped_column(String(30))
+    uf_vivienda: Mapped[Optional[int]] = mapped_column(Integer)
+    uf_comercio: Mapped[Optional[int]] = mapped_column(Integer)
+    extras: Mapped[Optional[str]] = mapped_column(Text)       # JSON: columnas no mapeadas
+
+    baseline: Mapped["Baseline"] = relationship("Baseline", back_populates="direcciones")
 
 
 # ── Orchestrator Log ──────────────────────────────────────────────────────────

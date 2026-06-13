@@ -464,7 +464,8 @@ async def list_surveys(request: Request) -> list[dict]:
                 pa.area_total_m2                                                   AS area_total_m2,
                 COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion,
                 COALESCE(es.n_est, 0)                                              AS total_establecimientos,
-                s.visible_cliente
+                s.visible_cliente,
+                s.archivado
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
             LEFT JOIN (
@@ -500,7 +501,7 @@ async def list_surveys(request: Request) -> list[dict]:
                 SELECT survey_id, COUNT(*) AS total_edificios
                 FROM edificios GROUP BY survey_id
             ) ed ON ed.survey_id = s.survey_id
-            WHERE (:solo_visibles = false OR s.visible_cliente)
+            WHERE (:solo_visibles = false OR (s.visible_cliente AND NOT s.archivado))
             ORDER BY s.started_at DESC
         """), {"solo_visibles": solo_visibles}).fetchall()
 
@@ -531,6 +532,7 @@ async def list_surveys(request: Request) -> list[dict]:
             "con_inscripcion": int(r[15] or 0),
             "total_establecimientos": int(r[16] or 0),
             "visible_cliente": bool(r[17]),
+            "archivado": bool(r[18]),
         })
     return result
 
@@ -1040,7 +1042,11 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 municipio,
                 codigo_postal,
                 uso_principal,
-                uf_vivienda,
+                -- UF vivienda EFECTIVA (mismo criterio que la web y la comparativa):
+                -- sin desglose viv/com, las unidades estimadas cuentan como vivienda.
+                CASE WHEN uf_vivienda IS NULL AND uf_comercio IS NULL
+                     THEN COALESCE(unidades_funcionales_estimadas, 0)
+                     ELSE COALESCE(uf_vivienda, 0) END AS uf_vivienda,
                 uf_comercio,
                 unidades_funcionales_estimadas,
                 area_m2_terreno,
@@ -1216,8 +1222,376 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
     )
 
 
+# ── Baselines (relevamiento anterior del cliente) + Comparativa ────────────────
+# El cliente sube su relevamiento anterior como CSV externo → queda como baseline
+# de la región (tablas `baselines`/`baseline_direcciones`, migración 017) y se puede
+# comparar por dirección contra cualquier survey actual. Entre dos surveys propios
+# la comparación va por cca_code (exacta). Ver agents/comparativa_reporter.py.
+
+_BASELINE_MAX_BYTES = 10 * 1024 * 1024     # 10 MB de CSV es muchísimo más que un relevamiento
+
+# Autodetección de mapeo: campo → palabras que puede traer el header (sin acentos, lower)
+_BASELINE_CAMPOS = {
+    "direccion":   ["direccion", "endereco", "domicilio", "address"],
+    "calle":       ["calle", "rua", "logradouro", "street"],
+    "numero":      ["numero", "nro", "altura", "num"],
+    "uso":         ["uso", "tipologia", "tipo", "categoria"],
+    "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
+    "uf_comercio": ["uf comercio", "uf com", "comercios", "comercio", "unidades comercio"],
+}
+
+
+def _norm_header(h: str) -> str:
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFKD", str(h or ""))
+                if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s.lower().strip())
+
+
+def _leer_csv_baseline(data: bytes, filename: str) -> tuple[list[str], list[list[str]], str]:
+    """Parsea el CSV externo: devuelve (headers, filas, separador). Tolera BOM,
+    latin-1, separador ';' o ',' y filas de título antes del header (como las que
+    genera nuestro propio export)."""
+    if re.search(r"\.xlsx?$", filename or "", re.IGNORECASE):
+        raise ValueError(
+            "Excel no soportado en el servidor: abrí el archivo y guardalo como CSV "
+            "(Archivo → Guardar como → CSV) y volvé a subirlo.")
+    if len(data) > _BASELINE_MAX_BYTES:
+        raise ValueError(f"Archivo demasiado grande (máx. {_BASELINE_MAX_BYTES // 1024 // 1024} MB)")
+    try:
+        texto = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = data.decode("latin-1")
+
+    primera = texto.splitlines()[0] if texto.splitlines() else ""
+    sep = ";" if primera.count(";") >= primera.count(",") else ","
+    filas = [f for f in csv.reader(io.StringIO(texto), delimiter=sep)]
+
+    # Header = primera de las filas iniciales con el ANCHO MÁXIMO de celdas no
+    # vacías (las filas de título/meta que algunos exports traen antes — incluido
+    # el nuestro — son más angostas que la de encabezados).
+    no_vacias = lambda f: [c for c in f if str(c).strip()]
+    anchos = [len(no_vacias(f)) for f in filas[:20]]
+    max_ancho = max(anchos, default=0)
+    if max_ancho < 2:
+        raise ValueError("No se encontró una fila de encabezados en el CSV "
+                         "(se esperan al menos 2 columnas)")
+    header_idx = anchos.index(max_ancho)
+    headers = [str(c).strip() for c in filas[header_idx]]
+    datos = [f for f in filas[header_idx + 1:] if no_vacias(f)]
+    if not datos:
+        raise ValueError("El CSV no tiene filas de datos después del encabezado")
+    return headers, datos, sep
+
+
+def _autodetectar_mapeo(headers: list[str]) -> dict:
+    """Sugiere {campo: header} buscando palabras clave en los headers normalizados."""
+    norm = {h: _norm_header(h) for h in headers if str(h).strip()}
+    mapeo: dict[str, str] = {}
+    for campo, claves in _BASELINE_CAMPOS.items():
+        for h, hn in norm.items():
+            if h in mapeo.values():
+                continue
+            if any(hn == k or hn.startswith(k) or k in hn for k in claves):
+                mapeo[campo] = h
+                break
+    # Si hay 'calle' explícita, la dirección completa es redundante (y viceversa)
+    if "calle" in mapeo and mapeo.get("direccion") == mapeo["calle"]:
+        del mapeo["direccion"]
+    return mapeo
+
+
+@app.post("/api/surveys/{survey_id}/baselines/preview")
+async def baseline_preview(survey_id: str, archivo: UploadFile = File(...)) -> JSONResponse:
+    """Paso 1 del import: lee headers + muestra, sugiere el mapeo de columnas.
+    No persiste nada (el archivo se vuelve a subir en el paso 2)."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    data = await archivo.read()
+    try:
+        headers, datos, sep = _leer_csv_baseline(data, archivo.filename or "")
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "headers": [h for h in headers if str(h).strip()],
+        "muestra": datos[:5],
+        "headers_completos": headers,     # con posiciones, para alinear la muestra
+        "mapeo_sugerido": _autodetectar_mapeo(headers),
+        "separador": sep,
+        "total_filas": len(datos),
+    })
+
+
+@app.post("/api/surveys/{survey_id}/baselines")
+async def baseline_import(
+    survey_id: str,
+    archivo: UploadFile = File(...),
+    nombre: str = Form(...),
+    fecha: str = Form(""),               # fecha del relevamiento ORIGINAL (YYYY-MM-DD)
+    mapeo: str = Form(...),              # JSON {campo: header} confirmado por el usuario
+) -> JSONResponse:
+    """Paso 2 del import: persiste el baseline con una fila normalizada por dirección."""
+    from scrapitero.agents.direccion_norm import (normalizar_calle, normalizar_numero,
+                                                  separar_numero)
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    try:
+        mapeo_d = json.loads(mapeo)
+        assert isinstance(mapeo_d, dict)
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Mapeo inválido (se espera JSON {campo: columna})"},
+                            status_code=400)
+    if not (mapeo_d.get("direccion") or mapeo_d.get("calle")):
+        return JSONResponse({"ok": False, "error":
+                             "El mapeo necesita al menos la columna de dirección (o la de calle)"},
+                            status_code=400)
+
+    data = await archivo.read()
+    try:
+        headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    idx = {h: i for i, h in enumerate(headers)}
+    faltantes = [h for h in mapeo_d.values() if h and h not in idx]
+    if faltantes:
+        return JSONResponse({"ok": False, "error": f"Columnas del mapeo que no están en el CSV: {faltantes}"},
+                            status_code=400)
+
+    def celda(fila: list, campo: str) -> str:
+        h = mapeo_d.get(campo)
+        if not h:
+            return ""
+        i = idx[h]
+        return str(fila[i]).strip() if i < len(fila) else ""
+
+    def entero(s: str):
+        m = re.search(r"-?\d+", s.replace(".", "").replace(",", "."))
+        return int(m.group(0)) if m else None
+
+    mapeadas = {h for h in mapeo_d.values() if h}
+    baseline_id = str(uuid.uuid4())
+    registros = []
+    sin_direccion = 0
+    for fila in datos:
+        if mapeo_d.get("calle"):
+            calle, numero = celda(fila, "calle"), celda(fila, "numero")
+            raw = " ".join(x for x in (calle, numero) if x)
+        else:
+            raw = celda(fila, "direccion")
+            calle, numero = separar_numero(raw)
+            if mapeo_d.get("numero") and celda(fila, "numero"):
+                numero = celda(fila, "numero")
+        calle_norm = normalizar_calle(calle)
+        if not calle_norm:
+            sin_direccion += 1
+            continue
+        extras = {h: str(fila[i]).strip() for h, i in idx.items()
+                  if h and h not in mapeadas and i < len(fila) and str(fila[i]).strip()}
+        registros.append({
+            "id": str(uuid.uuid4()), "bid": baseline_id,
+            "raw": raw, "calle": calle, "numero": numero[:30] or None,
+            "calle_norm": calle_norm,
+            "numero_norm": normalizar_numero(numero),
+            "uso": (celda(fila, "uso").lower()[:30] or None),
+            "uf_v": entero(celda(fila, "uf_vivienda")),
+            "uf_c": entero(celda(fila, "uf_comercio")),
+            "extras": json.dumps(extras, ensure_ascii=False)[:4000] if extras else None,
+        })
+
+    if not registros:
+        return JSONResponse({"ok": False, "error":
+                             "Ninguna fila tiene dirección legible con el mapeo elegido — "
+                             "revisá qué columna es la dirección"}, status_code=400)
+
+    fecha_val = None
+    if fecha.strip():
+        try:
+            fecha_val = datetime.strptime(fecha.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return JSONResponse({"ok": False, "error": f"Fecha inválida: {fecha!r} (formato YYYY-MM-DD)"},
+                                status_code=400)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO baselines (baseline_id, region_id, nombre, fecha_relevamiento,
+                                   archivo_nombre, mapeo, n_registros)
+            VALUES (:bid, :rid, :nombre, :fecha, :archivo, :mapeo, :n)
+        """), {"bid": baseline_id, "rid": region_id, "nombre": nombre.strip(),
+               "fecha": fecha_val, "archivo": (archivo.filename or "")[:255],
+               "mapeo": json.dumps(mapeo_d, ensure_ascii=False), "n": len(registros)})
+        conn.execute(text("""
+            INSERT INTO baseline_direcciones
+                   (id, baseline_id, direccion_raw, calle, numero, calle_norm,
+                    numero_norm, uso, uf_vivienda, uf_comercio, extras)
+            VALUES (:id, :bid, :raw, :calle, :numero, :calle_norm, :numero_norm,
+                    :uso, :uf_v, :uf_c, :extras)
+        """), registros)
+
+    logger.info(f"Baseline «{nombre}» importado para {region_id}: "
+                f"{len(registros)} direcciones ({sin_direccion} filas sin dirección descartadas)")
+    return JSONResponse({"ok": True, "baseline_id": baseline_id,
+                         "importadas": len(registros), "sin_direccion": sin_direccion})
+
+
+@app.delete("/api/baselines/{baseline_id}")
+async def eliminar_baseline(baseline_id: str) -> JSONResponse:
+    """Elimina un baseline importado (re-importable desde el CSV; no es un survey).
+    Solo operador (middleware)."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "DELETE FROM baselines WHERE baseline_id = :bid RETURNING nombre"),
+            {"bid": baseline_id}).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
+    logger.info(f"Baseline «{row[0]}» eliminado")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/surveys/{survey_id}/comparativa/opciones")
+async def comparativa_opciones(survey_id: str) -> JSONResponse:
+    """Términos disponibles para 'Comparar con…': surveys anteriores de la misma
+    región (incl. archivados, con parcelas) + baselines importados."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+    engine = get_engine()
+    with engine.connect() as conn:
+        surveys = conn.execute(text("""
+            SELECT s.survey_id::text, COALESCE(s.finished_at, s.started_at) AS fecha,
+                   s.status, s.archivado, COUNT(p.parcela_id) AS n
+            FROM surveys s LEFT JOIN parcelas p ON p.survey_id = s.survey_id
+            WHERE s.region_id = :rid AND s.survey_id::text <> :sid
+            GROUP BY s.survey_id HAVING COUNT(p.parcela_id) > 0
+            ORDER BY COALESCE(s.finished_at, s.started_at) DESC
+        """), {"rid": region_id, "sid": survey_id}).fetchall()
+        baselines = conn.execute(text("""
+            SELECT baseline_id::text, nombre, fecha_relevamiento, n_registros
+            FROM baselines WHERE region_id = :rid ORDER BY created_at DESC
+        """), {"rid": region_id}).fetchall()
+    return JSONResponse({"ok": True, "surveys": [{
+        "survey_id": r[0],
+        "fecha": r[1].date().isoformat() if r[1] else None,
+        "status": r[2], "archivado": bool(r[3]), "n_parcelas": int(r[4]),
+    } for r in surveys], "baselines": [{
+        "baseline_id": r[0], "nombre": r[1],
+        "fecha": r[2].isoformat() if r[2] else None,
+        "n_registros": int(r[3]),
+    } for r in baselines]})
+
+
+def _run_comparativa(survey_id: str, contra_tipo: str, contra_id: str) -> dict:
+    from scrapitero.agents.comparativa_reporter import ComparativaInput
+    from scrapitero.agents.comparativa_reporter import run as run_comp
+    kwargs = ({"contra_survey_id": contra_id} if contra_tipo == "survey"
+              else {"contra_baseline_id": contra_id})
+    return run_comp(ComparativaInput(survey_id=survey_id, **kwargs)).model_dump()
+
+
+@app.get("/api/surveys/{survey_id}/comparativa")
+async def comparativa(survey_id: str,
+                      contra_tipo: str = Query(...),
+                      contra_id: str = Query(...)) -> JSONResponse:
+    """Compara el survey contra un término anterior (survey o baseline).
+    Calculado on-the-fly; no persiste nada."""
+    if contra_tipo not in ("survey", "baseline"):
+        return JSONResponse({"ok": False, "error": f"contra_tipo inválido: {contra_tipo!r}"},
+                            status_code=400)
+    data = await asyncio.to_thread(_run_comparativa, survey_id, contra_tipo, contra_id)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.get("/api/surveys/{survey_id}/export/csv-comparativa")
+async def export_csv_comparativa(survey_id: str,
+                                 contra_tipo: str = Query(...),
+                                 contra_id: str = Query(...)):
+    """CSV de la comparativa: una fila por dirección con estado y antes/ahora/Δ."""
+    if contra_tipo not in ("survey", "baseline"):
+        return JSONResponse({"ok": False, "error": f"contra_tipo inválido: {contra_tipo!r}"},
+                            status_code=400)
+    data = await asyncio.to_thread(_run_comparativa, survey_id, contra_tipo, contra_id)
+    if not data.get("ok"):
+        return JSONResponse(data, status_code=422)
+
+    k = data["kpis"]
+    estados = {"nueva": "Nueva", "cambio": "Cambió", "igual": "Sin cambio",
+               "desaparecida": "Desaparecida"}
+
+    def _gen():
+        buf = io.StringIO()
+        buf.write("﻿")   # BOM para Excel
+        w = csv.writer(buf, delimiter=";")
+        w.writerow([f"Comparativa del relevamiento {survey_id}",
+                    f"Contra: {data['contra_nombre']} ({data['contra_tipo']})",
+                    f"Fecha del anterior: {data['contra_fecha'] or '—'}"])
+        w.writerow([f"ΔUF Vivienda: {k['uf_vivienda']['delta']:+}",
+                    f"ΔUF Comercio: {k['uf_comercio']['delta']:+}",
+                    f"Nuevas: {k['por_estado']['nueva']}",
+                    f"Cambiaron: {k['por_estado']['cambio']}",
+                    f"Desaparecidas: {k['por_estado']['desaparecida']}",
+                    f"Sin cambio: {k['por_estado']['igual']}"])
+        w.writerow([])
+        w.writerow(["Estado", "Dirección", "Dirección anterior", "Match",
+                    "Uso antes", "Uso ahora",
+                    "UF Viv antes", "UF Viv ahora", "Δ UF Viv",
+                    "UF Com antes", "UF Com ahora", "Δ UF Com"])
+        for f in data["filas"]:
+            w.writerow([
+                estados.get(f["estado"], f["estado"]),
+                f["direccion"], f["direccion_antes"] or "",
+                f["match"] or "",
+                f["uso_antes"] or "", f["uso_ahora"] or "",
+                f["uf_viv_antes"], f["uf_viv_ahora"],
+                f["uf_viv_ahora"] - f["uf_viv_antes"],
+                f["uf_com_antes"], f["uf_com_ahora"],
+                f["uf_com_ahora"] - f["uf_com_antes"],
+            ])
+        yield buf.getvalue()
+
+    filename = f"comparativa_{survey_id[:8]}_{data['contra_fecha'] or 'anterior'}.csv"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Archivado de surveys ───────────────────────────────────────────────────────
+# Los relevamientos NUNCA se borran por defecto: el anterior siempre queda
+# disponible como término de comparación (requisito del cliente). El botón de la
+# web archiva; el DELETE físico queda solo para limpieza expresa de surveys YA
+# archivados (doble paso).
+
+@app.post("/api/surveys/{survey_id}/archivar")
+async def archivar_survey(survey_id: str, archivado: bool = Form(...)) -> JSONResponse:
+    """Archiva (o restaura) un relevamiento. Archivado = oculto de la lista pero
+    intacto en la DB y disponible en el selector 'Comparar con…'. Solo operador."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    if archivado and row[2] in ("running", "stopping"):
+        return JSONResponse({"ok": False, "error": "Detené el pipeline antes de archivar"},
+                            status_code=409)
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE surveys SET archivado=:a WHERE survey_id=:sid"),
+                     {"a": archivado, "sid": survey_id})
+    logger.info(f"Survey {survey_id} {'archivado' if archivado else 'restaurado'}")
+    return JSONResponse({"ok": True, "archivado": archivado})
+
+
 @app.delete("/api/surveys/{survey_id}")
 async def eliminar_survey(survey_id: str) -> JSONResponse:
+    """Borrado FÍSICO — solo permitido sobre surveys ya archivados (el camino normal
+    es archivar; esto queda para limpiar pruebas/basura de forma expresa)."""
     row = _get_survey_row(survey_id)
     if not row:
         return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
@@ -1229,6 +1603,16 @@ async def eliminar_survey(survey_id: str) -> JSONResponse:
         )
 
     engine = get_engine()
+    with engine.connect() as conn:
+        archivado = conn.execute(text(
+            "SELECT archivado FROM surveys WHERE survey_id=:sid"),
+            {"sid": survey_id}).scalar()
+    if not archivado:
+        return JSONResponse(
+            {"ok": False, "error": "Los relevamientos no se eliminan: archivalo. "
+             "(El borrado definitivo solo se permite sobre archivados.)"},
+            status_code=409,
+        )
     try:
         with engine.begin() as conn:
             conn.execute(text("""
@@ -1239,7 +1623,10 @@ async def eliminar_survey(survey_id: str) -> JSONResponse:
             """), {"sid": survey_id})
             conn.execute(text("DELETE FROM edificios WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM comentarios_cliente WHERE survey_id = :sid"), {"sid": survey_id})
+            conn.execute(text("DELETE FROM comercios WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM parcelas  WHERE survey_id = :sid"), {"sid": survey_id})
+            conn.execute(text("DELETE FROM manzanas_habitantes WHERE survey_id = :sid"), {"sid": survey_id})
+            conn.execute(text("DELETE FROM establecimientos WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM orchestrator_log WHERE survey_id = :sid"), {"sid": survey_id})
             conn.execute(text("DELETE FROM surveys WHERE survey_id = :sid"), {"sid": survey_id})
     except Exception as e:

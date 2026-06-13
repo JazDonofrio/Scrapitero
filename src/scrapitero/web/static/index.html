@@ -211,6 +211,31 @@
     .dasi-err { color: #991b1b; font-size: .75rem; background: #fef2f2; border: 1px solid #fecaca;
       border-radius: 6px; padding: .5rem .7rem; white-space: pre-wrap; }
 
+    /* Comparativa con relevamiento anterior */
+    .comp-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed #e5e7eb; }
+    .comp-controls { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .6rem; }
+    .comp-controls select { flex: 1; min-width: 220px; padding: .4rem .5rem;
+      border: 1px solid #d1d5db; border-radius: 7px; font-size: .8rem; background: #fff; }
+    .comp-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin-top: .7rem; }
+    .comp-kpi { background: #f8fafc; border-radius: 8px; padding: .55rem .7rem; text-align: center; }
+    .comp-kpi-val { font-size: 1.15rem; font-weight: 800; color: #0f172a; }
+    .comp-kpi-sub { font-size: .66rem; color: #9ca3af; }
+    .comp-kpi-lbl { font-size: .62rem; color: #6b7280; text-transform: uppercase; letter-spacing: .4px; margin-top: .15rem; }
+    .comp-meta { font-size: .7rem; color: #9ca3af; margin-top: .45rem; }
+    .comp-badge { padding: .05rem .45rem; border-radius: 8px; font-size: .64rem; font-weight: 700; white-space: nowrap; }
+    .comp-import { background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px;
+      padding: .7rem .8rem; margin-top: .6rem; font-size: .78rem; width: 100%; }
+    .comp-import label { display: block; font-size: .66rem; font-weight: 700; color: #6b7280;
+      margin: .45rem 0 .15rem; text-transform: uppercase; letter-spacing: .4px; }
+    .comp-import input, .comp-import select { width: 100%; padding: .35rem .45rem;
+      border: 1px solid #d1d5db; border-radius: 6px; font-size: .78rem; background: #fff; }
+    .comp-map-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .35rem .6rem; }
+
+    /* Archivados */
+    .arch-toggle { cursor: pointer; user-select: none; margin-top: 1.6rem; }
+    .arch-toggle:hover { color: #6b7280; }
+    #archivados-list .survey-card { opacity: .82; }
+
     .detail-footer { margin-top: 1rem; display: flex; gap: .5rem; flex-wrap: wrap; }
 
     /* En vista CLIENTE (raíz) se ocultan los elementos solo-operador. */
@@ -666,14 +691,294 @@ async function toggleVisibilidad(surveyId, checkbox) {
   }
 }
 
+// Archivar (camino normal): el relevamiento sale de la lista pero queda guardado
+// y disponible como término de comparación. Restaurable.
+async function archivarSurvey(surveyId, nombre, archivar) {
+  if (archivar && !confirm(`¿Archivar "${nombre}"?\nSale de la lista pero queda guardado y disponible en "Comparar con…". Lo podés restaurar cuando quieras.`)) return;
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}/archivar`, {
+      method: 'POST', body: new URLSearchParams({archivado: String(archivar)}),
+    });
+    const data = await res.json();
+    if (data.ok) { loadSurveys(); }
+    else { alert(`Error: ${data.error||'desconocido'}`); }
+  } catch(err) { alert(`Error de red: ${err.message}`); }
+}
+
+// Borrado DEFINITIVO — solo disponible sobre archivados (doble confirmación).
 async function eliminarSurvey(surveyId, nombre) {
-  if (!confirm(`¿Eliminar el relevamiento "${nombre}"?\nSe borrarán todas las parcelas, edificios y datos asociados.\nEsta acción no se puede deshacer.`)) return;
+  if (!confirm(`¿Eliminar DEFINITIVAMENTE el relevamiento "${nombre}"?\nSe borran todas las parcelas, edificios y datos asociados, y deja de estar disponible para comparativas.\nEsta acción no se puede deshacer.`)) return;
+  if (!confirm(`Última confirmación: borrar "${nombre}" para siempre.`)) return;
   try {
     const res = await fetch(`/api/surveys/${surveyId}`, {method:'DELETE'});
     const data = await res.json();
     if (data.ok) { loadSurveys(); }
     else { alert(`Error: ${data.error||'desconocido'}`); }
   } catch(err) { alert(`Error de red: ${err.message}`); }
+}
+
+/* ── Comparativa con relevamiento anterior ─────────────────────── */
+const compState = {};          // sid → {opciones}
+const comparativaEstado = {};  // sid → {parcela_id: estado} cuando está pintada en el mapa
+const ESTADO_COLOR = { nueva:'#22c55e', cambio:'#f59e0b', igual:'#94a3b8',
+                       desaparecida:'#ef4444', 'no comparable':'#e2e8f0' };
+const ESTADO_LABEL = { nueva:'Nueva', cambio:'Cambió', igual:'Sin cambio',
+                       desaparecida:'Desaparecida', 'no comparable':'No comparable' };
+
+async function loadCompOpciones(sid, preselect) {
+  const el = document.getElementById('comp-controls-' + sid);
+  if (!el) return;
+  try {
+    const res = await fetch(`/api/surveys/${sid}/comparativa/opciones`);
+    const data = await res.json();
+    if (!data.ok) { el.innerHTML = `<span class="alog-empty">⚠ ${escHtml(data.error||'error')}</span>`; return; }
+    compState[sid] = {opciones: data};
+    renderCompControls(sid, preselect);
+  } catch(err) {
+    el.innerHTML = `<span class="alog-empty">No se pudieron cargar las opciones (${escHtml(err.message)})</span>`;
+  }
+}
+
+function renderCompControls(sid, preselect) {
+  const el = document.getElementById('comp-controls-' + sid);
+  const st = compState[sid];
+  if (!el || !st) return;
+  const {surveys, baselines} = st.opciones;
+  const grupos = [];
+  if (surveys.length) grupos.push('<optgroup label="Relevamientos anteriores de esta región">'
+    + surveys.map(o => `<option value="survey:${o.survey_id}">📅 ${o.fecha || 'sin fecha'} — ${fmt(o.n_parcelas)} parcelas (${statusLabel(o.status)}${o.archivado ? ', archivado' : ''})</option>`).join('')
+    + '</optgroup>');
+  if (baselines.length) grupos.push('<optgroup label="Importados (CSV del relevamiento anterior)">'
+    + baselines.map(o => `<option value="baseline:${o.baseline_id}">📄 ${escHtml(o.nombre)} — ${o.fecha || 'sin fecha'} (${fmt(o.n_registros)} direcciones)</option>`).join('')
+    + '</optgroup>');
+
+  if (!grupos.length && !OPERADOR) {
+    el.innerHTML = '<span class="alog-empty">Todavía no hay un relevamiento anterior para comparar.</span>';
+    return;
+  }
+  el.innerHTML = `
+    <select id="comp-sel-${sid}">
+      <option value="">— Elegí el relevamiento anterior —</option>
+      ${grupos.join('')}
+    </select>
+    <button class="btn btn-sm btn-primary" style="padding:.35rem .8rem;font-size:.75rem"
+      onclick="runComparativa('${sid}', this)">Comparar</button>
+    ${OPERADOR ? `<button class="btn btn-sm btn-outline" style="padding:.35rem .7rem;font-size:.75rem"
+      onclick="toggleImportBaseline('${sid}')" title="Subir el CSV del relevamiento anterior del cliente">⬆ Importar CSV anterior</button>
+    <button class="btn btn-sm btn-outline" style="padding:.35rem .5rem;font-size:.75rem"
+      onclick="eliminarBaseline('${sid}')" title="Eliminar el baseline importado seleccionado en el selector">🗑</button>` : ''}`;
+  if (preselect) {
+    const sel = document.getElementById('comp-sel-' + sid);
+    if (sel) sel.value = preselect;
+  }
+}
+
+const dsign = v => (v > 0 ? '+' : '') + fmt(v);
+
+async function runComparativa(sid, btn) {
+  const sel = document.getElementById('comp-sel-' + sid);
+  const v = sel && sel.value;
+  if (!v) { alert('Elegí el relevamiento anterior en el selector.'); return; }
+  const [tipo, id] = v.split(':');
+  const cont = document.getElementById('comp-result-' + sid);
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '⟳ Comparando…';
+  cont.innerHTML = '<span class="alog-empty">Cruzando direcciones…</span>';
+  try {
+    const res = await fetch(`/api/surveys/${sid}/comparativa?contra_tipo=${tipo}&contra_id=${id}`);
+    const d = await res.json();
+    if (!d.ok) {
+      cont.innerHTML = `<div class="dasi-err">⚠️ No se pudo comparar.\n${escHtml(d.error||'error desconocido')}</div>`;
+      return;
+    }
+    comparativaEstado[sid] = d.parcelas_estado || {};
+    if (maps[sid]) loadParcelasMap(sid);   // re-pintar el mapa por estado
+    renderCompResult(sid, d);
+  } catch(err) {
+    cont.innerHTML = `<div class="dasi-err">Error de red: ${escHtml(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+function renderCompResult(sid, d) {
+  const cont = document.getElementById('comp-result-' + sid);
+  if (!cont) return;
+  const k = d.kpis, pe = k.por_estado, hab = k.habitantes;
+  const csvUrl = `/api/surveys/${sid}/export/csv-comparativa?contra_tipo=${d.contra_tipo}&contra_id=${d.contra_id}`;
+  const colorDelta = v => v > 0 ? '#16a34a' : v < 0 ? '#dc2626' : '#6b7280';
+
+  const filas = d.filas.filter(f => f.estado !== 'igual').slice(0, 300);
+  const filasHtml = filas.map(f => `
+    <tr>
+      <td><span class="comp-badge" style="background:${ESTADO_COLOR[f.estado]}22;color:${ESTADO_COLOR[f.estado]}">${ESTADO_LABEL[f.estado] || f.estado}</span></td>
+      <td>${escHtml(f.direccion)}${f.match === 'fuzzy' ? ' <span title="Match aproximado de dirección" style="cursor:help">≈</span>' : ''}</td>
+      <td>${escHtml(f.uso_antes || '—')} → ${escHtml(f.uso_ahora || '—')}</td>
+      <td>${fmt(f.uf_viv_antes)} → ${fmt(f.uf_viv_ahora)}</td>
+      <td>${fmt(f.uf_com_antes)} → ${fmt(f.uf_com_ahora)}</td>
+    </tr>`).join('');
+
+  cont.innerHTML = `
+    <div class="comp-kpis">
+      <div class="comp-kpi"><div class="comp-kpi-val" style="color:${colorDelta(k.uf_vivienda.delta)}">${dsign(k.uf_vivienda.delta)}</div>
+        <div class="comp-kpi-sub">${fmt(k.uf_vivienda.antes)} → ${fmt(k.uf_vivienda.ahora)}</div>
+        <div class="comp-kpi-lbl">Δ UF Vivienda</div></div>
+      <div class="comp-kpi"><div class="comp-kpi-val" style="color:${colorDelta(k.uf_comercio.delta)}">${dsign(k.uf_comercio.delta)}</div>
+        <div class="comp-kpi-sub">${fmt(k.uf_comercio.antes)} → ${fmt(k.uf_comercio.ahora)}</div>
+        <div class="comp-kpi-lbl">Δ UF Comercio</div></div>
+      <div class="comp-kpi"><div class="comp-kpi-val" style="color:#16a34a">${fmt(pe.nueva)}</div>
+        <div class="comp-kpi-sub">direcciones</div>
+        <div class="comp-kpi-lbl">Nuevas</div></div>
+      <div class="comp-kpi"><div class="comp-kpi-val">${fmt(pe.cambio)} / ${fmt(pe.desaparecida)}</div>
+        <div class="comp-kpi-sub">${fmt(pe.igual)} sin cambio</div>
+        <div class="comp-kpi-lbl">Cambiaron / Desap.</div></div>
+    </div>
+    ${hab ? `<div class="comp-meta">👥 Δ habitantes estimado: <b style="color:${colorDelta(hab.delta_estimado)}">${dsign(hab.delta_estimado)}</b>
+      (ΔUF vivienda × ${hab.hab_por_domicilio} hab/domicilio del censo — estimación secundaria)</div>` : ''}
+    <div class="comp-meta">Contra «${escHtml(d.contra_nombre)}»${d.contra_fecha ? ' del ' + d.contra_fecha : ''}
+      · match por ${d.metodo_match === 'direccion' ? 'dirección normalizada' : 'inscripción catastral + dirección'}${d.matches_fuzzy ? ` · ${d.matches_fuzzy} matches aproximados` : ''}${d.sin_direccion_ahora ? ` · ${d.sin_direccion_ahora} parcelas sin dirección (no comparables)` : ''}</div>
+    <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap">
+      <a class="btn btn-sm btn-outline" href="${csvUrl}" download style="text-decoration:none"
+        title="Descargar la comparativa completa (incluye las sin cambio)">⬇ CSV Comparativa</a>
+      <button class="btn btn-sm btn-outline" onclick="quitarComparativa('${sid}')"
+        title="Volver a pintar el mapa por tipología">✕ Quitar del mapa</button>
+    </div>
+    ${filas.length ? `
+    <div class="dasi-scroll" style="margin-top:.55rem">
+      <table class="dasi-table">
+        <thead><tr><th>Estado</th><th>Dirección</th><th>Uso</th><th>UF Viv</th><th>UF Com</th></tr></thead>
+        <tbody>${filasHtml}</tbody>
+      </table>
+    </div>
+    ${d.filas.filter(f => f.estado !== 'igual').length > 300 ? '<div class="comp-meta">Mostrando 300 — el CSV trae todas.</div>' : ''}`
+    : '<div class="comp-meta" style="margin-top:.5rem">Sin diferencias: todas las direcciones están igual que antes.</div>'}`;
+}
+
+function quitarComparativa(sid) {
+  delete comparativaEstado[sid];
+  document.getElementById('comp-result-' + sid).innerHTML = '';
+  if (maps[sid]) loadParcelasMap(sid);
+}
+
+async function eliminarBaseline(sid) {
+  const sel = document.getElementById('comp-sel-' + sid);
+  const v = sel && sel.value;
+  if (!v || !v.startsWith('baseline:')) {
+    alert('Seleccioná primero en el selector el baseline importado (📄) que querés eliminar.');
+    return;
+  }
+  if (!confirm('¿Eliminar este baseline importado?\n(Se puede volver a importar desde el CSV cuando quieras.)')) return;
+  try {
+    const res = await fetch('/api/baselines/' + v.split(':')[1], {method: 'DELETE'});
+    const data = await res.json();
+    if (!data.ok) alert(`Error: ${data.error||'desconocido'}`);
+  } catch(err) { alert(`Error de red: ${err.message}`); }
+  loadCompOpciones(sid);
+}
+
+/* ── Import de baseline (CSV del relevamiento anterior) ────────── */
+const BL_CAMPOS = [
+  ['direccion', 'Dirección completa'],
+  ['calle', 'Calle (si viene separada)'],
+  ['numero', 'Número'],
+  ['uso', 'Uso / tipología'],
+  ['uf_vivienda', 'UF Vivienda'],
+  ['uf_comercio', 'UF Comercio'],
+];
+
+function toggleImportBaseline(sid) {
+  const el = document.getElementById('comp-import-' + sid);
+  if (el.innerHTML) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="comp-import">
+      <b style="font-size:.78rem">⬆ Importar relevamiento anterior (CSV)</b>
+      <div class="dasi-sub" style="margin-top:.15rem">Subí el CSV que tiene el cliente. Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). Después confirmá qué columna es cada dato.</div>
+      <label>Archivo CSV</label>
+      <input type="file" id="bl-file-${sid}" accept=".csv,.txt" onchange="baselinePreview('${sid}')">
+      <div id="bl-mapeo-${sid}"></div>
+      <div id="bl-msg-${sid}" style="margin-top:.4rem;font-size:.75rem"></div>
+    </div>`;
+}
+
+async function baselinePreview(sid) {
+  const inp = document.getElementById('bl-file-' + sid);
+  const f = inp && inp.files[0];
+  if (!f) return;
+  const msg = document.getElementById('bl-msg-' + sid);
+  msg.style.color = '#6b7280'; msg.textContent = 'Leyendo archivo…';
+  const fd = new FormData();
+  fd.append('archivo', f);
+  try {
+    const res = await fetch(`/api/surveys/${sid}/baselines/preview`, {method: 'POST', body: fd});
+    const p = await res.json();
+    if (!p.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
+    msg.textContent = '';
+    renderMapeoForm(sid, p, f.name);
+  } catch(err) {
+    msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
+  }
+}
+
+function renderMapeoForm(sid, p, fname) {
+  const selHtml = campo => {
+    const sug = p.mapeo_sugerido[campo] || '';
+    return `<select id="bl-m-${campo}-${sid}"><option value="">— no está en el CSV —</option>`
+      + p.headers.map(h => `<option value="${escHtml(h)}"${h === sug ? ' selected' : ''}>${escHtml(h)}</option>`).join('')
+      + '</select>';
+  };
+  document.getElementById('bl-mapeo-' + sid).innerHTML = `
+    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas)} filas detectadas (separador «${p.separador}»). Confirmá el mapeo de columnas:</div>
+    <div class="comp-map-grid" style="margin-top:.3rem">
+      ${BL_CAMPOS.map(([c, l]) => `<div><label>${l}</label>${selHtml(c)}</div>`).join('')}
+    </div>
+    <div class="comp-map-grid" style="margin-top:.45rem">
+      <div><label>Nombre del baseline</label><input type="text" id="bl-nombre-${sid}" value="${escHtml((fname || '').replace(/\.[^.]+$/, ''))}"></div>
+      <div><label>Fecha del relevamiento original</label><input type="date" id="bl-fecha-${sid}"></div>
+    </div>
+    <div style="text-align:right;margin-top:.55rem">
+      <button class="btn btn-sm btn-primary" style="font-size:.75rem"
+        onclick="importarBaseline('${sid}', this)">Importar ${fmt(p.total_filas)} filas</button>
+    </div>`;
+}
+
+async function importarBaseline(sid, btn) {
+  const f = document.getElementById('bl-file-' + sid).files[0];
+  const msg = document.getElementById('bl-msg-' + sid);
+  if (!f) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí el archivo primero.'; return; }
+  const mapeo = {};
+  for (const [c] of BL_CAMPOS) {
+    const el = document.getElementById(`bl-m-${c}-${sid}`);
+    if (el && el.value) mapeo[c] = el.value;
+  }
+  if (!mapeo.direccion && !mapeo.calle) {
+    msg.style.color = '#b91c1c';
+    msg.textContent = 'Elegí al menos la columna de dirección (o la de calle).';
+    return;
+  }
+  btn.disabled = true; btn.textContent = '⟳ Importando…';
+  const fd = new FormData();
+  fd.append('archivo', f);
+  fd.append('nombre', (document.getElementById('bl-nombre-' + sid).value || '').trim() || 'Relevamiento anterior');
+  fd.append('fecha', document.getElementById('bl-fecha-' + sid).value || '');
+  fd.append('mapeo', JSON.stringify(mapeo));
+  try {
+    const res = await fetch(`/api/surveys/${sid}/baselines`, {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!data.ok) {
+      msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (data.error || 'error desconocido');
+      btn.disabled = false; btn.textContent = 'Importar';
+      return;
+    }
+    msg.style.color = '#166534';
+    msg.textContent = `✓ ${fmt(data.importadas)} direcciones importadas`
+      + (data.sin_direccion ? ` (${fmt(data.sin_direccion)} filas sin dirección descartadas)` : '')
+      + '. Ya podés compararlo desde el selector.';
+    document.getElementById('bl-mapeo-' + sid).innerHTML = '';
+    await loadCompOpciones(sid, 'baseline:' + data.baseline_id);
+  } catch(err) {
+    msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false; btn.textContent = 'Importar';
+  }
 }
 
 /* ── Card render ───────────────────────────────────────────────── */
@@ -703,10 +1008,20 @@ function renderCard(s) {
        onclick="iniciarRelevamiento('${sid}', this)" title="Iniciar pipeline completo">▶ Iniciar</button>`;
   }
 
-  const btnEliminar = (isRunning || isStopping)
-    ? `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem;color:#9ca3af" disabled title="Detené el pipeline primero">🗑</button>`
-    : `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
-         onclick="eliminarSurvey('${sid}', '${s.region_nombre}')" title="Eliminar relevamiento">🗑</button>`;
+  // Los relevamientos NO se eliminan: se archivan (siguen disponibles para la
+  // comparativa). El borrado definitivo solo existe sobre archivados.
+  let btnArchivo;
+  if (isRunning || isStopping) {
+    btnArchivo = `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem;color:#9ca3af" disabled title="Detené el pipeline primero">📦</button>`;
+  } else if (s.archivado) {
+    btnArchivo = `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
+         onclick="archivarSurvey('${sid}', '${s.region_nombre}', false)" title="Restaurar a la lista principal">♻</button>
+       <button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem;color:#dc2626"
+         onclick="eliminarSurvey('${sid}', '${s.region_nombre}')" title="Eliminar DEFINITIVAMENTE (borra parcelas y datos; deja de estar disponible para comparar)">🗑</button>`;
+  } else {
+    btnArchivo = `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
+         onclick="archivarSurvey('${sid}', '${s.region_nombre}', true)" title="Archivar: lo saca de la lista pero queda guardado y disponible en 'Comparar con…'">📦</button>`;
+  }
 
   const pasoActual = s.pipeline && s.pipeline.paso_actual;
   const pasoLabel = pasoActual ? stepLabel(pasoActual) : '';
@@ -734,8 +1049,8 @@ function renderCard(s) {
             <div class="kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_comercio)}</div><div class="kpi-lbl">UF Comercio${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
           </div>
         </div>
-        ${OPERADOR ? btnAccion : ''}
-        ${OPERADOR ? btnEliminar : ''}
+        ${OPERADOR && !s.archivado ? btnAccion : ''}
+        ${OPERADOR ? btnArchivo : ''}
         <span class="status-pill s-${s.status}">${statusLabel(s.status)}</span>
         ${OPERADOR ? `<label class="vis-cliente op-only" onclick="event.stopPropagation()"
           title="Tildado = este relevamiento se muestra en la vista cliente (raíz). Destildalo para ocultárselo al cliente.">
@@ -790,6 +1105,20 @@ function renderCard(s) {
             <div class="dasi-body" id="dasi-${sid}">
               <span class="alog-empty">Sin estimación todavía. Tocá "Estimar habitantes".</span>
             </div>
+          </div>
+
+          <div class="comp-section">
+            <div class="dasi-head">
+              <div>
+                <p class="pipeline-title" style="margin-bottom:.15rem">📊 Comparativa con relevamiento anterior</p>
+                <span class="dasi-sub">Crecimiento por dirección: nuevas, cambios de uso/UF y desaparecidas</span>
+              </div>
+            </div>
+            <div class="comp-controls" id="comp-controls-${sid}">
+              <span class="alog-empty">Abrí el detalle para cargar las opciones…</span>
+            </div>
+            <div id="comp-import-${sid}"></div>
+            <div id="comp-result-${sid}"></div>
           </div>
 
           <div class="detail-footer">
@@ -1093,11 +1422,20 @@ async function loadParcelasMap(sid) {
   const markers = [];
   const byPid = {};
 
+  // Con una comparativa activa, el mapa se pinta por ESTADO (nueva/cambió/igual)
+  // en vez de por tipología; "✕ Quitar del mapa" vuelve a la vista normal.
+  const compEst = comparativaEstado[sid];
+
   for (const p of parcelas) {
     const uso = p.uso || 'sin clasificar';
     const cat = categoriaMapa(p);
-    counts[cat] = (counts[cat] || 0) + 1;
-    const color = CAT_COLOR[cat] || CAT_DEFAULT;
+    const catLeyenda = compEst
+      ? ((p.parcela_id && compEst[p.parcela_id]) || 'no comparable')
+      : cat;
+    counts[catLeyenda] = (counts[catLeyenda] || 0) + 1;
+    const color = compEst
+      ? (ESTADO_COLOR[catLeyenda] || '#e2e8f0')
+      : (CAT_COLOR[cat] || CAT_DEFAULT);
 
     const m = L.circleMarker([p.lat, p.lng], {
       radius: 7, fillColor: color,
@@ -1170,8 +1508,8 @@ async function loadParcelasMap(sid) {
   ley.onAdd = function() {
     const d = L.DomUtil.create('div', 'map-legend');
     d.innerHTML = catEntries.map(([cat, n]) => {
-      const c = CAT_COLOR[cat] || CAT_DEFAULT;
-      const lbl = CAT_LABEL[cat] || cat;
+      const c = compEst ? (ESTADO_COLOR[cat] || '#e2e8f0') : (CAT_COLOR[cat] || CAT_DEFAULT);
+      const lbl = compEst ? (ESTADO_LABEL[cat] || cat) : (CAT_LABEL[cat] || cat);
       return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
     }).join('');
     return d;
@@ -1441,6 +1779,7 @@ function toggleDetail(sid) {
       else fetchActlog(sid);
     }
     loadManzanas(sid);
+    loadCompOpciones(sid);   // términos disponibles para "Comparar con…"
   }
 }
 
@@ -1450,9 +1789,10 @@ async function loadSurveys() {
   document.getElementById('status-dot').className = 'loading';
   try {
     let list = await fetch('/api/surveys').then(r => r.json());
-    // Vista cliente: solo los relevamientos tildados por el operador. Con auth
-    // activada el server ya filtra por rol; esto cubre el modo abierto (sin auth).
-    if (CLIENTE) list = list.filter(s => s.visible_cliente !== false);
+    // Vista cliente: solo los relevamientos tildados por el operador, nunca los
+    // archivados. Con auth activada el server ya filtra por rol; esto cubre el
+    // modo abierto (sin auth).
+    if (CLIENTE) list = list.filter(s => s.visible_cliente !== false && !s.archivado);
     document.getElementById('status-dot').className = '';
     const container = document.getElementById('list-container');
     const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));
@@ -1468,7 +1808,18 @@ async function loadSurveys() {
       // Auto-abrir tarjetas de relevamientos activos
       if (s.status === 'running' || s.status === 'stopping') openCards.add(s.survey_id);
     });
-    container.innerHTML = `<div class="surveys-list">${list.map(renderCard).join('')}</div>`;
+    // Archivados (solo operador): sección plegable aparte — guardados y comparables.
+    const activos = list.filter(s => !s.archivado);
+    const archivados = OPERADOR ? list.filter(s => s.archivado) : [];
+    container.innerHTML =
+      (activos.length
+        ? `<div class="surveys-list">${activos.map(renderCard).join('')}</div>`
+        : `<div class="empty-state"><p>No hay relevamientos activos</p></div>`)
+      + (archivados.length ? `
+        <p class="section-title arch-toggle" onclick="toggleArchivados()">📦 Archivados (${archivados.length}) <span id="arch-chev">${archOpen ? '▾' : '▸'}</span></p>
+        <div id="archivados-list" style="display:${archOpen ? 'block' : 'none'}">
+          <div class="surveys-list">${archivados.map(renderCard).join('')}</div>
+        </div>` : '');
 
     openCards.forEach(sid => {
       const detail = document.getElementById('detail-'+sid);
@@ -1569,6 +1920,15 @@ function renderManzanas(sid, data) {
         <tbody>${filas}</tbody>
       </table>
     </div>`;
+}
+
+let archOpen = false;
+function toggleArchivados() {
+  archOpen = !archOpen;
+  const el = document.getElementById('archivados-list');
+  if (el) el.style.display = archOpen ? 'block' : 'none';
+  const ch = document.getElementById('arch-chev');
+  if (ch) ch.textContent = archOpen ? '▾' : '▸';
 }
 
 let refreshTimer = null;

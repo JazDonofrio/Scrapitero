@@ -94,6 +94,8 @@ Cada step del orquestador registra: `agent_called`, `input_resumen`, `output_res
 | 006 | `zone_geojson` en `regions` |
 | 007 | `tipo_osm`, `unidades_osm` en `edificios` (tags OSM para estimar UF) |
 | 008 | `uf_fuente` en `parcelas` (bci=exacto / osm/proxy/uso=estimado; se muestra en la web) |
+| 009–016 | `uso_fuente`, `comercios`, `manzanas_habitantes`, BCI valor venal/propietario, `establecimientos`, `visible_cliente`, `comentarios_cliente`, `codigo_logradouro` |
+| 017 | `baselines` + `baseline_direcciones` (relevamiento anterior importado, comparativa) + `surveys.archivado` (los surveys no se borran: se archivan y quedan comparables) |
 
 ---
 
@@ -213,6 +215,12 @@ ni edificios → vivienda por defecto. Registra `uf_fuente` por parcela (`osm`/`
 ### RelevamientoCSV
 **Input:** `region_id`, `survey_id?`, `output_path`
 **Output:** archivo CSV con headers Google Sheets (UTF-8-sig, separador `;`)
+
+### ComparativaReporter *(2026-06-13)*
+**Input:** `survey_id` + (`contra_survey_id` | `contra_baseline_id`), `fuzzy_umbral` (0.78)
+**Output:** `kpis` (ΔUF viv/com, por_estado, Δhabitantes estimado), `filas` (nueva/cambio/igual/desaparecida por dirección), `parcelas_estado` (para pintar el mapa), `matches_fuzzy`
+**Cuándo:** comparar un survey contra un relevamiento anterior (otro survey de la región — match por `cca_code` + dirección — o un baseline importado del CSV del cliente — match por dirección normalizada exacta + fuzzy difflib).
+**Clave:** la normalización vive en `agents/direccion_norm.py` (tipos de vía/títulos ES+PT canonicalizados, preposiciones fuera, complementos catastrales recortados, `separar_numero` para direcciones completas). On-the-fly, no persiste.
 
 ### ZonaFetcher
 **Input:** `lat`, `lng`, `radio_m`, `region_id?`, `region_nombre?`

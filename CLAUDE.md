@@ -100,6 +100,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 |--------|-----|---------------|
 | RelevamientoReporter | `relevamiento_reporter` | Reporte completo: dirección, UF, nomenclatura por parcela |
 | RelevamientoCSV | `relevamiento_csv` | Exportar a CSV compatible Google Sheets |
+| ComparativaReporter | `comparativa_reporter` | Comparar un survey contra un relevamiento ANTERIOR: otro survey de la región (match por `cca_code` + dirección) o un baseline importado (CSV externo del cliente, match por dirección normalizada exacta + fuzzy). Clasifica cada dirección en nueva/cambio/igual/desaparecida + ΔUF + Δhabitantes estimado. On-the-fly, no persiste |
 
 ## Flujo para Várzea Grande (Brasil)
 
@@ -310,6 +311,28 @@ BCIParser extrae del PDF — migración 016; vacío para parcelas parseadas ante
 dirección completa única** (calle+número+CEP+bairro deduplicados — varias parcelas con
 la misma dirección colapsan en un registro), ordenado por calle y número; las parcelas
 sin calle se excluyen.
+
+**Comparativa con relevamiento anterior (📊):** cada relevamiento tiene en su detalle un
+selector **"Comparar con…"** que ofrece (a) los surveys anteriores de la misma región —
+incluidos los archivados — y (b) los **baselines importados** (el CSV del relevamiento
+anterior del cliente, subido con un paso de mapeo de columnas; Excel debe guardarse como
+CSV antes — no hay openpyxl). El resultado muestra KPIs de delta (UF viv/com antes→ahora,
+nuevas/cambiaron/desaparecidas, Δhabitantes estimado por hab/domicilio del censo), pinta
+el mapa por estado (verde=nueva, ámbar=cambió, gris=igual; desaparecidas en tabla) y
+exporta **CSV Comparativa**. Matching: entre surveys va por `cca_code` (exacto) con
+dirección como fallback; contra baseline va por dirección normalizada
+(`agents/direccion_norm.py`: tipos de vía/títulos canonicalizados ES+PT, complementos
+recortados) exacta + fuzzy difflib (≥0.78, misma altura). Endpoints:
+`GET /api/surveys/{id}/comparativa/opciones`, `GET …/comparativa?contra_tipo&contra_id`,
+`GET …/export/csv-comparativa`, `POST …/baselines/preview`, `POST …/baselines`,
+`DELETE /api/baselines/{id}`. Agente: `comparativa_reporter` (también por RPC).
+
+**Los relevamientos NUNCA se borran — se archivan (📦):** requisito del cliente: el
+relevamiento anterior siempre debe quedar para comparar. El botón de la tarjeta archiva
+(`surveys.archivado`, migración 017; `POST /api/surveys/{id}/archivar`): sale de la lista
+(sección plegable "📦 Archivados" del operador) pero sigue en la DB y en el selector de
+comparativa. El `DELETE /api/surveys/{id}` físico solo se permite sobre surveys YA
+archivados (doble paso, doble confirmación en la UI). El cliente nunca ve archivados.
 
 **UF exacta vs estimada:** la web siempre muestra la cantidad de UF de vivienda y comercio.
 Cuando la UF es **estimada** (cualquier `parcelas.uf_fuente` ≠ `bci`) la marca con badge
