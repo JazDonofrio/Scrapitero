@@ -732,7 +732,7 @@ async function loadCompOpciones(sid, preselect) {
     const res = await fetch(`/api/surveys/${sid}/comparativa/opciones`);
     const data = await res.json();
     if (!data.ok) { el.innerHTML = `<span class="alog-empty">⚠ ${escHtml(data.error||'error')}</span>`; return; }
-    compState[sid] = {opciones: data};
+    compState[sid] = Object.assign(compState[sid] || {}, {opciones: data});
     renderCompControls(sid, preselect);
   } catch(err) {
     el.innerHTML = `<span class="alog-empty">No se pudieron cargar las opciones (${escHtml(err.message)})</span>`;
@@ -792,6 +792,7 @@ async function runComparativa(sid, btn) {
       return;
     }
     comparativaEstado[sid] = d.parcelas_estado || {};
+    compState[sid] = Object.assign(compState[sid] || {}, {ultimo: d});
     if (maps[sid]) loadParcelasMap(sid);   // re-pintar el mapa por estado
     renderCompResult(sid, d);
   } catch(err) {
@@ -856,6 +857,7 @@ function renderCompResult(sid, d) {
 
 function quitarComparativa(sid) {
   delete comparativaEstado[sid];
+  if (compState[sid]) delete compState[sid].ultimo;
   document.getElementById('comp-result-' + sid).innerHTML = '';
   if (maps[sid]) loadParcelasMap(sid);
 }
@@ -974,6 +976,8 @@ async function importarBaseline(sid, btn) {
       + (data.sin_direccion ? ` (${fmt(data.sin_direccion)} filas sin dirección descartadas)` : '')
       + '. Ya podés compararlo desde el selector.';
     document.getElementById('bl-mapeo-' + sid).innerHTML = '';
+    // limpiar el file input: con un archivo seleccionado el refresh queda pausado
+    document.getElementById('bl-file-' + sid).value = '';
     await loadCompOpciones(sid, 'baseline:' + data.baseline_id);
   } catch(err) {
     msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
@@ -1791,8 +1795,21 @@ function toggleDetail(sid) {
 }
 
 /* ── Load / refresh ────────────────────────────────────────────── */
+// True si el usuario está a mitad de un formulario dentro de una tarjeta
+// (import de CSV con su mapeo de columnas, o creación de sub-zona): el
+// re-render de la lista lo borraría, así que el refresh se pospone.
+function hayFormularioActivo() {
+  return [...document.querySelectorAll('[id^="comp-import-"],[id^="parcial-form-"]')]
+    .some(el => {
+      const file = el.querySelector('input[type="file"]');
+      const mapeo = el.querySelector('[id^="bl-mapeo-"]');
+      return (file && file.files.length > 0) || (mapeo && mapeo.innerHTML.trim() !== '');
+    });
+}
+
 async function loadSurveys() {
   if (document.fullscreenElement) { scheduleRefresh(5000); return; }
+  if (hayFormularioActivo()) { scheduleRefresh(5000); return; }
   document.getElementById('status-dot').className = 'loading';
   try {
     let list = await fetch('/api/surveys').then(r => r.json());
@@ -1803,6 +1820,12 @@ async function loadSurveys() {
     document.getElementById('status-dot').className = '';
     const container = document.getElementById('list-container');
     const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));
+    // El re-render pisa la sección Comparativa: capturar la selección actual
+    // del "Comparar con…" para restaurarla después.
+    const compSelPrev = {};
+    document.querySelectorAll('[id^="comp-sel-"]').forEach(el => {
+      if (el.value) compSelPrev[el.id.replace('comp-sel-', '')] = el.value;
+    });
 
     if (!list.length) {
       container.innerHTML = `<div class="empty-state"><p>No hay relevamientos aún</p><p style="font-size:.9rem">${OPERADOR ? 'Creá el primero con el botón de arriba.' : 'Todavía no hay relevamientos para mostrar.'}</p></div>`;
@@ -1850,6 +1873,11 @@ async function loadSurveys() {
             stopActlogPolling(sid);
           }
         }
+        // Restaurar la sección Comparativa (selector + último resultado) y el
+        // panel de habitantes, que el re-render deja en blanco.
+        loadCompOpciones(sid, compSelPrev[sid]);
+        if (compState[sid] && compState[sid].ultimo) renderCompResult(sid, compState[sid].ultimo);
+        loadManzanas(sid);
       }
     });
 
@@ -1965,6 +1993,8 @@ async function crearParcial(sid, btn) {
     }
     msg.style.color = '#166534';
     msg.textContent = '✓ Relevamiento parcial creado — aparece en la lista, tocá ▶ Iniciar.';
+    // limpiar el file input: con un archivo seleccionado el refresh queda pausado
+    document.getElementById('parcial-file-' + sid).value = '';
     setTimeout(loadSurveys, 1200);
   } catch(err) {
     msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
