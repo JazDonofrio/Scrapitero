@@ -101,6 +101,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 | RelevamientoReporter | `relevamiento_reporter` | Reporte completo: dirección, UF, nomenclatura por parcela |
 | RelevamientoCSV | `relevamiento_csv` | Exportar a CSV compatible Google Sheets |
 | ComparativaReporter | `comparativa_reporter` | Comparar un survey contra un relevamiento ANTERIOR: otro survey de la región (match por `cca_code` + dirección) o un baseline importado (CSV externo del cliente, match por dirección normalizada exacta + fuzzy). Clasifica cada dirección en nueva/cambio/igual/desaparecida + ΔUF + Δhabitantes estimado. On-the-fly, no persiste |
+| BaselineGeocoder | `baseline_geocoder` | Geocodifica (dirección→coordenada) las direcciones de un **baseline** (relevamiento anterior del cliente, CSV sin coordenadas). Necesario para **graficar el relevamiento anterior en el mapa** al crear una *actualización* y dibujar encima el polígono de la nueva zona. **Nominatim forward gratis** (sesgo por país, ~1 req/s) + **Google Geocoding fallback**. Escribe `baseline_direcciones.lat/lng/geocode_source/geocode_confidence` (migración 019). **Caché de geocoding** (`geocode_cache`, migración 021): antes de pegarle a la API reusa coordenadas ya resueltas por **dirección normalizada + país** (`<iso2>|<calle_norm>|<numero_norm>`) — ahorra costo de Google en direcciones repetidas (varias unidades del mismo edificio), re-runs y futuras actualizaciones de la misma zona; también deduplica dentro del mismo run. Idempotente/resumible (solo filas sin `lat`), throttle + Telegram. Lo lanza la Web UI en background; también por RPC |
 
 ## Flujo para Várzea Grande (Brasil)
 
@@ -293,10 +294,23 @@ rango · UF Viv · UF Com · Parcelas) con total y **fecha de estimación**. Es 
 al relevamiento (menos exacta), claramente marcada como tal. Endpoints:
 `POST /api/surveys/{id}/dasimetrico` (correr) y `GET /api/surveys/{id}/manzanas` (leer).
 
-**Formato del CSV (web y RelevamientoCSV):** la primera columna es la **Dirección
-completa** (calle + número + complemento) y actúa como ID de la fila; siguen **Uso**,
-**UF Vivienda** y **UF Comercio**, y de ahí en adelante el resto de la información de la
+**Formato del CSV (web export):** la primera columna es la **Dirección completa**
+(calle + número + complemento); siguen **Unidad**, **Código Unidad**, **Uso**,
+**UF Vivienda**, **UF Comercio**, y de ahí en adelante el resto de la información de la
 parcela. Sin dirección → `(sin dirección)`.
+
+**Expansión por unidad (Brasil/BCI):** para parcelas con **más de una unidad** (edificios
+/ lotes con varias casas conjugadas) el CSV **no pone el conteo de UF en una fila**, sino
+**una fila por unidad** repitiendo la dirección completa (con su complemento) e
+identificándola con **Unidad** = `Unidade N` (1..N del BCI) + **Código Unidad** (código de
+unidad único del BCI). Cada fila expandida lleva su propio uso, UF (1 en vivienda o
+comercio según el uso de esa unidad), área construida y suma al total de la parcela. Las
+parcelas de una sola unidad (incluidos los departamentos reales, que en el catastro de VG
+son cada uno su propia inscrição con su complemento `ED/BLOCO/APTO`) quedan como **una fila
+normal** (columnas Unidad/Código vacías). Las unidades se guardan en `parcela_unidades`
+(migración 020) que llena `BCIParser` — sólo persiste parcelas con >1 unidad; **NO** cambia
+`parcelas` (la web/KPIs/mapa siguen mostrando el conteo). La expansión es **sólo de este
+CSV** (no del CSV Operadora ni del consolidado).
 
 **CSV Operadora (solo Brasil):** botón verde Brasil "⬇ CSV Operadora" en el detalle de
 cada relevamiento (vistas cliente y operador), visible solo si `country_code='BRA'`.
@@ -326,6 +340,34 @@ recortados) exacta + fuzzy difflib (≥0.78, misma altura). Endpoints:
 `GET /api/surveys/{id}/comparativa/opciones`, `GET …/comparativa?contra_tipo&contra_id`,
 `GET …/export/csv-comparativa`, `POST …/baselines/preview`, `POST …/baselines`,
 `DELETE /api/baselines/{id}`. Agente: `comparativa_reporter` (también por RPC).
+
+**Crear como "actualización" (sobre el CSV anterior geocodificado):** el formulario "Nueva
+zona" tiene un toggle **⦿ Nueva zona / ◯ Actualización de un relevamiento anterior**. En
+modo *actualización* el operador sube el **CSV del relevamiento anterior** (sin coordenadas)
+y mapea sus columnas. El mapeo de la actualización es acotado a lo que importa para ubicar
+y comparar: **Dirección completa**, **Uso/tipología** y **Ciudad** (columna por fila, si el
+CSV la trae — autodetectada). Además **indica la ciudad/localidad** global
+(`Várzea Grande, MT, Brasil`) — importante: sin ciudad las direcciones caen en cualquier
+parte del país; el geocoder usa la ciudad **por fila** y cae a la global como default. Al confirmar, el backend crea la región + persiste el baseline (con su
+ciudad) y lanza `BaselineGeocoder` en background para **geocodificar cada dirección**
+(agregando la ciudad a cada consulta); cuando termina, el wizard **grafica los puntos en un mapa** — el relevamiento anterior se
+dibuja como **cuadrados grises con la cantidad de UF en número** — y el operador **dibuja
+in-app** (Leaflet-Geoman) el polígono de la **nueva zona** (sector) sobre ellos, mientras
+sigue viendo todo el relevamiento viejo. Ese polígono queda como `regions.zone_geojson` (la
+nueva zona a relevar) y se crea el survey en `stopped`, listo para ▶ Iniciar — se comporta
+como cualquier relevamiento normal. **Comparación viejo/nuevo sobre el mapa:** el survey
+queda vinculado al baseline (`surveys.baseline_id`, migración 024); el **mapa del survey
+grafica el relevamiento anterior en gris (cuadrado + UF) por debajo** de las parcelas nuevas
+(pane propio z-index 350 < 400), así a medida que corre el relevamiento nuevo se ve la
+comparación directa. El mapeo de columnas del CSV anterior es: **Dirección completa**,
+**Uso/tipología**, **Ciudad** (por fila), **UF Vivienda** y **UF Comercio** (para el número
+sobre cada punto). Endpoint de los puntos: `GET /api/baselines/{id}/puntos`. El CSV anterior queda
+**auto-vinculado como baseline** de la región, así "Comparar con…" lo ofrece sin reimportar.
+El país se autodetecta geocodificando unas pocas direcciones (necesario para sesgar el
+geocoding); en Brasil se completa `municipio_codigo` del centroide del polígono. Endpoints:
+`POST /api/actualizaciones/preview`, `POST /api/actualizaciones/preparar`,
+`GET /api/baselines/{id}/geocoding` (poll de progreso),
+`POST /api/baselines/{id}/crear-survey`.
 
 **Relevamientos parciales (🔁 Sub-zona):** para re-relevar SOLO una parte de una región
 ya relevada, el botón "🔁 Sub-zona" del detalle (operador) sube un polígono GeoJSON y

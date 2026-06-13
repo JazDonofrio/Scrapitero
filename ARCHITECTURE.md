@@ -97,6 +97,12 @@ Cada step del orquestador registra: `agent_called`, `input_resumen`, `output_res
 | 009–016 | `uso_fuente`, `comercios`, `manzanas_habitantes`, BCI valor venal/propietario, `establecimientos`, `visible_cliente`, `comentarios_cliente`, `codigo_logradouro` |
 | 017 | `baselines` + `baseline_direcciones` (relevamiento anterior importado, comparativa) + `surveys.archivado` (los surveys no se borran: se archivan y quedan comparables) |
 | 018 | `surveys.subzona_geojson` (relevamientos parciales: survey nuevo sobre la misma región acotado a un polígono; los fetchers prefieren la subzona vía COALESCE) |
+| 019 | `baseline_direcciones.lat/lng/geocode_source/geocode_confidence` + `baselines.geocoded_at/n_geocodificadas` (geocoding del relevamiento anterior: graficarlo en el mapa al crear una *actualización* y dibujar encima la nueva zona) |
+| 020 | `parcela_unidades` (unidades del BCI por parcela: n_unidade/código/área/año/uso; sólo parcelas con >1 unidad). El CSV web emite una fila por unidad para edificios en vez del conteo. No cambia `parcelas` |
+| 021 | `geocode_cache` (caché dirección normalizada+ciudad+país → coordenada). `BaselineGeocoder` lo reusa antes de pegarle a Nominatim/Google → ahorra costo en direcciones repetidas, re-runs y futuras actualizaciones |
+| 022 | `baselines.ciudad` (ciudad/localidad global del relevamiento anterior, default de geocoding) |
+| 023 | `baseline_direcciones.ciudad` (ciudad por fila del CSV anterior; el geocoder la usa con fallback a `baselines.ciudad`) |
+| 024 | `surveys.baseline_id` (de qué relevamiento anterior es actualización el survey; el mapa lo grafica en gris bajo las parcelas nuevas) |
 
 ---
 
@@ -223,6 +229,18 @@ ni edificios → vivienda por defecto. Registra `uf_fuente` por parcela (`osm`/`
 **Cuándo:** comparar un survey contra un relevamiento anterior (otro survey de la región — match por `cca_code` + dirección — o un baseline importado del CSV del cliente — match por dirección normalizada exacta + fuzzy difflib).
 **Clave:** la normalización vive en `agents/direccion_norm.py` (tipos de vía/títulos ES+PT canonicalizados, preposiciones fuera, complementos catastrales recortados, `separar_numero` para direcciones completas). On-the-fly, no persiste.
 
+### BaselineGeocoder *(2026-06-13)*
+**Input:** `baseline_id`, `delay_ms` (1100), `batch_size?`
+**Output:** `total`, `geocodificadas`, `fallidas`, `por_fuente`
+**Cuándo:** geocodificar (dirección → coordenada) las direcciones de un **baseline** (el
+relevamiento anterior del cliente, CSV sin coordenadas) para poder graficarlo en el mapa al
+crear una *actualización* y dibujar encima el polígono de la nueva zona.
+**Cómo:** **Nominatim forward** gratis (`/search`, sesgo `countrycodes` por país de la región,
+~1 req/s) primero, **Google Geocoding** fallback (`GOOGLE_MAPS_API_KEY`). Escribe
+`baseline_direcciones.lat/lng/geocode_source/geocode_confidence`. Idempotente/resumible (solo
+filas sin `lat`), throttle + Telegram. La Web UI lo lanza en background thread; el progreso se
+deriva de la DB (`baselines.geocoded_at` + conteo de `lat IS NOT NULL`).
+
 ### ZonaFetcher
 **Input:** `lat`, `lng`, `radio_m`, `region_id?`, `region_nombre?`
 **Output:** `region_id`, `survey_id`, `bbox`, `edificios_insertados`
@@ -248,6 +266,9 @@ ni edificios → vivienda por defecto. Registra `uf_fuente` por parcela (`osm`/`
 **Output:** `procesadas`, `actualizadas`, `sin_pdf`, `errores`
 **Cuándo:** Después de VGBCIFetcher. Lee los PDFs en `/opt/scrapitero/pdf_downloads/reporte_{cca_code}.pdf`
 **Extrae (regex, sin LLM):** `uso_principal`, `uf_vivienda`, `uf_comercio`, `area_m2_construida`, dirección completa, `partida_inmobiliaria`
+**Unidades (migración 020):** además del conteo, extrae la **lista de unidades** del imóvel
+(UNIDADE 1..N: número, código, área, año, uso) y la persiste en `parcela_unidades` **sólo
+para parcelas con >1 unidad**. El CSV web la usa para emitir una fila por unidad (edificios).
 **Dependencia:** `pdfplumber` (declarado en pyproject.toml); `.hermes-packages/` contiene `_cffi_backend.cpython-313-x86_64-linux-gnu.so` para Python 3.13.
 
 ### ONRCartoIdentify

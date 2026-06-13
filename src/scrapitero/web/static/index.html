@@ -6,6 +6,9 @@
   <title>Scrapitero</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Leaflet-Geoman: dibujar el polígono de la nueva zona sobre el relevamiento anterior -->
+  <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.18.3/dist/leaflet-geoman.css"/>
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.18.3/dist/leaflet-geoman.min.js"></script>
   <!-- Modo de la UI lo antes posible (evita parpadeo de controles solo-operador):
        raíz "/" = cliente; "/operador" = operador completo. -->
   <script>
@@ -159,6 +162,18 @@
       white-space: nowrap;
     }
     .uf-label::before { display: none; }   /* sin flechita de tooltip */
+
+    /* Relevamiento ANTERIOR (actualización): cuadrado gris con la UF en número.
+       Otra forma geométrica + gris para distinguirlo de las parcelas nuevas. */
+    .old-uf-marker { background: none; border: none; }
+    .old-uf-box {
+      min-width: 16px; height: 16px; padding: 0 3px; box-sizing: border-box;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(107,114,128,.85); color: #f8fafc;
+      border: 1px solid #374151; border-radius: 2px;   /* cuadrado */
+      font-size: .62rem; font-weight: 700; line-height: 1; white-space: nowrap;
+    }
+    .old-uf-box.old-uf-empty { min-width: 10px; width: 10px; height: 10px; padding: 0; }
 
     /* Mapa en fullscreen (sobre el wrapper) */
     #mapwrap-*:-webkit-full-screen,
@@ -345,6 +360,22 @@
     </div>
     <div class="form-body">
       <form id="nueva-form" onsubmit="submitForm(event)">
+        <div class="form-group" style="margin-bottom:.6rem">
+          <label>Tipo de relevamiento</label>
+          <div style="display:flex;gap:1.4rem;flex-wrap:wrap;margin-top:.2rem">
+            <label style="display:flex;align-items:center;gap:.35rem;font-weight:400;cursor:pointer">
+              <input type="radio" name="modo-creacion" value="nueva" checked onchange="setModoCreacion('nueva')"> Nueva zona
+            </label>
+            <label style="display:flex;align-items:center;gap:.35rem;font-weight:400;cursor:pointer">
+              <input type="radio" name="modo-creacion" value="actualizacion" onchange="setModoCreacion('actualizacion')"> Actualización de un relevamiento anterior
+            </label>
+          </div>
+          <p class="form-hint modo-actualizacion" style="display:none">
+            Subí el CSV del relevamiento anterior (sin coordenadas): lo geocodificamos para
+            ubicarlo en el mapa y dibujás encima el polígono de la nueva zona a relevar.
+            El CSV queda como base de comparación de la región.
+          </p>
+        </div>
         <div class="form-grid">
           <div class="form-group">
             <label>Nombre del relevamiento</label>
@@ -358,9 +389,9 @@
               <option value="ARG">Argentina</option>
             </select>
           </div>
-          <div class="form-group" style="grid-column:1/-1">
+          <div class="form-group modo-nueva" style="grid-column:1/-1">
             <label>Área GeoJSON</label>
-            <input type="file" id="f-geojson" accept=".geojson,.json" required>
+            <input type="file" id="f-geojson" accept=".geojson,.json">
             <p class="form-hint">
               Usá <a href="https://geojson.io" target="_blank" rel="noopener" style="color:#38bdf8">geojson.io</a> para dibujar el área y exportar el archivo.
               <br>
@@ -369,7 +400,42 @@
             </p>
           </div>
         </div>
-        <div class="form-actions">
+
+        <!-- ── Wizard de actualización (sobre CSV anterior geocodificado) ── -->
+        <div class="modo-actualizacion" style="display:none">
+          <div class="form-grid">
+            <div class="form-group" style="grid-column:1/-1">
+              <label>CSV del relevamiento anterior</label>
+              <input type="file" id="actu-file" accept=".csv,.txt" onchange="actuPreview()">
+              <p class="form-hint">Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV).</p>
+            </div>
+            <div class="form-group">
+              <label>Ciudad / localidad</label>
+              <input type="text" id="actu-ciudad" placeholder="Ej: Várzea Grande, MT, Brasil">
+              <p class="form-hint">Se agrega a cada dirección al geocodificar (si no, caen en otra parte del país). Si el CSV trae una columna de ciudad, mapeala abajo y manda por fila; este campo es el default para las filas sin ciudad.</p>
+            </div>
+            <div class="form-group">
+              <label>Fecha del relevamiento anterior (opcional)</label>
+              <input type="date" id="actu-fecha">
+            </div>
+          </div>
+          <div id="actu-mapeo"></div>
+          <div id="actu-paso2" style="display:none;text-align:right;margin-top:.6rem">
+            <button type="button" class="btn btn-primary" id="actu-btn-geocode" onclick="actuPreparar()">📍 Geocodificar y graficar</button>
+          </div>
+          <div id="actu-progreso" style="display:none;margin-top:.7rem"></div>
+          <div id="actu-mapa-wrap" style="display:none;margin-top:.7rem">
+            <p class="form-hint">Dibujá el polígono de la <strong>nueva zona</strong> usando la herramienta de polígono (arriba a la derecha del mapa), sobre los puntos del relevamiento anterior.</p>
+            <div id="actu-mapa" style="height:420px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
+            <div style="text-align:right;margin-top:.6rem">
+              <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
+              <button type="button" class="btn btn-primary" id="actu-btn-crear" onclick="actuCrearSurvey()" disabled>Crear actualización</button>
+            </div>
+          </div>
+          <div id="actu-msg" style="margin-top:.5rem;font-size:.8rem"></div>
+        </div>
+
+        <div class="form-actions modo-nueva">
           <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
           <button type="submit" class="btn btn-primary" id="btn-submit">Crear relevamiento</button>
         </div>
@@ -435,7 +501,7 @@ async function submitForm(e) {
   const btn = document.getElementById('btn-submit');
   const msg = document.getElementById('form-msg');
   const file = document.getElementById('f-geojson').files[0];
-  if (!file) return;
+  if (!file) { msg.textContent = 'Elegí el archivo GeoJSON del área.'; msg.className = 'err'; msg.style.display = 'block'; return; }
   btn.disabled = true; btn.textContent = 'Creando…';
   msg.style.display = 'none';
   const fd = new FormData();
@@ -455,6 +521,164 @@ async function submitForm(e) {
   } catch(err) {
     msg.textContent = `Error de red: ${err.message}`; msg.className = 'err'; msg.style.display = 'block';
     btn.disabled = false; btn.textContent = 'Crear relevamiento';
+  }
+}
+
+/* ── Actualización: crear sobre el CSV anterior geocodificado ───── */
+const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: null, pollTimer: null };
+const ACTU_USO_COLOR = { residencial:'#3b82f6', comercial:'#f59e0b', mixto:'#a855f7', industrial:'#ef4444', vacante:'#9ca3af' };
+
+function setModoCreacion(modo) {
+  const actu = modo === 'actualizacion';
+  document.querySelectorAll('.modo-nueva').forEach(el => el.style.display = actu ? 'none' : '');
+  document.querySelectorAll('.modo-actualizacion').forEach(el => el.style.display = actu ? '' : 'none');
+  // Al volver a "nueva", limpiamos cualquier estado del wizard.
+  if (!actu) actuReset();
+}
+
+function actuReset() {
+  if (actuState.pollTimer) { clearTimeout(actuState.pollTimer); actuState.pollTimer = null; }
+  if (actuState.map) { actuState.map.remove(); actuState.map = null; }
+  actuState.baselineId = actuState.regionId = actuState.drawnLayer = null;
+  ['actu-mapeo'].forEach(id => document.getElementById(id).innerHTML = '');
+  ['actu-paso2','actu-progreso','actu-mapa-wrap'].forEach(id => document.getElementById(id).style.display = 'none');
+  document.getElementById('actu-msg').textContent = '';
+}
+
+async function actuPreview() {
+  const f = document.getElementById('actu-file').files[0];
+  const msg = document.getElementById('actu-msg');
+  document.getElementById('actu-mapeo').innerHTML = '';
+  document.getElementById('actu-paso2').style.display = 'none';
+  if (!f) return;
+  msg.style.color = '#6b7280'; msg.textContent = 'Leyendo archivo…';
+  const fd = new FormData(); fd.append('archivo', f);
+  try {
+    const p = await (await fetch('/api/actualizaciones/preview', {method:'POST', body:fd})).json();
+    if (!p.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
+    msg.textContent = '';
+    actuRenderMapeo(p);
+  } catch(err) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; }
+}
+
+function actuRenderMapeo(p) {
+  const sel = campo => {
+    const sug = p.mapeo_sugerido[campo] || '';
+    return `<select id="actu-m-${campo}"><option value="">— no está en el CSV —</option>`
+      + p.headers.map(h => `<option value="${escHtml(h)}"${h === sug ? ' selected' : ''}>${escHtml(h)}</option>`).join('')
+      + '</select>';
+  };
+  document.getElementById('actu-mapeo').innerHTML = `
+    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas)} filas detectadas (separador «${p.separador}»). Confirmá el mapeo de columnas:</div>
+    <div class="comp-map-grid" style="margin-top:.3rem">
+      ${ACTU_CAMPOS.map(([c, l]) => `<div><label>${l}</label>${sel(c)}</div>`).join('')}
+    </div>`;
+  document.getElementById('actu-paso2').style.display = '';
+}
+
+async function actuPreparar() {
+  const msg = document.getElementById('actu-msg');
+  const nombre = (document.getElementById('f-nombre').value || '').trim();
+  const f = document.getElementById('actu-file').files[0];
+  if (!nombre) { msg.style.color = '#b91c1c'; msg.textContent = 'Poné un nombre al relevamiento.'; return; }
+  if (!f) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí el CSV anterior.'; return; }
+  const mapeo = {};
+  for (const [c] of ACTU_CAMPOS) { const el = document.getElementById('actu-m-' + c); if (el && el.value) mapeo[c] = el.value; }
+  if (!mapeo.direccion) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí la columna de dirección completa.'; return; }
+
+  const btn = document.getElementById('actu-btn-geocode');
+  btn.disabled = true; btn.textContent = '⟳ Preparando…';
+  msg.style.color = '#6b7280'; msg.textContent = 'Creando la región y detectando el país…';
+  const fd = new FormData();
+  fd.append('nombre', nombre);
+  fd.append('country_code', document.getElementById('f-country').value);
+  fd.append('archivo', f);
+  fd.append('mapeo', JSON.stringify(mapeo));
+  fd.append('fecha', document.getElementById('actu-fecha').value || '');
+  fd.append('ciudad', (document.getElementById('actu-ciudad').value || '').trim());
+  try {
+    const d = await (await fetch('/api/actualizaciones/preparar', {method:'POST', body:fd})).json();
+    if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = '📍 Geocodificar y graficar'; return; }
+    actuState.baselineId = d.baseline_id; actuState.regionId = d.region_id;
+    msg.textContent = '';
+    document.getElementById('actu-paso2').style.display = 'none';
+    document.getElementById('actu-progreso').style.display = '';
+    actuPollGeocoding();
+  } catch(err) {
+    msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false; btn.textContent = '📍 Geocodificar y graficar';
+  }
+}
+
+async function actuPollGeocoding() {
+  const prog = document.getElementById('actu-progreso');
+  try {
+    const d = await (await fetch(`/api/baselines/${actuState.baselineId}/geocoding`)).json();
+    if (!d.ok) { prog.innerHTML = `<span style="color:#b91c1c">⚠ ${d.error}</span>`; return; }
+    if (d.error) { prog.innerHTML = `<span style="color:#b91c1c">⚠ Geocoding falló: ${escHtml(d.error)}</span>`; return; }
+    const pct = d.total ? Math.round(100 * d.geocodificadas / d.total) : 0;
+    prog.innerHTML = `<div class="dasi-sub">📍 Geocodificando «${escHtml(d.nombre || '')}»… ${fmt(d.geocodificadas)}/${fmt(d.total)} (${pct}%)</div>
+      <div style="height:6px;background:#1f2937;border-radius:4px;margin-top:.3rem;overflow:hidden"><div style="height:100%;width:${pct}%;background:#3b82f6"></div></div>`;
+    if (d.listo) {
+      prog.innerHTML = `<div class="dasi-sub">✅ ${fmt(d.geocodificadas)} direcciones ubicadas${d.reusadas ? ` (${fmt(d.reusadas)} reusadas del caché, sin costo)` : ''}${d.fallidas ? `, ${fmt(d.fallidas)} no se pudieron ubicar` : ''}.</div>`;
+      actuRenderMapa(d.puntos || []);
+      return;
+    }
+  } catch(err) {
+    prog.innerHTML = `<span style="color:#b91c1c">Error de red: ${err.message}</span>`;
+    return;
+  }
+  actuState.pollTimer = setTimeout(actuPollGeocoding, 2000);
+}
+
+function actuRenderMapa(puntos) {
+  document.getElementById('actu-mapa-wrap').style.display = '';
+  if (actuState.map) { actuState.map.remove(); actuState.map = null; }
+  const map = L.map('actu-mapa');
+  actuState.map = map;
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  const pts = puntos.filter(p => p.lat != null && p.lng != null);
+  // Relevamiento anterior en gris (cuadrado + UF en número): se sigue viendo
+  // mientras dibujás el sector de la nueva zona.
+  const group = L.featureGroup();
+  pts.forEach(p => oldUfMarker(p).addTo(group));
+  group.addTo(map);
+  // El contenedor recién se muestra: recalcular tamaño y ENTONCES encuadrar a los puntos.
+  setTimeout(() => {
+    map.invalidateSize();
+    if (pts.length) map.fitBounds(group.getBounds().pad(0.15), { maxZoom: 17 });
+    else map.setView([-15.6, -56.1], 12);
+  }, 60);
+
+  // Herramienta de dibujo: solo polígono (la nueva zona). Un único polígono a la vez.
+  map.pm.addControls({ position:'topright', drawPolygon:true, drawMarker:false, drawPolyline:false,
+    drawCircle:false, drawCircleMarker:false, drawRectangle:true, drawText:false,
+    cutPolygon:false, rotateMode:false, dragMode:false, editMode:true, removalMode:true });
+  const onShape = layer => {
+    if (actuState.drawnLayer && actuState.drawnLayer !== layer) map.removeLayer(actuState.drawnLayer);
+    actuState.drawnLayer = layer;
+    document.getElementById('actu-btn-crear').disabled = false;
+  };
+  map.on('pm:create', e => { onShape(e.layer); e.layer.on('pm:edit', () => {}); });
+}
+
+async function actuCrearSurvey() {
+  const msg = document.getElementById('actu-msg');
+  if (!actuState.drawnLayer) { msg.style.color = '#b91c1c'; msg.textContent = 'Dibujá el polígono de la nueva zona primero.'; return; }
+  const gj = actuState.drawnLayer.toGeoJSON();
+  const btn = document.getElementById('actu-btn-crear');
+  btn.disabled = true; btn.textContent = '⟳ Creando…';
+  msg.style.color = '#6b7280'; msg.textContent = 'Creando el relevamiento…';
+  const blob = new Blob([JSON.stringify(gj)], { type: 'application/geo+json' });
+  const fd = new FormData(); fd.append('geojson_file', blob, 'zona.geojson');
+  try {
+    const d = await (await fetch(`/api/baselines/${actuState.baselineId}/crear-survey`, {method:'POST', body:fd})).json();
+    if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = 'Crear actualización'; return; }
+    msg.style.color = '#166534'; msg.textContent = '✅ Relevamiento creado. Listo para iniciar.';
+    setTimeout(() => { toggleForm(); document.getElementById('nueva-form').reset(); setModoCreacion('nueva'); btn.textContent = 'Crear actualización'; loadSurveys(); }, 1600);
+  } catch(err) {
+    msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false; btn.textContent = 'Crear actualización';
   }
 }
 
@@ -888,6 +1112,16 @@ const BL_CAMPOS = [
   ['uf_comercio', 'UF Comercio'],
 ];
 
+// Mapeo de la ACTUALIZACIÓN: dirección + uso/tipología + ciudad (por fila), y la
+// UF (vivienda/comercio) para mostrar su cantidad sobre cada punto del mapa.
+const ACTU_CAMPOS = [
+  ['direccion', 'Dirección completa'],
+  ['uso', 'Uso / tipología'],
+  ['ciudad', 'Ciudad'],
+  ['uf_vivienda', 'UF Vivienda'],
+  ['uf_comercio', 'UF Comercio'],
+];
+
 function toggleImportBaseline(sid) {
   const el = document.getElementById('comp-import-' + sid);
   if (el.innerHTML) { el.innerHTML = ''; return; }
@@ -1229,6 +1463,26 @@ function initMap(sid) {
   }
 
   maps[sid] = map;
+
+  // Actualización: graficar el relevamiento ANTERIOR (gris) por DEBAJO de las
+  // parcelas nuevas → comparación directa viejo/nuevo. Pane propio con z-index
+  // menor que el de las parcelas (overlayPane=400) para que queden por encima.
+  const sv = surveyCache[sid];
+  if (sv && sv.baseline_id) {
+    map.createPane('anteriorPane');
+    map.getPane('anteriorPane').style.zIndex = 350;
+    renderRelevamientoAnterior(map, sv.baseline_id, 'anteriorPane').then(res => {
+      if (!res || maps[sid] !== map) return;
+      map._anteriorGrp = res.grupo;
+      map._anteriorN = res.total;
+      // Si todavía no hay parcelas nuevas, encuadrar al relevamiento anterior.
+      if (res.bounds && (!activeMarkers[sid] || !activeMarkers[sid].length)) {
+        try { map.fitBounds(res.bounds, { padding: [24, 24], maxZoom: 17 }); } catch(_) {}
+      }
+      if (map._leyenda) loadParcelasMap(sid);   // refrescar leyenda con la línea "anterior"
+    });
+  }
+
   loadParcelasMap(sid);   // carga inicial
   loadComentarios(sid);   // comentarios del cliente (sugerencias/correcciones)
 }
@@ -1407,6 +1661,44 @@ async function addGoogleLayers(map, layersCtl) {
   }
 }
 
+/* ── Relevamiento ANTERIOR (gris) — comparación viejo/nuevo sobre el mismo mapa ── */
+// Marcador del relevamiento anterior: cuadrado gris con la cantidad de UF en número.
+function oldUfMarker(p, paneName) {
+  const uf = (p.uf_total != null) ? p.uf_total : ((p.uf_v || 0) + (p.uf_c || 0));
+  const opts = { icon: L.divIcon({
+    className: 'old-uf-marker',
+    // Cuadrado gris con la UF en número; vacío (solo el cuadrado) si no hay UF.
+    html: `<div class="old-uf-box${uf > 0 ? '' : ' old-uf-empty'}">${uf > 0 ? uf : ''}</div>`,
+    iconSize: uf > 0 ? [18, 16] : [10, 10], iconAnchor: uf > 0 ? [9, 8] : [5, 5],
+  }) };
+  if (paneName) opts.pane = paneName;
+  const m = L.marker([p.lat, p.lng], opts);
+  m.bindPopup(`<div style="font-size:.8rem;line-height:1.7">
+      <b>${escHtml(p.direccion || '(sin dirección)')}</b>
+      <br><span style="color:#9ca3af">Relevamiento anterior</span>
+      <br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${uf}</b>
+      <span style="color:#9ca3af;font-size:.72rem">(viv ${p.uf_v || 0} / com ${p.uf_c || 0})</span>
+    </div>`, { maxWidth: 240 });
+  return m;
+}
+
+// Dibuja todos los puntos del baseline en un layerGroup gris. Devuelve {grupo, bounds}.
+async function renderRelevamientoAnterior(map, baselineId, paneName) {
+  let d;
+  try { d = await fetch(`/api/baselines/${baselineId}/puntos`).then(r => r.json()); }
+  catch(_) { return null; }
+  if (!d || !d.ok || !d.puntos || !d.puntos.length) return null;
+  const grupo = L.layerGroup();
+  const pts = [];
+  d.puntos.forEach(p => {
+    if (p.lat == null || p.lng == null) return;
+    oldUfMarker(p, paneName).addTo(grupo);
+    pts.push([p.lat, p.lng]);
+  });
+  grupo.addTo(map);
+  return { grupo, bounds: pts.length ? L.latLngBounds(pts) : null, total: pts.length };
+}
+
 async function loadParcelasMap(sid) {
   // Capturar referencia al mapa ANTES del await
   const map = maps[sid];
@@ -1518,11 +1810,18 @@ async function loadParcelasMap(sid) {
   const ley = L.control({position: 'bottomleft'});
   ley.onAdd = function() {
     const d = L.DomUtil.create('div', 'map-legend');
-    d.innerHTML = catEntries.map(([cat, n]) => {
+    let html = catEntries.map(([cat, n]) => {
       const c = compEst ? (ESTADO_COLOR[cat] || '#e2e8f0') : (CAT_COLOR[cat] || CAT_DEFAULT);
       const lbl = compEst ? (ESTADO_LABEL[cat] || cat) : (CAT_LABEL[cat] || cat);
       return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
     }).join('');
+    // Relevamiento anterior (gris, cuadrado): comparación viejo/nuevo
+    if (map._anteriorGrp) {
+      html += '<div style="margin-top:3px;border-top:1px solid rgba(148,163,184,.25);padding-top:3px">'
+        + '<span style="display:inline-block;width:9px;height:9px;background:rgba(107,114,128,.85);border:1px solid #374151;margin-right:5px;vertical-align:middle"></span>'
+        + 'Relev. anterior <b>(' + (map._anteriorN || 0) + ')</b></div>';
+    }
+    d.innerHTML = html;
     return d;
   };
   ley.addTo(map);

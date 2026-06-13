@@ -466,7 +466,8 @@ async def list_surveys(request: Request) -> list[dict]:
                 COALESCE(es.n_est, 0)                                              AS total_establecimientos,
                 s.visible_cliente,
                 s.archivado,
-                s.subzona_geojson
+                s.subzona_geojson,
+                s.baseline_id::text
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
             LEFT JOIN (
@@ -536,6 +537,8 @@ async def list_surveys(request: Request) -> list[dict]:
             # Relevamiento parcial: el mapa muestra la SUB-zona, no la región entera
             "zone_geojson": r[19] or r[7],
             "es_parcial": bool(r[19]),
+            # Actualización: relevamiento anterior a graficar (gris) bajo las parcelas
+            "baseline_id": r[20],
         })
     return result
 
@@ -1079,11 +1082,26 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                    WHERE e.establecimiento_id = parcelas.establecimiento_id),
                 (SELECT e.nombre FROM establecimientos e
                    WHERE e.establecimiento_id = parcelas.establecimiento_id),
-                establecimiento_id::text
+                establecimiento_id::text,
+                parcelas.parcela_id::text
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
         """), {"sid": survey_id}).fetchall()
+
+        # Unidades del BCI por parcela (sólo parcelas con >1 unidad las tienen).
+        # Para esas, el CSV emite una fila por unidad repitiendo la dirección +
+        # complemento, identificada por "Unidade N" + código de unidad.
+        unidades_por_parcela: dict[str, list[dict]] = {}
+        for ur in conn.execute(text("""
+            SELECT p.parcela_id::text, u.n_unidade, u.codigo_unidade, u.area_m2, u.uso
+            FROM parcela_unidades u JOIN parcelas p ON p.parcela_id = u.parcela_id
+            WHERE p.survey_id = :sid
+            ORDER BY u.n_unidade
+        """), {"sid": survey_id}):
+            unidades_por_parcela.setdefault(ur[0], []).append({
+                "n": ur[1], "codigo": ur[2], "area_m2": ur[3], "uso": ur[4],
+            })
 
     region_nombre = meta[1]
     fecha = meta[2].strftime("%Y-%m-%d") if meta[2] else ""
@@ -1097,7 +1115,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         w.writerow([f"Relevamiento: {region_nombre}", f"Survey: {survey_id}", f"Fecha: {fecha}"])
         w.writerow([])
         w.writerow([
-            "Dirección", "Uso", "UF Vivienda", "UF Comercio",
+            "Dirección", "Unidad", "Código Unidad", "Uso", "UF Vivienda", "UF Comercio",
             "Total UF", "UF Fuente", "Uso Fuente",
             "Bairro", "Municipio", "CEP",
             "Inscripción", "Setor-Quadra-Lote",
@@ -1109,16 +1127,19 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Propietario", "Documento (CPF/CNPJ)", "Contribuyente Secundario",
             "Establecimiento (tipo)", "Establecimiento (nombre)",
         ])
-        for r in rows:
-            direccion = " ".join(s for s in (r[2], r[3], r[4]) if s).strip()
-            w.writerow([
+
+        def _fila(r, direccion, unidad, codigo, uso, uf_v, uf_c, total, area_con):
+            """Arma una fila del CSV. `unidad`/`codigo`/`uso`/UF/`area_con` pueden venir
+            de una unidad del BCI (fila expandida) o de la parcela (fila normal)."""
+            return [
                 direccion or "(sin dirección)",
-                r[8] or "", r[9] or 0, r[10] or 0,
-                r[11] or 0, r[20] or "", r[21] or "",
+                unidad, codigo,
+                uso or "", uf_v or 0, uf_c or 0,
+                total or 0, r[20] or "", r[21] or "",
                 r[5] or "", r[6] or "", r[7] or "",
                 r[0] or "", r[1] or "",
                 f"{r[12]:.2f}" if r[12] else "",
-                f"{r[13]:.2f}" if r[13] else "",
+                f"{area_con:.2f}" if area_con else "",
                 r[14] or "",
                 r[15] or "", r[16] or "", r[17] or "",
                 f"{r[18]:.6f}" if r[18] else "",
@@ -1131,7 +1152,22 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[27] or "",
                 r[28] or "", r[29] or "", r[30] or "",
                 r[31] or "", r[32] or "",
-            ])
+            ]
+
+        for r in rows:
+            direccion = " ".join(s for s in (r[2], r[3], r[4]) if s).strip()
+            unidades = unidades_por_parcela.get(r[34])
+            if unidades:
+                # Edificio/lote con varias unidades: una fila por unidad (sin conteo).
+                for u in unidades:
+                    es_com = (u["uso"] or "").lower().startswith("comerc")
+                    w.writerow(_fila(
+                        r, direccion, f"Unidade {u['n']}", u["codigo"] or "",
+                        (u["uso"] or "residencial"),
+                        0 if es_com else 1, 1 if es_com else 0, 1,
+                        u["area_m2"] or r[13]))
+            else:
+                w.writerow(_fila(r, direccion, "", "", r[8], r[9], r[10], r[11], r[13]))
         yield buf.getvalue()
 
     return StreamingResponse(
@@ -1376,6 +1412,7 @@ _BASELINE_CAMPOS = {
     "calle":       ["calle", "rua", "logradouro", "street"],
     "numero":      ["numero", "nro", "altura", "num"],
     "uso":         ["uso", "tipologia", "tipo", "categoria"],
+    "ciudad":      ["ciudad", "cidade", "localidad", "localidade", "municipio", "city"],
     "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
     "uf_comercio": ["uf comercio", "uf com", "comercios", "comercio", "unidades comercio"],
 }
@@ -1464,44 +1501,28 @@ async def baseline_preview(survey_id: str, archivo: UploadFile = File(...)) -> J
     })
 
 
-@app.post("/api/surveys/{survey_id}/baselines")
-async def baseline_import(
-    survey_id: str,
-    archivo: UploadFile = File(...),
-    nombre: str = Form(...),
-    fecha: str = Form(""),               # fecha del relevamiento ORIGINAL (YYYY-MM-DD)
-    mapeo: str = Form(...),              # JSON {campo: header} confirmado por el usuario
-) -> JSONResponse:
-    """Paso 2 del import: persiste el baseline con una fila normalizada por dirección."""
-    from scrapitero.agents.direccion_norm import (normalizar_calle, normalizar_numero,
-                                                  separar_numero)
-    row = _get_survey_row(survey_id)
-    if not row:
-        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
-    region_id = row[0]
-
+def _parse_mapeo(mapeo: str) -> dict:
+    """Valida el JSON {campo: header} del mapeo. Lanza ValueError si es inválido."""
     try:
         mapeo_d = json.loads(mapeo)
         assert isinstance(mapeo_d, dict)
     except Exception:
-        return JSONResponse({"ok": False, "error": "Mapeo inválido (se espera JSON {campo: columna})"},
-                            status_code=400)
+        raise ValueError("Mapeo inválido (se espera JSON {campo: columna})")
     if not (mapeo_d.get("direccion") or mapeo_d.get("calle")):
-        return JSONResponse({"ok": False, "error":
-                             "El mapeo necesita al menos la columna de dirección (o la de calle)"},
-                            status_code=400)
+        raise ValueError("El mapeo necesita al menos la columna de dirección (o la de calle)")
+    return mapeo_d
 
-    data = await archivo.read()
-    try:
-        headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
-    except ValueError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
+                                  baseline_id: str) -> tuple[list[dict], int]:
+    """Normaliza cada fila del CSV a una fila de `baseline_direcciones`.
+    Devuelve (registros, filas_sin_direccion). Lanza ValueError si faltan columnas."""
+    from scrapitero.agents.direccion_norm import (normalizar_calle, normalizar_numero,
+                                                  separar_numero)
     idx = {h: i for i, h in enumerate(headers)}
     faltantes = [h for h in mapeo_d.values() if h and h not in idx]
     if faltantes:
-        return JSONResponse({"ok": False, "error": f"Columnas del mapeo que no están en el CSV: {faltantes}"},
-                            status_code=400)
+        raise ValueError(f"Columnas del mapeo que no están en el CSV: {faltantes}")
 
     def celda(fila: list, campo: str) -> str:
         h = mapeo_d.get(campo)
@@ -1515,7 +1536,6 @@ async def baseline_import(
         return int(m.group(0)) if m else None
 
     mapeadas = {h for h in mapeo_d.values() if h}
-    baseline_id = str(uuid.uuid4())
     registros = []
     sin_direccion = 0
     for fila in datos:
@@ -1539,40 +1559,83 @@ async def baseline_import(
             "calle_norm": calle_norm,
             "numero_norm": normalizar_numero(numero),
             "uso": (celda(fila, "uso").lower()[:30] or None),
+            "ciudad": (celda(fila, "ciudad")[:200] or None),
             "uf_v": entero(celda(fila, "uf_vivienda")),
             "uf_c": entero(celda(fila, "uf_comercio")),
             "extras": json.dumps(extras, ensure_ascii=False)[:4000] if extras else None,
         })
+    return registros, sin_direccion
+
+
+def _persistir_baseline(conn, region_id: str, nombre: str, fecha_val, archivo_nombre: str,
+                        mapeo_d: dict, registros: list[dict], ciudad: str = "") -> str:
+    """Inserta `baselines` + `baseline_direcciones` en la conexión dada. Devuelve baseline_id."""
+    baseline_id = registros[0]["bid"]
+    conn.execute(text("""
+        INSERT INTO baselines (baseline_id, region_id, nombre, fecha_relevamiento,
+                               archivo_nombre, mapeo, n_registros, ciudad)
+        VALUES (:bid, :rid, :nombre, :fecha, :archivo, :mapeo, :n, :ciudad)
+    """), {"bid": baseline_id, "rid": region_id, "nombre": nombre.strip(),
+           "fecha": fecha_val, "archivo": (archivo_nombre or "")[:255],
+           "mapeo": json.dumps(mapeo_d, ensure_ascii=False), "n": len(registros),
+           "ciudad": (ciudad or "").strip()[:200] or None})
+    conn.execute(text("""
+        INSERT INTO baseline_direcciones
+               (id, baseline_id, direccion_raw, calle, numero, calle_norm,
+                numero_norm, uso, ciudad, uf_vivienda, uf_comercio, extras)
+        VALUES (:id, :bid, :raw, :calle, :numero, :calle_norm, :numero_norm,
+                :uso, :ciudad, :uf_v, :uf_c, :extras)
+    """), registros)
+    return baseline_id
+
+
+def _parse_fecha(fecha: str):
+    """'YYYY-MM-DD' → date, o None si vacío. Lanza ValueError si tiene formato inválido."""
+    if not fecha.strip():
+        return None
+    try:
+        return datetime.strptime(fecha.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"Fecha inválida: {fecha!r} (formato YYYY-MM-DD)")
+
+
+@app.post("/api/surveys/{survey_id}/baselines")
+async def baseline_import(
+    survey_id: str,
+    archivo: UploadFile = File(...),
+    nombre: str = Form(...),
+    fecha: str = Form(""),               # fecha del relevamiento ORIGINAL (YYYY-MM-DD)
+    mapeo: str = Form(...),              # JSON {campo: header} confirmado por el usuario
+) -> JSONResponse:
+    """Paso 2 del import: persiste el baseline con una fila normalizada por dirección."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    try:
+        mapeo_d = _parse_mapeo(mapeo)
+        fecha_val = _parse_fecha(fecha)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    data = await archivo.read()
+    try:
+        headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+        registros, sin_direccion = _construir_registros_baseline(
+            headers, datos, mapeo_d, str(uuid.uuid4()))
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     if not registros:
         return JSONResponse({"ok": False, "error":
                              "Ninguna fila tiene dirección legible con el mapeo elegido — "
                              "revisá qué columna es la dirección"}, status_code=400)
 
-    fecha_val = None
-    if fecha.strip():
-        try:
-            fecha_val = datetime.strptime(fecha.strip(), "%Y-%m-%d").date()
-        except ValueError:
-            return JSONResponse({"ok": False, "error": f"Fecha inválida: {fecha!r} (formato YYYY-MM-DD)"},
-                                status_code=400)
-
     engine = get_engine()
     with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO baselines (baseline_id, region_id, nombre, fecha_relevamiento,
-                                   archivo_nombre, mapeo, n_registros)
-            VALUES (:bid, :rid, :nombre, :fecha, :archivo, :mapeo, :n)
-        """), {"bid": baseline_id, "rid": region_id, "nombre": nombre.strip(),
-               "fecha": fecha_val, "archivo": (archivo.filename or "")[:255],
-               "mapeo": json.dumps(mapeo_d, ensure_ascii=False), "n": len(registros)})
-        conn.execute(text("""
-            INSERT INTO baseline_direcciones
-                   (id, baseline_id, direccion_raw, calle, numero, calle_norm,
-                    numero_norm, uso, uf_vivienda, uf_comercio, extras)
-            VALUES (:id, :bid, :raw, :calle, :numero, :calle_norm, :numero_norm,
-                    :uso, :uf_v, :uf_c, :extras)
-        """), registros)
+        baseline_id = _persistir_baseline(conn, region_id, nombre, fecha_val,
+                                          archivo.filename or "", mapeo_d, registros)
 
     logger.info(f"Baseline «{nombre}» importado para {region_id}: "
                 f"{len(registros)} direcciones ({sin_direccion} filas sin dirección descartadas)")
@@ -1593,6 +1656,277 @@ async def eliminar_baseline(baseline_id: str) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
     logger.info(f"Baseline «{row[0]}» eliminado")
     return JSONResponse({"ok": True})
+
+
+# ── Actualización: crear un relevamiento NUEVO sobre el CSV anterior geocodificado ──
+# El operador marca "actualización", sube el CSV del relevamiento anterior (sin
+# coordenadas), lo geocodificamos para graficarlo en el mapa, y dibuja encima el
+# polígono de la nueva zona. El CSV queda como baseline auto-vinculado a la región.
+
+# Estado en memoria de los jobs de geocoding (el web corre en un único proceso).
+_geocoding_jobs: dict[str, dict] = {}
+
+
+@app.post("/api/actualizaciones/preview")
+async def actualizacion_preview(archivo: UploadFile = File(...)) -> JSONResponse:
+    """Paso 1 (sin survey): lee headers + muestra del CSV anterior, sugiere el mapeo."""
+    data = await archivo.read()
+    try:
+        headers, datos, sep = _leer_csv_baseline(data, archivo.filename or "")
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "headers": [h for h in headers if str(h).strip()],
+        "muestra": datos[:5],
+        "headers_completos": headers,
+        "mapeo_sugerido": _autodetectar_mapeo(headers),
+        "separador": sep,
+        "total_filas": len(datos),
+    })
+
+
+def _detectar_pais_baseline(registros: list[dict], ciudad: str = "",
+                            muestra: int = 5) -> Optional[str]:
+    """ISO-3 del país de las direcciones del baseline: geocodifica unas pocas SIN
+    sesgo de país y deduce el país del primer punto. None si ninguna ubica.
+    Se usa cuando el operador deja el país en AUTO (el geocoder necesita el país
+    correcto para sesgar la búsqueda de todo el lote). La ciudad ayuda a ubicar bien."""
+    import httpx
+    from scrapitero.agents import geo
+    from scrapitero.agents.baseline_geocoder import _HEADERS, _google, _nominatim, _query
+    with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
+        for reg in registros[:muestra]:
+            q = _query(reg.get("calle") or "", reg.get("numero") or "", ciudad or None)
+            if not q:
+                continue
+            hit = _nominatim(q, None, client) or _google(q, None, client)
+            if hit:
+                iso3 = geo.detect_country(hit[0], hit[1])
+                if iso3:
+                    return iso3
+    return None
+
+
+def _lanzar_geocoding(baseline_id: str) -> None:
+    """Corre BaselineGeocoder en un thread; deja el estado en `_geocoding_jobs`."""
+    from scrapitero.agents.baseline_geocoder import BaselineGeocoderInput
+    from scrapitero.agents.baseline_geocoder import run as run_geo
+
+    _geocoding_jobs[baseline_id] = {"estado": "running", "error": None}
+
+    def _job() -> None:
+        try:
+            out = run_geo(BaselineGeocoderInput(baseline_id=baseline_id))
+            if out.ok:
+                _geocoding_jobs[baseline_id] = {"estado": "done", "error": None,
+                                                "reusadas": out.reusadas}
+            else:
+                _geocoding_jobs[baseline_id] = {"estado": "error", "error": out.error}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Geocoding baseline {baseline_id} falló: {e!r}")
+            _geocoding_jobs[baseline_id] = {"estado": "error", "error": str(e)}
+
+    threading.Thread(target=_job, daemon=True).start()
+
+
+@app.post("/api/actualizaciones/preparar")
+async def actualizacion_preparar(
+    nombre: str = Form(...),
+    country_code: str = Form("AUTO"),
+    archivo: UploadFile = File(...),
+    mapeo: str = Form(...),
+    fecha: str = Form(""),
+    ciudad: str = Form(""),          # ciudad/localidad para geocodificar bien
+) -> JSONResponse:
+    """Paso 2: crea la región + persiste el baseline y lanza el geocoding en background.
+    El polígono de la nueva zona se dibuja después (crear-survey)."""
+    try:
+        mapeo_d = _parse_mapeo(mapeo)
+        fecha_val = _parse_fecha(fecha)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    data = await archivo.read()
+    try:
+        headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+        registros, sin_direccion = _construir_registros_baseline(
+            headers, datos, mapeo_d, str(uuid.uuid4()))
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    if not registros:
+        return JSONResponse({"ok": False, "error":
+                             "Ninguna fila tiene dirección legible con el mapeo elegido — "
+                             "revisá qué columna es la dirección"}, status_code=400)
+
+    cc = (country_code or "AUTO").upper()
+    if cc in ("BRA", "ARG"):
+        region_cc = cc
+    else:   # AUTO: detectar el país de las direcciones (el geocoder lo necesita para sesgar)
+        region_cc = await asyncio.to_thread(_detectar_pais_baseline, registros, ciudad)
+        if not region_cc:
+            return JSONResponse({"ok": False, "error": (
+                "No se pudo autodetectar el país de las direcciones (el geocoding de "
+                "muestra falló). Reintentá o elegí el país manualmente.")}, status_code=422)
+    region_id = f"zona-{_slugify(nombre)}"
+
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO regions (region_id, name, country_code)
+                VALUES (:rid, :name, :cc)
+                ON CONFLICT (region_id) DO UPDATE SET name = EXCLUDED.name
+            """), {"rid": region_id, "name": nombre, "cc": region_cc})
+            baseline_id = _persistir_baseline(conn, region_id, nombre, fecha_val,
+                                              archivo.filename or "", mapeo_d, registros,
+                                              ciudad)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    _lanzar_geocoding(baseline_id)
+    logger.info(f"Actualización «{nombre}»: región {region_id} + baseline {baseline_id} "
+                f"({len(registros)} direcciones, geocoding lanzado)")
+    return JSONResponse({"ok": True, "region_id": region_id, "baseline_id": baseline_id,
+                         "total": len(registros), "sin_direccion": sin_direccion})
+
+
+@app.get("/api/baselines/{baseline_id}/geocoding")
+async def actualizacion_geocoding_status(baseline_id: str) -> JSONResponse:
+    """Progreso del geocoding. Devuelve los puntos cuando terminó (`listo`)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text("""
+            SELECT nombre, n_registros, geocoded_at FROM baselines WHERE baseline_id = :bid
+        """), {"bid": baseline_id}).fetchone()
+        if not meta:
+            return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
+        geocodificadas = conn.execute(text("""
+            SELECT COUNT(*) FROM baseline_direcciones
+            WHERE baseline_id = :bid AND lat IS NOT NULL
+        """), {"bid": baseline_id}).scalar() or 0
+
+    job = _geocoding_jobs.get(baseline_id, {})
+    estado = job.get("estado")
+    db_listo = meta[2] is not None
+    listo = db_listo or estado == "done"
+    total = int(meta[1] or 0)
+
+    puntos = []
+    if listo:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio
+                FROM baseline_direcciones
+                WHERE baseline_id = :bid AND lat IS NOT NULL
+            """), {"bid": baseline_id}).fetchall()
+        puntos = [{
+            "lat": float(r[0]), "lng": float(r[1]),
+            "direccion": " ".join(x for x in (r[2] or "", r[3] or "") if x).strip(),
+            "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
+        } for r in rows]
+
+    return JSONResponse({
+        "ok": True, "nombre": meta[0], "total": total,
+        "geocodificadas": int(geocodificadas),
+        "fallidas": (total - int(geocodificadas)) if listo else 0,
+        "reusadas": int(job.get("reusadas") or 0),
+        "listo": listo,
+        "error": job.get("error") if estado == "error" else None,
+    } | ({"puntos": puntos} if listo else {}))
+
+
+@app.get("/api/baselines/{baseline_id}/puntos")
+async def baseline_puntos(baseline_id: str) -> JSONResponse:
+    """Puntos geocodificados del relevamiento anterior (para graficarlo en gris en
+    el mapa, con su UF). Reusado por el wizard de actualización y el mapa del survey."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio
+            FROM baseline_direcciones
+            WHERE baseline_id = :bid AND lat IS NOT NULL
+        """), {"bid": baseline_id}).fetchall()
+    puntos = [{
+        "lat": float(r[0]), "lng": float(r[1]),
+        "direccion": " ".join(x for x in (r[2] or "", r[3] or "") if x).strip(),
+        "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
+        "uf_total": int((r[5] or 0) + (r[6] or 0)),
+    } for r in rows]
+    return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})
+
+
+@app.post("/api/baselines/{baseline_id}/crear-survey")
+async def actualizacion_crear_survey(
+    baseline_id: str,
+    geojson_file: UploadFile = File(...),
+) -> JSONResponse:
+    """Paso final: el polígono dibujado sobre el relevamiento anterior define la
+    nueva zona. Setea `regions.zone_geojson` + bbox y crea el survey (stopped)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        base = conn.execute(text(
+            "SELECT region_id, nombre FROM baselines WHERE baseline_id = :bid"),
+            {"bid": baseline_id}).fetchone()
+    if not base:
+        return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
+    region_id, nombre = base[0], base[1]
+
+    geojson_bytes = await geojson_file.read()
+    try:
+        geojson_str = geojson_bytes.decode("utf-8")
+        geojson_data = json.loads(geojson_str)
+        bbox = _bbox_from_geojson(geojson_data)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"GeoJSON inválido: {e}"}, status_code=400)
+
+    # Sanity: el polígono debe cubrir al menos un punto del relevamiento anterior.
+    with engine.connect() as conn:
+        dentro = conn.execute(text("""
+            SELECT COUNT(*) FROM baseline_direcciones
+            WHERE baseline_id = :bid AND lat IS NOT NULL
+              AND lat BETWEEN :s AND :n AND lng BETWEEN :w AND :e
+        """), {"bid": baseline_id, "s": bbox["south"], "n": bbox["north"],
+               "w": bbox["west"], "e": bbox["east"]}).scalar() or 0
+    if dentro == 0:
+        return JSONResponse({"ok": False, "error":
+                             "El polígono no cubre ninguna dirección del relevamiento anterior — "
+                             "dibujalo sobre los puntos del mapa."}, status_code=400)
+
+    # País/municipio del centroide del polígono (si no se fijaron al preparar).
+    cc_lat = (bbox["south"] + bbox["north"]) / 2.0
+    cc_lng = (bbox["west"] + bbox["east"]) / 2.0
+    from scrapitero.agents import geo
+    municipio = None
+    with engine.connect() as conn:
+        cc_actual = conn.execute(text(
+            "SELECT country_code FROM regions WHERE region_id = :rid"),
+            {"rid": region_id}).scalar()
+    country_code = cc_actual or await asyncio.to_thread(geo.detect_country, cc_lat, cc_lng)
+    if country_code == "BRA":
+        municipio = await asyncio.to_thread(geo.detect_municipio_br, cc_lat, cc_lng)
+
+    survey_id = str(uuid.uuid4())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE regions
+                SET zone_geojson = :gj, bbox_wkt = :bbox,
+                    country_code = COALESCE(country_code, :cc),
+                    municipio_codigo = COALESCE(municipio_codigo, :mun)
+                WHERE region_id = :rid
+            """), {"gj": geojson_str, "bbox": _bbox_to_wkt(bbox), "cc": country_code,
+                   "mun": municipio, "rid": region_id})
+            conn.execute(text("""
+                INSERT INTO surveys (survey_id, region_id, status, baseline_id)
+                VALUES (:sid, :rid, 'stopped', :bid)
+            """), {"sid": survey_id, "rid": region_id, "bid": baseline_id})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    logger.info(f"Actualización «{nombre}»: survey {survey_id} creado sobre {region_id} "
+                f"(zona dibujada cubre {dentro} direcciones del anterior)")
+    return JSONResponse({"ok": True, "survey_id": survey_id, "region_id": region_id})
 
 
 @app.get("/api/surveys/{survey_id}/comparativa/opciones")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -104,6 +105,9 @@ def _parse_bci(text: str) -> dict:
         "propietario_nombre": None,
         "propietario_documento": None,
         "contribuyente_secundario": None,
+        # Lista de unidades del imóvel (UNIDADE 1..N del BCI) — para expandir el CSV
+        # una fila por unidad. Sólo tiene sentido cuando hay más de una.
+        "unidades": [],
     }
 
     # ── Tipo do imóvel ─────────────────────────────────────────────────────────
@@ -115,14 +119,37 @@ def _parse_bci(text: str) -> dict:
     if r["tipo_imovel"] == "territorial":
         r["uso_principal"] = "vacante"
     else:
-        unit_rows = re.findall(
+        # Cada unidade del imóvel arranca con el header "UNIDADE CÓDIGO DA UNIDADE …
+        # TOTAL" seguido de su línea de datos (n, código, área_unidade, área_total).
+        # Iteramos por bloque para sacar también uso y año de cada una.
+        unit_iter = list(re.finditer(
             r'UNIDADE\s+C[OÓ]DIGO\s+DA\s+UNIDADE.*?TOTAL\s*\n\s*(\d+)\s+(\d+)\s+([\d,]+)\s+([\d,]+)',
             text, re.I | re.DOTALL,
-        )
+        ))
+        unidades = []
+        for i, mu in enumerate(unit_iter):
+            n_u, cod_u, area_u, _area_tot = mu.groups()
+            fin = unit_iter[i + 1].start() if i + 1 < len(unit_iter) else len(text)
+            blk = text[mu.end():fin]
+            uso_m = re.search(r'\bUSO\s+(RESIDENCIAL|COMERCIAL|INDUSTRIAL|MISTO)\b', blk, re.I)
+            ano_m = re.search(r'ANO\s+CONSTRU[CÇ][AÃ]O:?\s*(\d{4})', blk, re.I)
+            try:
+                area_v = float(area_u.replace(",", "."))
+            except ValueError:
+                area_v = None
+            unidades.append({
+                "n": int(n_u),
+                "codigo": cod_u,
+                "area_m2": area_v,
+                "anio": int(ano_m.group(1)) if (ano_m and ano_m.group(1) != "0") else None,
+                "uso": uso_m.group(1).lower() if uso_m else None,
+            })
+        r["unidades"] = unidades
+
         usos = re.findall(r'\bUSO\s+(RESIDENCIAL|COMERCIAL|INDUSTRIAL|MISTO)\b', text, re.I)
         r["uf_vivienda"] = sum(1 for u in usos if u.upper() == "RESIDENCIAL")
         r["uf_comercio"] = sum(1 for u in usos if u.upper() == "COMERCIAL")
-        r["uf_total"] = len(unit_rows) or len(usos)
+        r["uf_total"] = len(unit_iter) or len(usos)
 
         if r["uf_comercio"] > 0 and r["uf_vivienda"] > 0:
             r["uso_principal"] = "mixto"
@@ -133,9 +160,10 @@ def _parse_bci(text: str) -> dict:
         else:
             r["uso_principal"] = "residencial"
 
-        if unit_rows:
+        if unit_iter:
             try:
-                r["area_m2_construida"] = float(unit_rows[0][3].replace(",", "."))
+                # group(4) = ÁREA CONSTRUÇÃO TOTAL de la primera unidade
+                r["area_m2_construida"] = float(unit_iter[0].group(4).replace(",", "."))
             except ValueError:
                 pass
 
@@ -375,6 +403,23 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
             "prop_doc": d["propietario_documento"],
             "prop_sec": d["contribuyente_secundario"],
         })
+
+        # Unidades del imóvel (para expandir el CSV una fila por unidad). Sólo se
+        # guardan parcelas con MÁS de una unidad — el resto es una sola fila normal.
+        # Idempotente: se reescriben en cada parseo.
+        conn.execute(text("DELETE FROM parcela_unidades WHERE parcela_id = :pid"),
+                     {"pid": parcela_id})
+        unidades = d.get("unidades") or []
+        if len(unidades) > 1:
+            conn.execute(text("""
+                INSERT INTO parcela_unidades
+                    (id, parcela_id, n_unidade, codigo_unidade, area_m2, anio_construccion, uso)
+                VALUES (:id, :pid, :n, :cod, :area, :anio, :uso)
+            """), [{
+                "id": str(uuid.uuid4()), "pid": parcela_id,
+                "n": u["n"], "cod": (u["codigo"] or "")[:30],
+                "area": u["area_m2"], "anio": u["anio"], "uso": u["uso"],
+            } for u in unidades])
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
