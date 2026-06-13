@@ -98,20 +98,27 @@ def fetch_idera(partido: str, circ: str, secc: str, mza: str) -> list[dict]:
 
 # ── IDERA WFS — filtro espacial (desde el GeoJSON de la zona) ──────────────────
 
-def _load_zone_polygon(region_id: str):
-    """Devuelve el polígono (shapely) de la zona desde regions.zone_geojson.
+def _load_zone_polygon(region_id: str, survey_id=None):
+    """Devuelve el polígono (shapely) de la zona EFECTIVA: la subzona del survey
+    (relevamiento parcial, migración 018) si existe, si no regions.zone_geojson.
 
-    Acepta FeatureCollection / Feature / geometría. Devuelve None si la región
-    no tiene zone_geojson (no se puede filtrar espacialmente sin polígono).
+    Acepta FeatureCollection / Feature / geometría. Devuelve None si no hay
+    polígono (no se puede filtrar espacialmente sin polígono).
     """
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT zone_geojson FROM regions WHERE region_id = :r"),
-            {"r": region_id},
-        ).fetchone()
+        row = conn.execute(text("""
+            SELECT COALESCE(s.subzona_geojson, r.zone_geojson),
+                   (s.subzona_geojson IS NOT NULL) AS es_subzona
+            FROM regions r
+            LEFT JOIN surveys s ON s.survey_id::text = :sid
+                 AND s.region_id = r.region_id AND s.subzona_geojson IS NOT NULL
+            WHERE r.region_id = :r
+        """), {"r": region_id, "sid": str(survey_id or "")}).fetchone()
     if not row or not row[0]:
         return None
+    if row[1]:
+        logger.info("ARBA: usando SUB-ZONA del survey (relevamiento parcial)")
     gj = row[0]
     if isinstance(gj, str):
         gj = json.loads(gj)
@@ -296,7 +303,7 @@ def run(input: ARBAInput) -> ARBAOutput:
                 ))
             fuente = "idera_wfs"
         else:
-            zone_poly = _load_zone_polygon(input.region_id)
+            zone_poly = _load_zone_polygon(input.region_id, input.survey_id)
             if zone_poly is None:
                 return ARBAOutput(ok=False, error=(
                     f"La región '{input.region_id}' no tiene zone_geojson para filtrar "

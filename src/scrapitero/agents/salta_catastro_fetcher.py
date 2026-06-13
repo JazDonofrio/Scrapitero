@@ -138,19 +138,28 @@ class SaltaCatastroOutput(BaseModel):
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def _load_zone(region_id: str) -> tuple[Optional[tuple], Optional[object]]:
-    """Devuelve ((south, west, north, east), zone_polygon_or_None)."""
+def _load_zone(region_id: str,
+               survey_id: Optional[str] = None) -> tuple[Optional[tuple], Optional[object]]:
+    """Devuelve ((south, west, north, east), zone_polygon_or_None). La zona efectiva
+    es la subzona del survey (relevamiento parcial) si existe, si no la de la región."""
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT bbox_wkt, zone_geojson FROM regions WHERE region_id = :rid"
-        ), {"rid": region_id}).fetchone()
+        row = conn.execute(text("""
+            SELECT r.bbox_wkt, COALESCE(s.subzona_geojson, r.zone_geojson),
+                   (s.subzona_geojson IS NOT NULL) AS es_subzona
+            FROM regions r
+            LEFT JOIN surveys s ON s.survey_id::text = :sid
+                 AND s.region_id = r.region_id AND s.subzona_geojson IS NOT NULL
+            WHERE r.region_id = :rid
+        """), {"rid": region_id, "sid": str(survey_id or "")}).fetchone()
 
     if not row:
         logger.error(f"SaltaCatastro: región '{region_id}' no existe en DB")
         return None, None
+    if row[2]:
+        logger.info("SaltaCatastro: usando SUB-ZONA del survey (relevamiento parcial)")
 
-    bbox_wkt, zone_geojson_str = row
+    bbox_wkt, zone_geojson_str = row[0], row[1]
     zone_polygon = None
 
     if zone_geojson_str:
@@ -404,7 +413,7 @@ def _upsert(
 @agent_run
 def run(inp: SaltaCatastroInput) -> SaltaCatastroOutput:
     # 1. Zona
-    zone_bbox, zone_polygon = _load_zone(inp.region_id)
+    zone_bbox, zone_polygon = _load_zone(inp.region_id, inp.survey_id)
     if zone_bbox is None:
         return SaltaCatastroOutput(
             ok=False,

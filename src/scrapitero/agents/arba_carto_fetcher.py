@@ -404,7 +404,7 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                     ))
             else:
                 logger.info("Sin parcelas en DB — descargando de IDERA por zona (GeoJSON)...")
-                zone_poly = _load_zone_polygon(input.region_id)
+                zone_poly = _load_zone_polygon(input.region_id, input.survey_id)
                 if zone_poly is None:
                     return ARBACartoOutput(ok=False, error=(
                         f"La región '{input.region_id}' no tiene zone_geojson para filtrar "

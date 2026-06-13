@@ -465,7 +465,8 @@ async def list_surveys(request: Request) -> list[dict]:
                 COALESCE(pa.con_inscripcion, 0)                                    AS con_inscripcion,
                 COALESCE(es.n_est, 0)                                              AS total_establecimientos,
                 s.visible_cliente,
-                s.archivado
+                s.archivado,
+                s.subzona_geojson
             FROM surveys s
             JOIN regions r ON s.region_id = r.region_id
             LEFT JOIN (
@@ -521,7 +522,6 @@ async def list_surveys(request: Request) -> list[dict]:
             "pipeline": notas,
             "region_nombre": r[5],
             "country_code": r[6],
-            "zone_geojson": r[7],
             "total_edificios": int(r[8] or 0),
             "total_parcelas": int(r[9] or 0),
             "total_uf_vivienda": int(r[10] or 0),
@@ -533,6 +533,9 @@ async def list_surveys(request: Request) -> list[dict]:
             "total_establecimientos": int(r[16] or 0),
             "visible_cliente": bool(r[17]),
             "archivado": bool(r[18]),
+            # Relevamiento parcial: el mapa muestra la SUB-zona, no la región entera
+            "zone_geojson": r[19] or r[7],
+            "es_parcial": bool(r[19]),
         })
     return result
 
@@ -1215,6 +1218,143 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             ])
         yield buf.getvalue()
 
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Relevamientos parciales (sub-zona de una región ya relevada) ───────────────
+
+@app.post("/api/surveys/{survey_id}/parcial")
+async def crear_parcial(survey_id: str,
+                        geojson_file: UploadFile = File(...)) -> JSONResponse:
+    """Crea un survey NUEVO sobre la misma región, acotado a una sub-zona
+    (polígono propio en `surveys.subzona_geojson`, migración 018). Los fetchers
+    prefieren la subzona al filtrar; los PDFs BCI compartidos se reutilizan.
+    El survey grande queda intacto (los relevamientos no se pisan)."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    geojson_bytes = await geojson_file.read()
+    try:
+        geojson_str = geojson_bytes.decode("utf-8")
+        geojson_data = json.loads(geojson_str)
+        _bbox_from_geojson(geojson_data)        # valida que tenga coordenadas
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"GeoJSON inválido: {e}"}, status_code=400)
+
+    # La sub-zona debe tocar la zona de la región (si la región tiene polígono).
+    engine = get_engine()
+    with engine.connect() as conn:
+        zona_region = conn.execute(text(
+            "SELECT zone_geojson FROM regions WHERE region_id = :rid"),
+            {"rid": region_id}).scalar()
+    if zona_region:
+        try:
+            from shapely.geometry import shape
+            from shapely.ops import unary_union
+
+            def _poly(gj: dict):
+                if gj.get("type") == "FeatureCollection":
+                    geoms = [shape(f["geometry"]) for f in gj.get("features", [])
+                             if f.get("geometry")]
+                elif gj.get("type") == "Feature":
+                    geoms = [shape(gj["geometry"])]
+                else:
+                    geoms = [shape(gj)]
+                return unary_union(geoms).buffer(0)
+
+            if not _poly(geojson_data).intersects(_poly(json.loads(zona_region))):
+                return JSONResponse({"ok": False, "error":
+                                     "La sub-zona no se superpone con la zona de la región — "
+                                     "revisá el polígono (¿es de otro lugar?)"}, status_code=400)
+        except Exception as e:
+            logger.warning(f"No se pudo validar la sub-zona contra la región: {e}")
+
+    nuevo_sid = str(uuid.uuid4())
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO surveys (survey_id, region_id, status, subzona_geojson)
+            VALUES (:sid, :rid, 'stopped', :gj)
+        """), {"sid": nuevo_sid, "rid": region_id, "gj": geojson_str})
+    logger.info(f"Relevamiento PARCIAL creado para {region_id}: survey {nuevo_sid} "
+                f"(sub-zona de {len(geojson_str)} bytes)")
+    return JSONResponse({"ok": True, "survey_id": nuevo_sid, "region_id": region_id})
+
+
+@app.get("/api/regions/{region_id}/export/csv-consolidado")
+async def export_csv_consolidado(region_id: str):
+    """CSV CONSOLIDADO de la región: el dato más reciente de cada parcela entre
+    TODOS los surveys (completos y parciales, incl. archivados). Los relevamientos
+    nunca se pisan — esta vista los combina en lectura: identidad de parcela =
+    cca_code (o clave de dirección, o el id) y gana la fila del survey más nuevo."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text(
+            "SELECT name FROM regions WHERE region_id = :rid"), {"rid": region_id}).fetchone()
+        if not meta:
+            return JSONResponse({"error": "Región no encontrada"}, status_code=404)
+        rows = conn.execute(text("""
+            WITH filas AS (
+                SELECT p.calle, p.numero, p.complemento, p.barrio, p.municipio,
+                       p.codigo_postal, p.uso_principal,
+                       CASE WHEN p.uf_vivienda IS NULL AND p.uf_comercio IS NULL
+                            THEN COALESCE(p.unidades_funcionales_estimadas, 0)
+                            ELSE COALESCE(p.uf_vivienda, 0) END AS uf_viv,
+                       COALESCE(p.uf_comercio, 0) AS uf_com,
+                       p.cca_code, p.nomenclatura_catastral,
+                       p.area_m2_terreno, p.area_m2_construida,
+                       p.fuente_parcela, p.centroid_lat, p.centroid_lng,
+                       COALESCE(s.finished_at, s.started_at) AS s_fecha,
+                       (s.subzona_geojson IS NOT NULL) AS es_parcial,
+                       COALESCE(NULLIF(p.cca_code, ''),
+                                NULLIF(LOWER(TRIM(COALESCE(p.calle, '') || '|' ||
+                                             COALESCE(p.numero, ''))), '|'),
+                                p.parcela_id::text) AS ident
+                FROM parcelas p JOIN surveys s ON s.survey_id = p.survey_id
+                WHERE p.region_id = :rid
+            )
+            SELECT DISTINCT ON (ident) *
+            FROM filas ORDER BY ident, s_fecha DESC
+        """), {"rid": region_id}).fetchall()
+
+    if not rows:
+        return JSONResponse({"error": "La región no tiene parcelas relevadas"},
+                            status_code=404)
+
+    def _gen():
+        buf = io.StringIO()
+        buf.write("﻿")   # BOM para Excel
+        w = csv.writer(buf, delimiter=";")
+        w.writerow([f"Consolidado de la región: {meta[0]}",
+                    f"({len(rows)} parcelas — dato más reciente de cada una entre todos los relevamientos)"])
+        w.writerow([])
+        w.writerow(["Dirección", "Uso", "UF Vivienda", "UF Comercio",
+                    "Bairro", "Municipio", "CEP", "Inscripción", "Nomenclatura",
+                    "Área Terreno m²", "Área Construida m²", "Fuente",
+                    "Lat", "Lng", "Relevado el", "De relevamiento parcial"])
+        for r in sorted(rows, key=lambda x: ((x[0] or "~"), (x[1] or ""))):
+            direccion = " ".join(s for s in (r[0], r[1], r[2]) if s).strip()
+            w.writerow([
+                direccion or "(sin dirección)",
+                r[6] or "", int(r[7] or 0), int(r[8] or 0),
+                r[3] or "", r[4] or "", r[5] or "",
+                r[9] or "", r[10] or "",
+                f"{r[11]:.2f}" if r[11] else "",
+                f"{r[12]:.2f}" if r[12] else "",
+                r[13] or "",
+                f"{r[14]:.6f}" if r[14] else "",
+                f"{r[15]:.6f}" if r[15] else "",
+                r[16].strftime("%Y-%m-%d") if r[16] else "",
+                "sí" if r[17] else "",
+            ])
+        yield buf.getvalue()
+
+    filename = f"consolidado_{region_id}.csv"
     return StreamingResponse(
         _gen(),
         media_type="text/csv; charset=utf-8",

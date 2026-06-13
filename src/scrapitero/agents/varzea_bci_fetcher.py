@@ -129,16 +129,24 @@ class BCIOutput(BaseModel):
 
 # ── Helpers de DB ──────────────────────────────────────────────────────────────
 
-def _load_zone_polygon(region_id: str) -> Optional[object]:
+def _load_zone_polygon(region_id: str, survey_id: Optional[str] = None) -> Optional[object]:
     from scrapitero.agents.smartgis_fetcher import _geom_to_polygon
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT zone_geojson FROM regions WHERE region_id = :rid"
-        ), {"rid": region_id}).fetchone()
+        # Zona efectiva: subzona del survey (relevamiento parcial) o zona de la región.
+        row = conn.execute(text("""
+            SELECT COALESCE(s.subzona_geojson, r.zone_geojson),
+                   (s.subzona_geojson IS NOT NULL) AS es_subzona
+            FROM regions r
+            LEFT JOIN surveys s ON s.survey_id::text = :sid
+                 AND s.region_id = r.region_id AND s.subzona_geojson IS NOT NULL
+            WHERE r.region_id = :rid
+        """), {"rid": region_id, "sid": str(survey_id or "")}).fetchone()
     if not row or not row[0]:
         logger.info(f"BCI: región '{region_id}' sin zone_geojson — sin filtro de zona")
         return None
+    if row[1]:
+        logger.info(f"BCI: usando SUB-ZONA del survey (relevamiento parcial)")
     try:
         gj = json.loads(row[0])
         raw_geoms = []
@@ -502,7 +510,7 @@ def _telegram_notify(msg: str) -> None:
 
 @agent_run
 def run(input: BCIInput) -> BCIOutput:
-    zone_polygon = _load_zone_polygon(input.region_id)
+    zone_polygon = _load_zone_polygon(input.region_id, input.survey_id)
     if zone_polygon is None:
         logger.warning(f"Sin zone_geojson para {input.region_id} — procesando toda la región")
 

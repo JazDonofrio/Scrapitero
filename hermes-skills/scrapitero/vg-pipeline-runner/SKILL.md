@@ -20,6 +20,11 @@ presupuesto de tiempo. Menos llamadas al modelo, menos contexto, menos cuota.
 - **SIEMPRE que haya que relevar una zona de Brasil/VG** (en lugar de llamar
   smartgis-fetcher, varzea-bci-fetcher, bci-parser y establecimiento-agrupador a mano).
 - La región ya debe existir con `zone_geojson` y el survey creado.
+- **Relevamientos parciales (sub-zona):** si el survey tiene `surveys.subzona_geojson`
+  (creado desde la web con "🔁 Sub-zona"), todos los pasos filtran automáticamente por
+  ese polígono en vez de la zona completa — no hay que pasar nada extra, solo el
+  `survey_id` correcto. Los PDFs BCI compartidos se reutilizan. El survey grande
+  anterior queda intacto (sirve después para la comparativa de la web).
 
 ## Correr el runner
 

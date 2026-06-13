@@ -96,6 +96,7 @@ Cada step del orquestador registra: `agent_called`, `input_resumen`, `output_res
 | 008 | `uf_fuente` en `parcelas` (bci=exacto / osm/proxy/uso=estimado; se muestra en la web) |
 | 009–016 | `uso_fuente`, `comercios`, `manzanas_habitantes`, BCI valor venal/propietario, `establecimientos`, `visible_cliente`, `comentarios_cliente`, `codigo_logradouro` |
 | 017 | `baselines` + `baseline_direcciones` (relevamiento anterior importado, comparativa) + `surveys.archivado` (los surveys no se borran: se archivan y quedan comparables) |
+| 018 | `surveys.subzona_geojson` (relevamientos parciales: survey nuevo sobre la misma región acotado a un polígono; los fetchers prefieren la subzona vía COALESCE) |
 
 ---
 

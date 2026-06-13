@@ -24,6 +24,10 @@ No seguís un guión fijo — evaluás el estado actual y elegís las skills má
 5. **Ante un error, reintentá** hasta 3 veces antes de reportar falla y continuar con lo que puedas.
 6. **Ante una decisión que no podés tomar solo**, pedíla por Telegram y esperá respuesta.
 7. **Verificá `should_stop`** en cada llamada a `survey-step-update` — si es `true`, detenete.
+8. **Relevamientos parciales:** si el survey tiene `surveys.subzona_geojson` (sub-zona
+   creada desde la web), los fetchers filtran solos por ese polígono — usá siempre el
+   `survey_id` que te pasaron y NO toques los surveys anteriores de la región: quedan
+   guardados como término de comparación (la web los compara por dirección/cca_code).
 
 ---
 

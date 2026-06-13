@@ -143,17 +143,26 @@ def _geom_to_polygon(g):
     return None
 
 
-def _load_zone(region_id: str) -> tuple[Optional[tuple], Optional[object]]:
-    """Devuelve ((south, west, north, east), zone_polygon_or_None)."""
+def _load_zone(region_id: str,
+               survey_id: Optional[str] = None) -> tuple[Optional[tuple], Optional[object]]:
+    """Devuelve ((south, west, north, east), zone_polygon_or_None). Prefiere la
+    subzona del survey (relevamiento parcial, migración 018) sobre la región."""
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT bbox_wkt, zone_geojson FROM regions WHERE region_id = :rid"
-        ), {"rid": region_id}).fetchone()
+        row = conn.execute(text("""
+            SELECT r.bbox_wkt, COALESCE(s.subzona_geojson, r.zone_geojson),
+                   (s.subzona_geojson IS NOT NULL) AS es_subzona
+            FROM regions r
+            LEFT JOIN surveys s ON s.survey_id::text = :sid
+                 AND s.region_id = r.region_id AND s.subzona_geojson IS NOT NULL
+            WHERE r.region_id = :rid
+        """), {"rid": region_id, "sid": str(survey_id or "")}).fetchone()
     if not row:
         return None, None
+    if row[2]:
+        logger.info("GooglePlaces: usando SUB-ZONA del survey (relevamiento parcial)")
 
-    bbox_wkt, zone_geojson_str = row
+    bbox_wkt, zone_geojson_str = row[0], row[1]
     zone_polygon = None
     if zone_geojson_str:
         try:
@@ -422,7 +431,7 @@ def run(inp: GooglePlacesInput) -> GooglePlacesOutput:
             ok=False, error=f"Región '{inp.region_id}' sin survey. Creá un survey primero."
         )
 
-    zone_bbox, zone_polygon = _load_zone(inp.region_id)
+    zone_bbox, zone_polygon = _load_zone(inp.region_id, survey_id)
     # Override de bbox si se pasó explícito
     if None not in (inp.bbox_south, inp.bbox_west, inp.bbox_north, inp.bbox_east):
         zone_bbox = (inp.bbox_south, inp.bbox_west, inp.bbox_north, inp.bbox_east)

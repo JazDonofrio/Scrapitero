@@ -168,9 +168,19 @@ def _resolve_bbox_zone(input: SmartGISInput) -> tuple[Optional[tuple], Optional[
     """Devuelve ((s, w, n, e), zone_polygon_or_None)."""
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT bbox_wkt, zone_geojson FROM regions WHERE region_id = :rid"
-        ), {"rid": input.region_id}).fetchone()
+        # Zona EFECTIVA: la subzona del survey (relevamiento parcial, migración 018)
+        # si existe; si no, la zona de la región.
+        row = conn.execute(text("""
+            SELECT r.bbox_wkt, COALESCE(s.subzona_geojson, r.zone_geojson),
+                   (s.subzona_geojson IS NOT NULL) AS es_subzona
+            FROM regions r
+            LEFT JOIN surveys s ON s.survey_id::text = :sid
+                 AND s.region_id = r.region_id AND s.subzona_geojson IS NOT NULL
+            WHERE r.region_id = :rid
+        """), {"rid": input.region_id,
+               "sid": str(getattr(input, "survey_id", "") or "")}).fetchone()
+    if row and row[2]:
+        logger.info(f"Zona '{input.region_id}': usando SUB-ZONA del survey (relevamiento parcial)")
 
     zone_polygon = None
     if row and row[1]:

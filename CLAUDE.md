@@ -327,6 +327,24 @@ recortados) exacta + fuzzy difflib (≥0.78, misma altura). Endpoints:
 `GET …/export/csv-comparativa`, `POST …/baselines/preview`, `POST …/baselines`,
 `DELETE /api/baselines/{id}`. Agente: `comparativa_reporter` (también por RPC).
 
+**Relevamientos parciales (🔁 Sub-zona):** para re-relevar SOLO una parte de una región
+ya relevada, el botón "🔁 Sub-zona" del detalle (operador) sube un polígono GeoJSON y
+crea un **survey nuevo sobre la misma región** con `surveys.subzona_geojson` (migración
+018; `POST /api/surveys/{id}/parcial`, valida que la sub-zona toque la zona de la
+región). **Todos los fetchers que filtran por zona (SmartGIS, VGBCI, SaltaCatastro,
+ARBA carto/cadastral, GooglePlaces) prefieren la subzona del survey** vía
+`COALESCE(s.subzona_geojson, r.zone_geojson)` — no hay que pasar nada extra, solo el
+`survey_id`. Los PDFs BCI compartidos se reutilizan. El survey grande queda intacto y
+después se comparan con la comparativa. La tarjeta del parcial lleva badge "sub-zona"
+y su mapa muestra el polígono de la sub-zona.
+
+**CSV Consolidado (por región):** botón "⬇ CSV Consolidado" en el detalle
+(`GET /api/regions/{region_id}/export/csv-consolidado`): combina TODOS los surveys de
+la región (completos, parciales y archivados) tomando **el dato más reciente de cada
+parcela** (identidad: `cca_code` → clave de dirección → id). Los surveys nunca se
+pisan; la consolidación es una vista de lectura. Columna "Relevado el" con la fecha
+del survey que aportó cada fila.
+
 **Los relevamientos NUNCA se borran — se archivan (📦):** requisito del cliente: el
 relevamiento anterior siempre debe quedar para comparar. El botón de la tarjeta archiva
 (`surveys.archivado`, migración 017; `POST /api/surveys/{id}/archivar`): sale de la lista

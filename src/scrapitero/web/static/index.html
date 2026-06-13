@@ -1040,7 +1040,7 @@ function renderCard(s) {
       <div class="card-top">
         <div class="card-expand" onclick="toggleDetail('${sid}')">
           <div class="card-info">
-            <div class="card-name">${flag} ${s.region_nombre}</div>
+            <div class="card-name">${flag} ${s.region_nombre}${s.es_parcial ? ' <span class="est-badge" title="Relevamiento parcial: cubre una sub-zona de la región">sub-zona</span>' : ''}</div>
             <div class="card-meta">${fmtDate(s.started_at)} &nbsp;·&nbsp; ${s.region_id}</div>
           </div>
           <div class="card-kpis">
@@ -1128,7 +1128,14 @@ function renderCard(s) {
             ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
                title="Descargar CSV con layout de base de logradouros de operadora (solo Brasil)">⬇ CSV Operadora</a>` : ''}
+            <a class="btn btn-sm btn-outline" href="/api/regions/${s.region_id}/export/csv-consolidado" download
+               style="text-decoration:none"
+               title="CSV consolidado de la región: el dato más reciente de cada parcela entre todos los relevamientos (completos y parciales)">⬇ CSV Consolidado</a>
+            ${OPERADOR && !s.archivado ? `<button class="btn btn-sm btn-outline"
+               onclick="toggleParcialForm('${sid}')"
+               title="Re-relevar solo una parte de esta región: crea un relevamiento nuevo acotado a un polígono (el actual queda intacto)">🔁 Sub-zona</button>` : ''}
           </div>
+          ${OPERADOR ? `<div id="parcial-form-${sid}"></div>` : ''}
         </div>
       </div>
     </div>`;
@@ -1920,6 +1927,49 @@ function renderManzanas(sid, data) {
         <tbody>${filas}</tbody>
       </table>
     </div>`;
+}
+
+/* ── Relevamiento parcial (sub-zona de la región) ──────────────── */
+function toggleParcialForm(sid) {
+  const el = document.getElementById('parcial-form-' + sid);
+  if (!el) return;
+  if (el.innerHTML) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="comp-import" style="margin:0 1.2rem 1rem">
+      <b style="font-size:.78rem">🔁 Relevar sub-zona</b>
+      <div class="dasi-sub" style="margin-top:.15rem">Subí el polígono (GeoJSON) de la parte que querés re-relevar. Se crea un relevamiento nuevo acotado a esa sub-zona — este queda intacto y después podés compararlos. Los PDFs ya descargados se reutilizan.</div>
+      <label>Polígono GeoJSON de la sub-zona</label>
+      <input type="file" id="parcial-file-${sid}" accept=".geojson,.json">
+      <div style="text-align:right;margin-top:.55rem">
+        <button class="btn btn-sm btn-primary" style="font-size:.75rem"
+          onclick="crearParcial('${sid}', this)">Crear relevamiento parcial</button>
+      </div>
+      <div id="parcial-msg-${sid}" style="margin-top:.4rem;font-size:.75rem"></div>
+    </div>`;
+}
+
+async function crearParcial(sid, btn) {
+  const f = document.getElementById('parcial-file-' + sid).files[0];
+  const msg = document.getElementById('parcial-msg-' + sid);
+  if (!f) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí el archivo GeoJSON de la sub-zona.'; return; }
+  btn.disabled = true; btn.textContent = '⟳ Creando…';
+  const fd = new FormData();
+  fd.append('geojson_file', f);
+  try {
+    const res = await fetch(`/api/surveys/${sid}/parcial`, {method: 'POST', body: fd});
+    const data = await res.json();
+    if (!data.ok) {
+      msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (data.error || 'error desconocido');
+      btn.disabled = false; btn.textContent = 'Crear relevamiento parcial';
+      return;
+    }
+    msg.style.color = '#166534';
+    msg.textContent = '✓ Relevamiento parcial creado — aparece en la lista, tocá ▶ Iniciar.';
+    setTimeout(loadSurveys, 1200);
+  } catch(err) {
+    msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false; btn.textContent = 'Crear relevamiento parcial';
+  }
 }
 
 let archOpen = false;
