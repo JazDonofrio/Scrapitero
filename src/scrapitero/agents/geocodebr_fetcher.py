@@ -41,7 +41,12 @@ _R_WORKER = os.path.join(os.path.dirname(__file__), "geocodebr_geocode.R")
 _PRECISION_DESCARTE = {"localidade", "municipio"}
 
 
+# Tablas geocodificables (allowlist: el nombre va inline en el SQL, no parametrizable).
+_TABLAS_OK = {"receita_estabelecimentos_hospedagem", "receita_estabelecimentos"}
+
+
 class GeocodebrInput(BaseModel):
+    tabla: str = "receita_estabelecimentos_hospedagem"  # o "receita_estabelecimentos"
     uf: Optional[str] = None                 # filtrar a una UF (p.ej. "MT"); None = todas
     municipio_nome: Optional[str] = None     # filtrar a un município (ILIKE); None = todos
     solo_faltantes: bool = True              # solo filas sin geocodificar (resumible)
@@ -113,6 +118,9 @@ def geocode_batch(rows: list[dict], rscript: Optional[str] = None) -> dict[str, 
 def run(input: GeocodebrInput) -> GeocodebrOutput:
     if not _rscript_bin():
         return GeocodebrOutput(ok=False, error="Rscript no encontrado: instalá R + geocodebr")
+    if input.tabla not in _TABLAS_OK:
+        return GeocodebrOutput(ok=False, error=f"tabla no permitida: {input.tabla}")
+    tabla = input.tabla
 
     engine = get_engine()
     filtros, params = [], {}
@@ -132,7 +140,7 @@ def run(input: GeocodebrInput) -> GeocodebrOutput:
                    COALESCE(numero,'') AS numero, COALESCE(bairro,'') AS bairro,
                    COALESCE(municipio_nome,'') AS municipio, COALESCE(uf,'') AS estado,
                    COALESCE(cep,'') AS cep
-            FROM receita_estabelecimentos_hospedagem{where}{lim}
+            FROM {tabla}{where}{lim}
         """), params).fetchall()
 
     out = GeocodebrOutput(candidatos=len(cand))
@@ -156,16 +164,16 @@ def run(input: GeocodebrInput) -> GeocodebrOutput:
                 usable = (g["lat"] is not None and prec not in _PRECISION_DESCARTE
                           and (desv is None or desv <= input.max_desvio_m))
                 if usable:
-                    conn.execute(text("""
-                        UPDATE receita_estabelecimentos_hospedagem
+                    conn.execute(text(f"""
+                        UPDATE {tabla}
                         SET lat=:lat, lng=:lng, geocode_source=:src WHERE cnpj=:cnpj
                     """), {"lat": g["lat"], "lng": g["lng"],
                            "src": f"g:{prec}"[:20], "cnpj": cnpj})
                     out.geocodificados += 1
                 else:
                     # sellar para no reprocesar (lat queda NULL → candidato a fallback pago)
-                    conn.execute(text("""
-                        UPDATE receita_estabelecimentos_hospedagem
+                    conn.execute(text(f"""
+                        UPDATE {tabla}
                         SET geocode_source=:src WHERE cnpj=:cnpj
                     """), {"src": f"g:{prec}"[:20] if prec else "g:?", "cnpj": cnpj})
                     out.descartados += 1

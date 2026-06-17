@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Watchdog de Cadastur para el cron de Hermes (patrón --no-agent).
 
-Chequea el portal de dados abertos de Cadastur y avisa SOLO en las transiciones
-de estado (una vez cada una, sin spam):
-  • disponible→caído  → "⚠️ Cadastur caído (HTTP 502 / timeout / …)"
-  • caído→disponible  → "✅ Cadastur volvió"
+Chequea el portal de dados abertos de Cadastur y **avisa en CADA chequeo** con el
+resultado del intento (pedido del operador 2026-06-17), con énfasis en las transiciones:
+  • caído→disponible  → "✅ Cadastur volvió" (evento accionable: re-correr hoteles)
+  • disponible→caído  → "⚠️ Cadastur se cayó (HTTP 502 / timeout / …)"
+  • sin cambio        → línea breve de estado ("🟢 disponible" / "🔴 sigue caído, HTTP …")
 
-A diferencia de un watcher que llama a ``_tg`` directo, este imprime el aviso a
-stdout y Hermes lo entrega al canal de Telegram (``--deliver telegram``). stdout
-vacío ⇒ silencio. Cada corrida deja una línea con timestamp + detalle en
-``/opt/data/cadastur_watch.log`` para poder distinguir a mano 502 (backend caído)
-de 403/451 (bloqueo por IP) o timeout, aunque no haya habido transición.
+Imprime a stdout y Hermes lo entrega al canal de Telegram (``--deliver telegram``).
+Cada corrida deja además una línea con timestamp + detalle en
+``/opt/data/cadastur_watch.log`` (502 = backend caído; 403/451 = bloqueo por IP; timeout).
 
-Pensado para correr cada 4 h vía ``hermes cron``.
+Corre cada 15 min vía ``hermes cron`` (job ``cadastur-watch``).
 """
 
 from __future__ import annotations
@@ -64,19 +63,24 @@ def main() -> int:
     except OSError:
         pass
 
-    # Avisar solo en las transiciones (stdout vacío = silencio).
+    # Aviso en CADA chequeo; las transiciones llevan mensaje destacado.
     if disponible and prev != "up":
         print(
-            "✅ Cadastur volvió a estar disponible.\n"
+            f"✅ Cadastur volvió a estar disponible ({detalle}).\n"
             "Ya podés correr el botón 🏨 Hoteles en los relevamientos de Brasil "
             "(trae habitaciones/UHs + situação)."
         )
     elif not disponible and prev == "up":
         print(
             f"⚠️ Cadastur se cayó ({detalle}).\n"
-            "El botón 🏨 Hoteles seguirá trayendo OSM/Google, pero no las "
+            "El botón 🏨 Hoteles seguirá trayendo Receita/OSM/Google, pero no las "
             "habitaciones/UHs ni la situação oficial hasta que vuelva."
         )
+    elif disponible:
+        print(f"🟢 Cadastur disponible ({detalle}) — chequeo {ts}.")
+    else:
+        print(f"🔴 Cadastur sigue caído ({detalle}) — chequeo {ts}. "
+              "Aviso en cuanto vuelva.")
     return 0
 
 

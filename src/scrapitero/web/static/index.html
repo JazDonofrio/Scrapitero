@@ -163,17 +163,23 @@
     }
     .uf-label::before { display: none; }   /* sin flechita de tooltip */
 
-    /* Relevamiento ANTERIOR (actualización): cuadrado gris con la UF en número.
-       Otra forma geométrica + gris para distinguirlo de las parcelas nuevas. */
+    /* Relevamiento ANTERIOR (actualización): cuadrado BLANCO con borde VIOLETA y
+       la UF en número. Forma/color distintos de las parcelas nuevas. */
     .old-uf-marker { background: none; border: none; }
     .old-uf-box {
       min-width: 16px; height: 16px; padding: 0 3px; box-sizing: border-box;
       display: flex; align-items: center; justify-content: center;
-      background: rgba(107,114,128,.85); color: #f8fafc;
-      border: 1px solid #374151; border-radius: 2px;   /* cuadrado */
+      background: #ffffff; color: #6d28d9;
+      border: 1.5px solid #7c3aed; border-radius: 2px;   /* cuadrado */
       font-size: .62rem; font-weight: 700; line-height: 1; white-space: nowrap;
+      box-shadow: 0 0 2px rgba(0,0,0,.35);
     }
     .old-uf-box.old-uf-empty { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+    /* Punto que agrupa varias direcciones: círculo blanco con borde violeta + cantidad. */
+    .old-uf-box.old-count-box {
+      width: 20px; height: 20px; min-width: 20px; border-radius: 50%;
+      background: #ffffff; border-color: #7c3aed; color: #6d28d9; font-size: .66rem;
+    }
 
     /* Mapa en fullscreen (sobre el wrapper) */
     #mapwrap-*:-webkit-full-screen,
@@ -407,16 +413,7 @@
             <div class="form-group" style="grid-column:1/-1">
               <label>CSV del relevamiento anterior</label>
               <input type="file" id="actu-file" accept=".csv,.txt" onchange="actuPreview()">
-              <p class="form-hint">Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV).</p>
-            </div>
-            <div class="form-group">
-              <label>Ciudad / localidad</label>
-              <input type="text" id="actu-ciudad" placeholder="Ej: Várzea Grande, MT, Brasil">
-              <p class="form-hint">Se agrega a cada dirección al geocodificar (si no, caen en otra parte del país). Si el CSV trae una columna de ciudad, mapeala abajo y manda por fila; este campo es el default para las filas sin ciudad.</p>
-            </div>
-            <div class="form-group">
-              <label>Fecha del relevamiento anterior (opcional)</label>
-              <input type="date" id="actu-fecha">
+              <p class="form-hint">Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). La <strong>ciudad</strong> se toma de la columna del CSV (la mapeás abajo) y se agrega a cada dirección al geocodificar.</p>
             </div>
           </div>
           <div id="actu-mapeo"></div>
@@ -594,8 +591,6 @@ async function actuPreparar() {
   fd.append('country_code', document.getElementById('f-country').value);
   fd.append('archivo', f);
   fd.append('mapeo', JSON.stringify(mapeo));
-  fd.append('fecha', document.getElementById('actu-fecha').value || '');
-  fd.append('ciudad', (document.getElementById('actu-ciudad').value || '').trim());
   try {
     const d = await (await fetch('/api/actualizaciones/preparar', {method:'POST', body:fd})).json();
     if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = '📍 Geocodificar y graficar'; return; }
@@ -620,7 +615,14 @@ async function actuPollGeocoding() {
     prog.innerHTML = `<div class="dasi-sub">📍 Geocodificando «${escHtml(d.nombre || '')}»… ${fmt(d.geocodificadas)}/${fmt(d.total)} (${pct}%)</div>
       <div style="height:6px;background:#1f2937;border-radius:4px;margin-top:.3rem;overflow:hidden"><div style="height:100%;width:${pct}%;background:#3b82f6"></div></div>`;
     if (d.listo) {
-      prog.innerHTML = `<div class="dasi-sub">✅ ${fmt(d.geocodificadas)} direcciones ubicadas${d.reusadas ? ` (${fmt(d.reusadas)} reusadas del caché, sin costo)` : ''}${d.fallidas ? `, ${fmt(d.fallidas)} no se pudieron ubicar` : ''}.</div>`;
+      const pts = d.puntos || [];
+      const distintas = agruparPorUbicacion(pts).length;
+      const compartidos = pts.length - distintas;
+      prog.innerHTML = `<div class="dasi-sub" style="line-height:1.7">
+          <b>📋 Resultado de la importación</b><br>
+          • ${fmt(d.total)} importadas · <b>${fmt(d.geocodificadas)} ubicadas</b>${d.reusadas ? ` (${fmt(d.reusadas)} del caché)` : ''}${d.fallidas ? ` · <span style="color:#f59e0b">${fmt(d.fallidas)} sin ubicar</span>` : ''}<br>
+          • ${fmt(distintas)} ubicaciones distintas en el mapa${compartidos > 0 ? ` — ${fmt(compartidos)} direcciones comparten coordenada (repetidas por unidad o geocoding a nivel calle); se abren en abanico para verlas todas` : ''}.
+        </div>`;
       actuRenderMapa(d.puntos || []);
       return;
     }
@@ -638,10 +640,10 @@ function actuRenderMapa(puntos) {
   actuState.map = map;
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
   const pts = puntos.filter(p => p.lat != null && p.lng != null);
-  // Relevamiento anterior en gris (cuadrado + UF en número): se sigue viendo
-  // mientras dibujás el sector de la nueva zona.
+  // Relevamiento anterior en gris: un marcador por ubicación (con la cantidad de
+  // direcciones si comparten punto). Se sigue viendo mientras dibujás el sector.
   const group = L.featureGroup();
-  pts.forEach(p => oldUfMarker(p).addTo(group));
+  agruparPorUbicacion(pts).forEach(g => oldRelevMarker(g).addTo(group));
   group.addTo(map);
   // El contenedor recién se muestra: recalcular tamaño y ENTONCES encuadrar a los puntos.
   setTimeout(() => {
@@ -659,7 +661,20 @@ function actuRenderMapa(puntos) {
     actuState.drawnLayer = layer;
     document.getElementById('actu-btn-crear').disabled = false;
   };
-  map.on('pm:create', e => { onShape(e.layer); e.layer.on('pm:edit', () => {}); });
+  // El RELLENO del polígono no debe capturar los clics: así seguís pudiendo abrir
+  // el detalle de los puntos del relevamiento anterior que quedan dentro del sector.
+  // (Se sigue editando arrastrando los vértices; redibujar reemplaza el polígono.)
+  const noBloquearClics = layer => {
+    const el = layer._path || (layer.getElement && layer.getElement());
+    if (el) el.style.pointerEvents = 'none';
+  };
+  map.on('pm:create', e => {
+    const layer = e.layer;
+    if (layer.setStyle) layer.setStyle({ color: '#22d3ee', weight: 2, fillOpacity: 0.08 });
+    onShape(layer);
+    noBloquearClics(layer);
+    layer.on('pm:edit pm:markerdragend pm:update', () => noBloquearClics(layer));
+  });
 }
 
 async function actuCrearSurvey() {
@@ -1345,20 +1360,6 @@ function renderCard(s) {
             </div>
           </div>
 
-          <div class="comp-section">
-            <div class="dasi-head">
-              <div>
-                <p class="pipeline-title" style="margin-bottom:.15rem">📊 Comparativa con relevamiento anterior</p>
-                <span class="dasi-sub">Crecimiento por dirección: nuevas, cambios de uso/UF y desaparecidas</span>
-              </div>
-            </div>
-            <div class="comp-controls" id="comp-controls-${sid}">
-              <span class="alog-empty">Abrí el detalle para cargar las opciones…</span>
-            </div>
-            <div id="comp-import-${sid}"></div>
-            <div id="comp-result-${sid}"></div>
-          </div>
-
           <div class="detail-footer">
             <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">↻ Actualizar</button>
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/csv" download
@@ -1366,6 +1367,13 @@ function renderCard(s) {
             ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
                title="Descargar CSV con layout de base de logradouros de operadora (solo Brasil)">⬇ CSV Operadora</a>` : ''}
+            ${OPERADOR && s.country_code === 'BRA' ? `<button class="btn btn-sm btn-outline"
+               onclick="runHoteles('${sid}', this)"
+               title="Buscar hoteles (Cadastur + Receita + OSM; Google si está tildado): habitaciones y abierto/cerrado; suma las habitaciones como UF comercio">🏨 Hoteles</button>
+            <label style="font-size:.72rem;color:#6b7280;cursor:pointer"
+               title="Incluir Google Places, la fuente PAGA (~USD 0,032/req). Sin tilde corre solo las fuentes gratuitas (Cadastur + Receita + OSM).">
+               <input type="checkbox" id="hot-google-${sid}" checked style="vertical-align:middle"> Google (pago)</label>
+            <span id="hot-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
             <a class="btn btn-sm btn-outline" href="/api/regions/${s.region_id}/export/csv-consolidado" download
                style="text-decoration:none"
                title="CSV consolidado de la región: el dato más reciente de cada parcela entre todos los relevamientos (completos y parciales)">⬇ CSV Consolidado</a>
@@ -1454,6 +1462,7 @@ function initMap(sid) {
   if (geoStr) {
     try {
       const layer = L.geoJSON(JSON.parse(geoStr), {
+        interactive: false,   // es solo el contorno de la zona; no debe tapar clics
         style: {color: '#38bdf8', weight: 2, fillOpacity: .07, fillColor: '#38bdf8', dashArray: '5 4'}
       }).addTo(map);
       map.fitBounds(layer.getBounds(), {padding: [16, 16]});
@@ -1475,6 +1484,7 @@ function initMap(sid) {
       if (!res || maps[sid] !== map) return;
       map._anteriorGrp = res.grupo;
       map._anteriorN = res.total;
+      map._anteriorDistintas = res.distintas;
       // Si todavía no hay parcelas nuevas, encuadrar al relevamiento anterior.
       if (res.bounds && (!activeMarkers[sid] || !activeMarkers[sid].length)) {
         try { map.fitBounds(res.bounds, { padding: [24, 24], maxZoom: 17 }); } catch(_) {}
@@ -1485,6 +1495,89 @@ function initMap(sid) {
 
   loadParcelasMap(sid);   // carga inicial
   loadComentarios(sid);   // comentarios del cliente (sugerencias/correcciones)
+  loadHoteles(sid);       // hoteles (Cadastur + Google) para el popup de la parcela
+}
+
+/* ── Hoteles (Cadastur + Google) ───────────────────────────────────────────── */
+const surveyHoteles = {};   // sid → {parcela_id → [hotel]}
+
+const hotelLayers = {};   // sid → L.layerGroup con los pines 🏨
+
+async function loadHoteles(sid) {
+  try {
+    const d = await fetch(`/api/surveys/${sid}/hoteles`).then(r => r.json());
+    if (!d || !d.ok) return;
+    const m = {};
+    (d.hoteles || []).forEach(h => { if (h.parcela_id) (m[h.parcela_id] = m[h.parcela_id] || []).push(h); });
+    surveyHoteles[sid] = m;
+    const msg = document.getElementById('hot-msg-' + sid);
+    if (msg && d.total) msg.textContent = `${d.abiertos} hotel(es) · ${fmt(d.habitaciones_total)} hab.${d.cerrados ? ` · ${d.cerrados} cerrado(s)` : ''}`;
+    // Pines 🏨 sobre el mapa (violeta=abierto, rojo=cerrado)
+    const map = maps[sid];
+    if (map) {
+      if (hotelLayers[sid]) { try { map.removeLayer(hotelLayers[sid]); } catch(_) {} }
+      const grp = L.layerGroup();
+      (d.hoteles || []).forEach(h => {
+        if (h.lat == null || h.lng == null) return;
+        const col = h.cerrado ? '#dc2626' : '#7c3aed';
+        const mk = L.marker([h.lat, h.lng], { icon: L.divIcon({
+          className: 'hotel-pin',
+          html: `<div style="background:#fff;border:2px solid ${col};border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 0 3px rgba(0,0,0,.4)">🏨</div>`,
+          iconSize: [22, 22], iconAnchor: [11, 11],
+        }) });
+        const estado = h.cerrado ? '<b style="color:#dc2626">CERRADO definitivamente</b>' : '<b style="color:#16a34a">abierto</b>';
+        const habTxt = h.habitaciones != null
+          ? (h.habitaciones_estimadas
+              ? `≈ ${fmt(h.habitaciones)} habitaciones <span style="color:#d97706" title="Estimado por área de construcción del catastro (BCI); el dato exacto lo da Cadastur">(estimado)</span>`
+              : `${fmt(h.habitaciones)} habitaciones`)
+          : 'habitaciones s/d';
+        mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">🏨 <b>${escHtml(h.nombre || 'Hotel')}</b>`
+          + (h.tipo ? ` <span style="color:#9ca3af">(${escHtml(h.tipo)})</span>` : '')
+          + `<br>${habTxt}`
+          + (h.leitos != null ? ` · ${fmt(h.leitos)} leitos` : '') + `<br>${estado}`
+          + (h.cnpj ? `<br><span style="color:#6b7280;font-size:.72rem">CNPJ ${escHtml(h.cnpj)}</span>` : '')
+          + `<br><span style="color:#9ca3af;font-size:.7rem">fuente: ${escHtml(h.fuente || '')}</span></div>`, { maxWidth: 260 });
+        mk.addTo(grp);
+      });
+      grp.addTo(map);
+      hotelLayers[sid] = grp;
+      if (d.total) loadParcelasMap(sid);   // re-pintar para que el popup de la parcela muestre el hotel
+    }
+  } catch(_) {}
+}
+
+async function runHoteles(sid, btn) {
+  const msg = document.getElementById('hot-msg-' + sid);
+  const gchk = document.getElementById('hot-google-' + sid);
+  const google = gchk ? gchk.checked : true;
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ Buscando…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = google ? 'Buscando hoteles (incluye Google, pago)…' : 'Buscando hoteles (solo gratis)…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/hoteles?google=${google}`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.hoteles_en_zona} en zona · ${d.vinculados_parcela} en parcela · ${d.cerrados} cerrados · ${fmt(d.total_uf_comercio)} UF`; }
+      await loadHoteles(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+// Línea de hotel(es) para el popup de la parcela.
+function hotelLineHtml(sid, pid) {
+  const lista = ((surveyHoteles[sid] || {})[pid]) || [];
+  if (!lista.length) return '';
+  return lista.map(h => {
+    const estado = h.cerrado
+      ? '<span style="color:#dc2626;font-weight:700">CERRADO</span>'
+      : '<span style="color:#16a34a;font-weight:700">abierto</span>';
+    const hab = h.habitaciones != null
+      ? ` · ${h.habitaciones_estimadas ? '≈' : ''}${fmt(h.habitaciones)} hab.${h.habitaciones_estimadas ? ' (est.)' : ''}`
+      : '';
+    return `<br><span style="color:#7c3aed;font-weight:700;font-size:.72rem">🏨 ${escHtml(h.nombre || 'Hotel')}</span>`
+      + `<span style="font-size:.7rem">${hab} · ${estado}</span>`;
+  }).join('');
 }
 
 /* ── Comentarios sobre parcelas (sugerencias/correcciones del cliente) ──────── */
@@ -1662,41 +1755,78 @@ async function addGoogleLayers(map, layersCtl) {
 }
 
 /* ── Relevamiento ANTERIOR (gris) — comparación viejo/nuevo sobre el mismo mapa ── */
-// Marcador del relevamiento anterior: cuadrado gris con la cantidad de UF en número.
-function oldUfMarker(p, paneName) {
-  const uf = (p.uf_total != null) ? p.uf_total : ((p.uf_v || 0) + (p.uf_c || 0));
+// El geocoding gratuito colapsa varias direcciones en el MISMO punto (números
+// distintos de una calle → centro de la calle; o varias unidades en la misma
+// dirección). En vez de abrirlas, AGRUPAMOS por coordenada: un marcador por
+// ubicación con el NÚMERO de direcciones que representa; al clickear, la(s)
+// dirección(es) completa(s).
+function agruparPorUbicacion(puntos) {
+  const grupos = {};
+  puntos.forEach(p => {
+    if (p.lat == null || p.lng == null) return;
+    const k = p.lat.toFixed(6) + ',' + p.lng.toFixed(6);
+    if (!grupos[k]) grupos[k] = { lat: p.lat, lng: p.lng, items: [] };
+    grupos[k].items.push(p);
+  });
+  return Object.values(grupos);
+}
+
+// Marcador del relevamiento anterior. Single → cuadrado gris con su UF. Varias
+// direcciones en el punto → círculo gris con la CANTIDAD de direcciones. El popup
+// muestra la(s) dirección(es) completa(s).
+function oldRelevMarker(g, paneName) {
+  const n = g.items.length;
+  const multi = n > 1;
+  const ufV = g.items.reduce((s, p) => s + (p.uf_v || 0), 0);
+  const ufC = g.items.reduce((s, p) => s + (p.uf_c || 0), 0);
+  const ufTot = ufV + ufC;
+  // Número del marcador: la UF total (vivienda + comercio) en el punto; si no hay
+  // UF, la cantidad de direcciones (multi) o vacío (single).
+  const num = ufTot > 0 ? ufTot : (multi ? n : '');
+  const cls = 'old-uf-box' + (multi ? ' old-count-box' : (num === '' ? ' old-uf-empty' : ''));
+  const size = (num === '') ? [12, 12] : (multi ? [22, 22] : [18, 16]);
   const opts = { icon: L.divIcon({
-    className: 'old-uf-marker',
-    // Cuadrado gris con la UF en número; vacío (solo el cuadrado) si no hay UF.
-    html: `<div class="old-uf-box${uf > 0 ? '' : ' old-uf-empty'}">${uf > 0 ? uf : ''}</div>`,
-    iconSize: uf > 0 ? [18, 16] : [10, 10], iconAnchor: uf > 0 ? [9, 8] : [5, 5],
+    className: 'old-uf-marker', html: `<div class="${cls}">${num}</div>`,
+    iconSize: size, iconAnchor: [size[0] / 2, size[1] / 2],
   }) };
   if (paneName) opts.pane = paneName;
-  const m = L.marker([p.lat, p.lng], opts);
-  m.bindPopup(`<div style="font-size:.8rem;line-height:1.7">
-      <b>${escHtml(p.direccion || '(sin dirección)')}</b>
-      <br><span style="color:#9ca3af">Relevamiento anterior</span>
-      <br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${uf}</b>
-      <span style="color:#9ca3af;font-size:.72rem">(viv ${p.uf_v || 0} / com ${p.uf_c || 0})</span>
-    </div>`, { maxWidth: 240 });
+  const m = L.marker([g.lat, g.lng], opts);
+
+  let body;
+  if (!multi) {
+    const p = g.items[0];
+    body = `<b>${escHtml(p.direccion || '(sin dirección)')}</b>`
+      + `<br><span style="color:#9ca3af">Relevamiento anterior</span>`
+      + `<br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${ufTot}</b>`
+      + ` <span style="color:#9ca3af;font-size:.72rem">(viv ${ufV} / com ${ufC})</span>`;
+  } else {
+    const lista = g.items.map(p => {
+      const uf = (p.uf_v || 0) + (p.uf_c || 0);
+      return `<div style="padding:1px 0;border-top:1px solid rgba(148,163,184,.18)">`
+        + `${escHtml(p.direccion || '(sin dirección)')} <span style="color:#9ca3af">· UF ${uf}</span></div>`;
+    }).join('');
+    body = `<b>${n} direcciones en este punto</b>`
+      + `<br><span style="color:#9ca3af">Relevamiento anterior · UF total <b style="color:#6d28d9">${ufTot}</b> (viv ${ufV} / com ${ufC})</span>`
+      + `<div style="max-height:170px;overflow:auto;margin-top:4px;font-size:.74rem;line-height:1.5">${lista}</div>`;
+  }
+  m.bindPopup(`<div style="font-size:.8rem;line-height:1.7;min-width:175px">${body}</div>`,
+              { maxWidth: 300 });
   return m;
 }
 
-// Dibuja todos los puntos del baseline en un layerGroup gris. Devuelve {grupo, bounds}.
+// Dibuja el baseline agrupado por ubicación. Devuelve {grupo, bounds, total, distintas}.
 async function renderRelevamientoAnterior(map, baselineId, paneName) {
   let d;
   try { d = await fetch(`/api/baselines/${baselineId}/puntos`).then(r => r.json()); }
   catch(_) { return null; }
   if (!d || !d.ok || !d.puntos || !d.puntos.length) return null;
+  const grupos = agruparPorUbicacion(d.puntos);
   const grupo = L.layerGroup();
   const pts = [];
-  d.puntos.forEach(p => {
-    if (p.lat == null || p.lng == null) return;
-    oldUfMarker(p, paneName).addTo(grupo);
-    pts.push([p.lat, p.lng]);
-  });
+  grupos.forEach(g => { oldRelevMarker(g, paneName).addTo(grupo); pts.push([g.lat, g.lng]); });
   grupo.addTo(map);
-  return { grupo, bounds: pts.length ? L.latLngBounds(pts) : null, total: pts.length };
+  return { grupo, bounds: pts.length ? L.latLngBounds(pts) : null,
+           total: d.puntos.length, distintas: grupos.length };
 }
 
 async function loadParcelasMap(sid) {
@@ -1772,6 +1902,7 @@ async function loadParcelasMap(sid) {
       (p.area_c ? '<br><span style="color:#9ca3af">' + p.area_c + ' m² construida</span>' : '') +
       (p.pisos ? '<br><span style="color:#fbbf24;font-weight:700">≈ ' + p.pisos + ' piso' + (p.pisos > 1 ? 's' : '') + '</span> <span style="color:#6b7280;font-size:.7rem">(FOS 0,6)</span>' : '') +
       (p.cca ? '<br><span style="color:#6b7280;font-size:.72rem">Insc: ' + escHtml(p.cca) + '</span>' : '') +
+      (p.descripcion_uso ? '<br><span style="color:#0ea5e9;font-weight:700;font-size:.72rem" title="Categoría/descripción derivada de los establecimientos (CNPJ Receita) que caen en la parcela">🏷️ ' + escHtml({R:'Residencial',C:'Comercial',E:'Especial'}[p.categoria_uso] || p.categoria_uso || '') + '</span> <span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.descripcion_uso) + '</span>' : '') +
       ((p.comercios && p.comercios.length)
           ? '<br><span style="color:#ea580c;font-weight:700;font-size:.72rem">🏪 ' + p.comercios.length + ' comercio' + (p.comercios.length > 1 ? 's' : '') + ' (Google)</span>'
             + '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.comercios.slice(0, 8).join(', ')) + (p.comercios.length > 8 ? '…' : '') + '</span>'
@@ -1784,7 +1915,7 @@ async function loadParcelasMap(sid) {
             + (p.est_nombre ? '<br><span style="color:#9ca3af;font-size:.7rem">' + escHtml(p.est_nombre) + '</span>' : '')
             + '<br><span style="color:#6b7280;font-size:.7rem">' + p.est_n_parcelas + ' parcelas = 1 establecimiento (UF contada una vez)</span>' : '');
     // El contenido se evalúa al abrir: la sección de comentarios siempre al día.
-    m.bindPopup(() => baseHtml + comentariosSectionHtml(sid, p.parcela_id) + '</div>',
+    m.bindPopup(() => baseHtml + hotelLineHtml(sid, p.parcela_id) + comentariosSectionHtml(sid, p.parcela_id) + '</div>',
                 {maxWidth: 260});
     if (p.parcela_id) byPid[p.parcela_id] = m;
     // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
@@ -1817,9 +1948,11 @@ async function loadParcelasMap(sid) {
     }).join('');
     // Relevamiento anterior (gris, cuadrado): comparación viejo/nuevo
     if (map._anteriorGrp) {
+      const nA = map._anteriorN || 0, dA = map._anteriorDistintas || 0;
+      const detalle = (dA && dA < nA) ? ' <span style="color:#9ca3af">en ' + dA + ' ubic.</span>' : '';
       html += '<div style="margin-top:3px;border-top:1px solid rgba(148,163,184,.25);padding-top:3px">'
         + '<span style="display:inline-block;width:9px;height:9px;background:rgba(107,114,128,.85);border:1px solid #374151;margin-right:5px;vertical-align:middle"></span>'
-        + 'Relev. anterior <b>(' + (map._anteriorN || 0) + ')</b></div>';
+        + 'Relev. anterior <b>(' + nA + ')</b>' + detalle + '</div>';
     }
     d.innerHTML = html;
     return d;
@@ -2089,7 +2222,6 @@ function toggleDetail(sid) {
       else fetchActlog(sid);
     }
     loadManzanas(sid);
-    loadCompOpciones(sid);   // términos disponibles para "Comparar con…"
   }
 }
 
@@ -2098,11 +2230,10 @@ function toggleDetail(sid) {
 // (import de CSV con su mapeo de columnas, o creación de sub-zona): el
 // re-render de la lista lo borraría, así que el refresh se pospone.
 function hayFormularioActivo() {
-  return [...document.querySelectorAll('[id^="comp-import-"],[id^="parcial-form-"]')]
+  return [...document.querySelectorAll('[id^="parcial-form-"]')]
     .some(el => {
       const file = el.querySelector('input[type="file"]');
-      const mapeo = el.querySelector('[id^="bl-mapeo-"]');
-      return (file && file.files.length > 0) || (mapeo && mapeo.innerHTML.trim() !== '');
+      return file && file.files.length > 0;
     });
 }
 
@@ -2119,12 +2250,6 @@ async function loadSurveys() {
     document.getElementById('status-dot').className = '';
     const container = document.getElementById('list-container');
     const openCards = new Set([...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-','')));
-    // El re-render pisa la sección Comparativa: capturar la selección actual
-    // del "Comparar con…" para restaurarla después.
-    const compSelPrev = {};
-    document.querySelectorAll('[id^="comp-sel-"]').forEach(el => {
-      if (el.value) compSelPrev[el.id.replace('comp-sel-', '')] = el.value;
-    });
 
     if (!list.length) {
       container.innerHTML = `<div class="empty-state"><p>No hay relevamientos aún</p><p style="font-size:.9rem">${OPERADOR ? 'Creá el primero con el botón de arriba.' : 'Todavía no hay relevamientos para mostrar.'}</p></div>`;
@@ -2172,10 +2297,7 @@ async function loadSurveys() {
             stopActlogPolling(sid);
           }
         }
-        // Restaurar la sección Comparativa (selector + último resultado) y el
-        // panel de habitantes, que el re-render deja en blanco.
-        loadCompOpciones(sid, compSelPrev[sid]);
-        if (compState[sid] && compState[sid].ultimo) renderCompResult(sid, compState[sid].ultimo);
+        // Restaurar el panel de habitantes, que el re-render deja en blanco.
         loadManzanas(sid);
       }
     });

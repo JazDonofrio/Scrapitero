@@ -53,7 +53,17 @@ class HotelFetcherInput(BaseModel):
     max_hoteles: Optional[int] = None
     # Estimación de habitaciones por área del BCI cuando no hay dato exacto (Cadastur/OSM):
     # habitaciones ≈ area_m2_construida / m2_por_habitacion. Es proxy, NO exacto.
+    # DESACTIVADA por default (2026-06-17): solo se muestran habitaciones de fuente exacta
+    # (Cadastur UHs / OSM rooms); sin dato → "s/d". Poner True para reactivar el proxy.
+    estimar_habitaciones: bool = False
     m2_por_habitacion: float = 35.0
+    # Cordura del proxy: NO estimar si el área de la parcela es desproporcionada para un
+    # solo hotel (el punto cayó en una parcela enorme = manzana/predio, no el hotel), y
+    # capar el resultado. Evita disparates tipo 2248 habitaciones.
+    proxy_area_max_m2: float = 20000.0
+    proxy_hab_max: int = 400
+    # Dedupe cross-fuente sin CNPJ (Google no trae): unir por nombre similar + proximidad.
+    merge_dist_m: float = 200.0
 
 
 class HotelFetcherOutput(BaseModel):
@@ -79,6 +89,40 @@ def _norm(s: Optional[str]) -> str:
 def _entero(s) -> Optional[int]:
     m = re.search(r"\d+", str(s or ""))
     return int(m.group(0)) if m else None
+
+
+def _dist_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Distancia haversine en metros entre dos puntos (lat/lng)."""
+    from math import asin, cos, radians, sin, sqrt
+    dlat, dlng = radians(lat2 - lat1), radians(lng2 - lng1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    return 2 * 6371000.0 * asin(sqrt(a))
+
+
+def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
+    """¿Son el mismo nombre de hotel? Igual normalizado, o uno contenido en el otro por
+    tokens (p.ej. 'fly hotel' ⊆ 'fly hotel mt'), o ratio difflib ≥ 0.82."""
+    import difflib
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = set(na.split()), set(nb.split())
+    if ta and tb and (ta <= tb or tb <= ta):
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
+
+
+def _mismo_hotel(a: dict, b: dict, max_dist_m: float) -> bool:
+    """Dos registros = el mismo hotel. Mismo CNPJ (cuando ambos lo tienen) ⇒ sí. Si no
+    (Google no trae CNPJ), nombre similar + a menos de `max_dist_m` metros."""
+    if a.get("cnpj") and b.get("cnpj"):
+        return a["cnpj"] == b["cnpj"]
+    if a.get("lat") is None or b.get("lat") is None:
+        return False
+    return (_nombre_similar(a.get("nombre"), b.get("nombre"))
+            and _dist_m(a["lat"], a["lng"], b["lat"], b["lng"]) <= max_dist_m)
 
 
 def _municipio_nombre_uf(cod: str, client: httpx.Client) -> tuple[Optional[str], Optional[str]]:
@@ -411,27 +455,43 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             if zona_poly.contains(Point(h["lng"], h["lat"])):
                 ubicados.append(h)
 
-    # Dedupe entre fuentes: por CNPJ, si no por nombre normalizado + grilla ~100m
-    merged: dict = {}
+    # Dedupe entre fuentes: por CNPJ cuando ambos lo tienen; si no (Google no trae CNPJ),
+    # por nombre similar + proximidad espacial (≤ merge_dist_m) para no contar 2 veces el
+    # mismo hotel que aportan dos fuentes con coordenadas algo distintas.
+    _FUENTE_PRIO = {"cadastur": 3, "receita": 2, "osm": 1, "google": 0}
+
+    def _merge_into(g: dict, h: dict) -> None:
+        if not g["uh"] and h["uh"]:
+            g["hab_fuente"] = h.get("hab_fuente")
+        g["uh"] = g["uh"] or h["uh"]
+        g["leitos"] = g["leitos"] or h["leitos"]
+        g["estrellas"] = g["estrellas"] or h["estrellas"]
+        g["cnpj"] = g["cnpj"] or h["cnpj"]
+        g["situacion"] = g["situacion"] or h["situacion"]
+        g["business_status"] = g.get("business_status") or h.get("business_status")
+        g["cerrado"] = g["cerrado"] or h["cerrado"]
+        g["direccion"] = g.get("direccion") or h.get("direccion")
+        # la fuente de mayor prioridad manda (Cadastur tiene UHs; Receita situação oficial)
+        if _FUENTE_PRIO.get(h["fuente"], 0) > _FUENTE_PRIO.get(g["fuente"], 0):
+            g["fuente"] = h["fuente"]
+
+    grupos: list[dict] = []
+    by_cnpj: dict = {}
     for h in ubicados:
-        key = ("cnpj", h["cnpj"]) if h.get("cnpj") else \
-              ("nom", _norm(h.get("nombre")), round(h["lat"], 3), round(h["lng"], 3))
-        if key in merged:
-            g = merged[key]
-            if not g["uh"] and h["uh"]:
-                g["hab_fuente"] = h.get("hab_fuente")
-            g["uh"] = g["uh"] or h["uh"]
-            g["leitos"] = g["leitos"] or h["leitos"]
-            g["estrellas"] = g["estrellas"] or h["estrellas"]
-            g["cnpj"] = g["cnpj"] or h["cnpj"]
-            g["situacion"] = g["situacion"] or h["situacion"]
-            g["business_status"] = g.get("business_status") or h.get("business_status")
-            g["cerrado"] = g["cerrado"] or h["cerrado"]
-            if h["fuente"] == "cadastur":     # Cadastur manda (oficial, tiene UHs)
-                g["fuente"] = "cadastur"
+        g = by_cnpj.get(h["cnpj"]) if h.get("cnpj") else None
+        if g is None:
+            for cand in grupos:
+                if _mismo_hotel(h, cand, input.merge_dist_m):
+                    g = cand
+                    break
+        if g is None:
+            g = dict(h)
+            grupos.append(g)
         else:
-            merged[key] = dict(h)
-    hoteles = list(merged.values())
+            _merge_into(g, h)
+        if g.get("cnpj") and g["cnpj"] not in by_cnpj:
+            by_cnpj[g["cnpj"]] = g
+    hoteles = grupos
     if input.max_hoteles:
         hoteles = hoteles[:input.max_hoteles]
     out.hoteles_en_zona = len(hoteles)
@@ -486,15 +546,18 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         # ESTIMACIÓN de habitaciones por área del BCI cuando no hay dato exacto
         # (Cadastur UHs / OSM rooms). Proxy: area_construida / m2_por_habitacion.
         # Cuando Cadastur vuelva, el dato exacto pisa esta estimación (al re-correr).
-        conn.execute(text("""
-            UPDATE hoteles h
-            SET habitaciones = GREATEST(ROUND(p.area_m2_construida / :m2)::int, 1),
-                habitaciones_fuente = 'bci_proxy'
-            FROM parcelas p
-            WHERE h.region_id = :rid AND h.fuente = ANY(:f)
-              AND h.parcela_id = p.parcela_id AND h.habitaciones IS NULL
-              AND p.area_m2_construida IS NOT NULL AND p.area_m2_construida > 0
-        """), {"rid": input.region_id, "f": fuentes_run, "m2": input.m2_por_habitacion})
+        if input.estimar_habitaciones:
+            conn.execute(text("""
+                UPDATE hoteles h
+                SET habitaciones = LEAST(GREATEST(ROUND(p.area_m2_construida / :m2)::int, 1), :habmax),
+                    habitaciones_fuente = 'bci_proxy'
+                FROM parcelas p
+                WHERE h.region_id = :rid AND h.fuente = ANY(:f)
+                  AND h.parcela_id = p.parcela_id AND h.habitaciones IS NULL
+                  AND p.area_m2_construida IS NOT NULL AND p.area_m2_construida > 0
+                  AND p.area_m2_construida <= :areamax
+            """), {"rid": input.region_id, "f": fuentes_run, "m2": input.m2_por_habitacion,
+                   "habmax": input.proxy_hab_max, "areamax": input.proxy_area_max_m2})
 
         out.vinculados_parcela = conn.execute(text(
             "SELECT COUNT(*) FROM hoteles WHERE region_id=:r AND fuente=ANY(:f) AND parcela_id IS NOT NULL"),

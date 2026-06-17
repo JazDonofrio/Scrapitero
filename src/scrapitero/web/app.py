@@ -648,7 +648,7 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.propietario_nombre, p.propietario_documento,
                    p.contribuyente_secundario,
                    p.establecimiento_id::text, e.tipo, e.nombre, e.n_parcelas,
-                   p.parcela_id::text
+                   p.parcela_id::text, p.categoria_uso, p.descripcion_uso
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             WHERE p.survey_id = :sid
@@ -698,6 +698,9 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "est_nombre": r[24] or None,
             "est_n_parcelas": int(r[25]) if r[25] else None,
             "parcela_id": r[26],
+            # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ)
+            "categoria_uso": r[27] or None,
+            "descripcion_uso": r[28] or None,
         })
     return out
 
@@ -733,6 +736,69 @@ async def run_dasimetrico(survey_id: str) -> JSONResponse:
 
     data = await asyncio.to_thread(_job)
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.post("/api/surveys/{survey_id}/hoteles")
+async def run_hoteles(survey_id: str, google: bool = True) -> JSONResponse:
+    """Corre HotelFetcher para la región del survey: trae hoteles con habitaciones (UHs)
+    y estado abierto/cerrado, los vincula a su parcela y suma las habitaciones como
+    uf_comercio (hoteles abiertos). Solo Brasil.
+
+    `google` (query, default True): si es False NO usa Google Places (la fuente PAGA) —
+    corre solo las gratuitas (Cadastur + Receita + OSM). El tilde de la web lo controla."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.hotel_fetcher import HotelFetcherInput
+    from scrapitero.agents.hotel_fetcher import run as run_hot
+
+    fuentes = ["cadastur", "receita", "osm"] + (["google"] if google else [])
+
+    def _job() -> dict:
+        _thread_survey_id.value = survey_id
+        return run_hot(HotelFetcherInput(region_id=region_id, survey_id=survey_id,
+                                         fuentes=fuentes)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.get("/api/surveys/{survey_id}/hoteles")
+async def survey_hoteles(survey_id: str) -> JSONResponse:
+    """Hoteles del relevamiento (para el mapa/popup): nombre, habitaciones, estado."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT h.parcela_id::text, h.nombre, h.tipo, h.cnpj,
+                   h.habitaciones, h.leitos, h.cerrado_def,
+                   COALESCE(h.business_status, h.situacion_cadastur) AS estado,
+                   ST_Y(h.location) AS lat, ST_X(h.location) AS lng, h.fuente,
+                   h.habitaciones_fuente
+            FROM hoteles h
+            WHERE h.region_id = (SELECT region_id FROM surveys WHERE survey_id = :sid)
+              AND (h.survey_id::text = :sid OR h.survey_id IS NULL)
+            ORDER BY h.cerrado_def, h.nombre
+        """), {"sid": survey_id}).fetchall()
+    hoteles = [{
+        "parcela_id": r[0], "nombre": r[1], "tipo": r[2], "cnpj": r[3],
+        "habitaciones": int(r[4]) if r[4] is not None else None,
+        "leitos": int(r[5]) if r[5] is not None else None,
+        "cerrado": bool(r[6]), "estado": r[7],
+        "lat": float(r[8]) if r[8] is not None else None,
+        "lng": float(r[9]) if r[9] is not None else None,
+        "fuente": r[10],
+        # 'cadastur'/'osm' = exacto · 'bci_proxy' = estimado por área
+        "habitaciones_estimadas": (r[11] == "bci_proxy"),
+        "habitaciones_fuente": r[11],
+    } for r in rows]
+    abiertos = [h for h in hoteles if not h["cerrado"]]
+    return JSONResponse({
+        "ok": True, "hoteles": hoteles, "total": len(hoteles),
+        "abiertos": len(abiertos), "cerrados": len(hoteles) - len(abiertos),
+        "habitaciones_total": sum(h["habitaciones"] or 0 for h in abiertos),
+    })
 
 
 @app.get("/api/surveys/{survey_id}/manzanas")
@@ -1083,7 +1149,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 (SELECT e.nombre FROM establecimientos e
                    WHERE e.establecimiento_id = parcelas.establecimiento_id),
                 establecimiento_id::text,
-                parcelas.parcela_id::text
+                parcelas.parcela_id::text,
+                categoria_uso,
+                descripcion_uso
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -1126,6 +1194,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Alícuota", "Año Construcción",
             "Propietario", "Documento (CPF/CNPJ)", "Contribuyente Secundario",
             "Establecimiento (tipo)", "Establecimiento (nombre)",
+            "Categoría (R/C/E)", "Descripción (CNPJ)",
         ])
 
         def _fila(r, direccion, unidad, codigo, uso, uf_v, uf_c, total, area_con):
@@ -1152,6 +1221,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[27] or "",
                 r[28] or "", r[29] or "", r[30] or "",
                 r[31] or "", r[32] or "",
+                r[35] or "", r[36] or "",
             ]
 
         for r in rows:
@@ -1411,7 +1481,8 @@ _BASELINE_CAMPOS = {
     "direccion":   ["direccion", "endereco", "domicilio", "address"],
     "calle":       ["calle", "rua", "logradouro", "street"],
     "numero":      ["numero", "nro", "altura", "num"],
-    "uso":         ["uso", "tipologia", "tipo", "categoria"],
+    "uso":         ["uso", "tipologia", "tipo", "categoria", "tipo de inmueble",
+                    "tipo inmueble", "inmueble", "imovel", "tipo de imovel"],
     "ciudad":      ["ciudad", "cidade", "localidad", "localidade", "municipio", "city"],
     "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
     "uf_comercio": ["uf comercio", "uf com", "comercios", "comercio", "unidades comercio"],
@@ -1513,10 +1584,48 @@ def _parse_mapeo(mapeo: str) -> dict:
     return mapeo_d
 
 
+def _es_residencial(uso: str) -> bool:
+    """El 'tipo de inmueble' del CSV anterior: residencial → vivienda; el resto
+    (comercial, y cualquier otro caso) → comercio."""
+    return "resid" in (uso or "").lower()
+
+
+def _agregar_por_direccion(registros: list[dict], baseline_id: str) -> list[dict]:
+    """Colapsa las filas (una por unidad/entrada) en UNA por dirección, derivando la
+    UF del 'tipo de inmueble': cada entrada residencial cuenta 1 vivienda; cada
+    entrada del resto, 1 comercio. Si la fila trae UF explícita, se suma esa en su lugar."""
+    grupos: dict = {}
+    orden: list = []
+    for r in registros:
+        key = (r["calle_norm"], r["numero_norm"] or "", (r["ciudad"] or "").lower())
+        g = grupos.get(key)
+        if not g:
+            g = {**r, "id": str(uuid.uuid4()), "bid": baseline_id, "uf_v": 0, "uf_c": 0, "_n": 0}
+            grupos[key] = g
+            orden.append(key)
+        g["_n"] += 1
+        if r["uf_v"] is not None or r["uf_c"] is not None:   # UF explícita en la fila
+            g["uf_v"] += r["uf_v"] or 0
+            g["uf_c"] += r["uf_c"] or 0
+        elif _es_residencial(r["uso"]):                      # entrada residencial → 1 vivienda
+            g["uf_v"] += 1
+        else:                                                # resto → 1 comercio
+            g["uf_c"] += 1
+    out = []
+    for key in orden:
+        g = grupos[key]
+        g["uso"] = ("mixto" if g["uf_v"] > 0 and g["uf_c"] > 0
+                    else "comercial" if g["uf_c"] > 0 else "residencial")
+        g.pop("_n", None)
+        out.append(g)
+    return out
+
+
 def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
-                                  baseline_id: str) -> tuple[list[dict], int]:
+                                  baseline_id: str, agregar: bool = False) -> tuple[list[dict], int]:
     """Normaliza cada fila del CSV a una fila de `baseline_direcciones`.
-    Devuelve (registros, filas_sin_direccion). Lanza ValueError si faltan columnas."""
+    Devuelve (registros, filas_sin_direccion). Lanza ValueError si faltan columnas.
+    Con `agregar=True` colapsa por dirección y deriva la UF del tipo de inmueble."""
     from scrapitero.agents.direccion_norm import (normalizar_calle, normalizar_numero,
                                                   separar_numero)
     idx = {h: i for i, h in enumerate(headers)}
@@ -1564,6 +1673,8 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
             "uf_c": entero(celda(fila, "uf_comercio")),
             "extras": json.dumps(extras, ensure_ascii=False)[:4000] if extras else None,
         })
+    if agregar and registros:
+        registros = _agregar_por_direccion(registros, baseline_id)
     return registros, sin_direccion
 
 
@@ -1736,28 +1847,36 @@ async def actualizacion_preparar(
     country_code: str = Form("AUTO"),
     archivo: UploadFile = File(...),
     mapeo: str = Form(...),
-    fecha: str = Form(""),
-    ciudad: str = Form(""),          # ciudad/localidad para geocodificar bien
 ) -> JSONResponse:
     """Paso 2: crea la región + persiste el baseline y lanza el geocoding en background.
-    El polígono de la nueva zona se dibuja después (crear-survey)."""
+    El polígono de la nueva zona se dibuja después (crear-survey). La ciudad sale de
+    la columna del CSV (mapeada por fila); no se pide en el formulario."""
     try:
         mapeo_d = _parse_mapeo(mapeo)
-        fecha_val = _parse_fecha(fecha)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    fecha_val = None      # la fecha del relevamiento anterior no se usa
 
     data = await archivo.read()
     try:
         headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+        # Agregamos por dirección: la UF se deriva del tipo de inmueble (residencial
+        # → vivienda; resto → comercio), contando las entradas de cada dirección.
         registros, sin_direccion = _construir_registros_baseline(
-            headers, datos, mapeo_d, str(uuid.uuid4()))
+            headers, datos, mapeo_d, str(uuid.uuid4()), agregar=True)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     if not registros:
         return JSONResponse({"ok": False, "error":
                              "Ninguna fila tiene dirección legible con el mapeo elegido — "
                              "revisá qué columna es la dirección"}, status_code=400)
+
+    # Ciudad predominante de la columna del CSV (fallback para filas sin ciudad y
+    # para la detección de país). Cada fila ya lleva su propia ciudad por separado.
+    from collections import Counter
+    _ciud = Counter((r.get("ciudad") or "").strip() for r in registros
+                    if (r.get("ciudad") or "").strip())
+    ciudad = _ciud.most_common(1)[0][0] if _ciud else ""
 
     cc = (country_code or "AUTO").upper()
     if cc in ("BRA", "ARG"):
@@ -1816,13 +1935,13 @@ async def actualizacion_geocoding_status(baseline_id: str) -> JSONResponse:
     if listo:
         with engine.connect() as conn:
             rows = conn.execute(text("""
-                SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio
+                SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw
                 FROM baseline_direcciones
                 WHERE baseline_id = :bid AND lat IS NOT NULL
             """), {"bid": baseline_id}).fetchall()
         puntos = [{
             "lat": float(r[0]), "lng": float(r[1]),
-            "direccion": " ".join(x for x in (r[2] or "", r[3] or "") if x).strip(),
+            "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
             "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
         } for r in rows]
 
@@ -1843,13 +1962,14 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio
+            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw
             FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NOT NULL
         """), {"bid": baseline_id}).fetchall()
     puntos = [{
         "lat": float(r[0]), "lng": float(r[1]),
-        "direccion": " ".join(x for x in (r[2] or "", r[3] or "") if x).strip(),
+        # Dirección COMPLETA tal cual vino del CSV (cae a calle+numero si no hay raw).
+        "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
         "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
         "uf_total": int((r[5] or 0) + (r[6] or 0)),
     } for r in rows]
