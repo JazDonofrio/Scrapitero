@@ -303,6 +303,14 @@ def _grid_scan(s: float, w: float, n: float, e: float,
 
     unique_ids: set[int] = set()
     scanned = 0
+    # Convergencia: las celdas se recorren en orden aleatorio (muestreo uniforme de
+    # la zona), así que cuando dejan de aparecer lotes NUEVOS la zona ya está cubierta.
+    # Cortamos por rendimientos decrecientes para no barrer el grid entero (que en zonas
+    # con celda fina puede ser miles de celdas → ~20 min) y damos el scan por COMPLETO.
+    _CONV_CHECK_EVERY = 500     # cada cuántas celdas se evalúa el crecimiento
+    _CONV_MIN_GROWTH = 3        # si en el último tramo aparecieron < N lotes nuevos → cubierto
+    _CONV_MIN_CELLS = 1000      # no cortar antes de haber muestreado lo suficiente
+    unique_en_ultimo_check = 0
 
     with httpx.Client(timeout=20, headers=_HEADERS) as client:
         for c_w, c_s, c_e, c_n in cells:
@@ -337,6 +345,17 @@ def _grid_scan(s: float, w: float, n: float, e: float,
                 pct = int(scanned / total * 100)
                 _tg(f"🔍 <b>Escaneando zona...</b> {pct}%\n"
                     f"Parcelas encontradas hasta ahora: {len(unique_ids)}")
+
+            # Corte por convergencia (rendimientos decrecientes)
+            if scanned >= _CONV_MIN_CELLS and scanned % _CONV_CHECK_EVERY == 0:
+                nuevos = len(unique_ids) - unique_en_ultimo_check
+                if nuevos < _CONV_MIN_GROWTH:
+                    logger.info(
+                        f"SmartGIS: scan convergido ({scanned}/{total} celdas, "
+                        f"{len(unique_ids)} lotes; solo {nuevos} nuevos en las últimas "
+                        f"{_CONV_CHECK_EVERY}) — zona cubierta, scan completo")
+                    return unique_ids, True
+                unique_en_ultimo_check = len(unique_ids)
 
             _human_sleep(delay_ms)
 

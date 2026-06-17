@@ -80,11 +80,16 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
         ))
         return r.should_stop
 
-    def correr_paso(paso: str, fn, make_input) -> Optional[str]:
+    def correr_paso(paso: str, fn, make_input, progreso=None) -> Optional[str]:
         """Corre un sub-agente, reintentando mientras devuelva parcial=True.
 
         `make_input(presupuesto_s)` arma el input del sub-agente (presupuesto_s puede
         ser None = sin límite). Devuelve None si completó; 'parcial' | 'stop' | 'error'.
+
+        `progreso(d)` (opcional): True si la pasada hizo trabajo NUEVO. Si una pasada
+        vuelve `parcial` pero SIN progreso nuevo, el paso se da por completo y se avanza
+        (evita loops infinitos: p.ej. SmartGIS que nunca termina de recorrer el grid en
+        el presupuesto pero ya encontró todas las parcelas alcanzables de la zona).
         """
         for _ in range(input.max_pasadas):
             rest = restante()
@@ -107,28 +112,42 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
             if not getattr(r, "parcial", False):
                 out.pasos_ejecutados.append(paso)
                 return None
-            logger.info(f"VGRunner: {paso} devolvió parcial — re-ejecutando")
+            # parcial: si la pasada no aportó nada nuevo, ya convergió → avanzar igual.
+            if progreso is not None and not progreso(d):
+                logger.info(f"VGRunner: {paso} parcial pero sin progreso nuevo — "
+                            f"se da por completo y se avanza al siguiente paso")
+                out.pasos_ejecutados.append(paso)
+                return None
+            logger.info(f"VGRunner: {paso} devolvió parcial (con progreso) — re-ejecutando")
         return "parcial"
 
+    # Cada paso: (nombre, fn, make_input, progreso?). `progreso(d)` distingue una
+    # pasada parcial QUE AVANZA de una estancada. Para SmartGIS, "avanza" = insertó
+    # parcelas nuevas; si una pasada parcial no inserta ninguna, ya recorrió todo lo
+    # alcanzable de la zona → se da por completo (no re-ejecutar al infinito).
     pasos = [
         ("smartgis_fetcher", smartgis_fetcher.run,
          lambda s: smartgis_fetcher.SmartGISInput(
              region_id=input.region_id, survey_id=input.survey_id,
-             **({"max_runtime_s": s} if s is not None else {}))),
+             **({"max_runtime_s": s} if s is not None else {})),
+         lambda d: (d.get("parcelas_insertadas") or 0) > 0),
         ("varzea_bci_fetcher", varzea_bci_fetcher.run,
          lambda s: varzea_bci_fetcher.BCIInput(
              region_id=input.region_id, survey_id=input.survey_id,
-             **({"max_runtime_s": s} if s is not None else {"max_runtime_s": 0}))),
+             **({"max_runtime_s": s} if s is not None else {"max_runtime_s": 0})),
+         None),
         ("bci_parser", bci_parser.run,
          lambda s: bci_parser.BCIParserInput(
-             region_id=input.region_id, survey_id=input.survey_id)),
+             region_id=input.region_id, survey_id=input.survey_id),
+         None),
         ("establecimiento_agrupador", establecimiento_agrupador.run,
          lambda s: establecimiento_agrupador.AgrupadorInput(
-             region_id=input.region_id, survey_id=input.survey_id)),
+             region_id=input.region_id, survey_id=input.survey_id),
+         None),
     ]
 
-    for paso, fn, make_input in pasos:
-        res = correr_paso(paso, fn, make_input)
+    for paso, fn, make_input, progreso in pasos:
+        res = correr_paso(paso, fn, make_input, progreso)
         if res is None:
             continue
         if res == "parcial":

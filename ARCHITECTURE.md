@@ -103,6 +103,8 @@ Cada step del orquestador registra: `agent_called`, `input_resumen`, `output_res
 | 022 | `baselines.ciudad` (ciudad/localidad global del relevamiento anterior, default de geocoding) |
 | 023 | `baseline_direcciones.ciudad` (ciudad por fila del CSV anterior; el geocoder la usa con fallback a `baselines.ciudad`) |
 | 024 | `surveys.baseline_id` (de qué relevamiento anterior es actualización el survey; el mapa lo grafica en gris bajo las parcelas nuevas) |
+| 025 | `hoteles` (hoteles del relevamiento: nombre/CNPJ/habitaciones/leitos/situação + `business_status` de Google + `cerrado_def`, vinculados a parcela). `HotelFetcher` (Cadastur + OSM + Google); habitaciones de hoteles abiertos → `uf_comercio` |
+| 026 | `hoteles.habitaciones_fuente` (`cadastur`/`osm` = exacto · `bci_proxy` = estimado por área construida del BCI `÷ m2_por_habitacion`). El dato exacto de Cadastur tiene prioridad sobre la estimación |
 
 ---
 
