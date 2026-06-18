@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asistencia · Habitaciones de hoteles</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root{--bg:#0f172a;--panel:#1e293b;--card:#273449;--txt:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--accent:#0ea5e9}
+    *{box-sizing:border-box} html,body{margin:0;height:100%;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+    #wrap{display:flex;height:100vh}
+    #side{width:380px;min-width:340px;display:flex;flex-direction:column;border-right:1px solid #334155;background:var(--panel)}
+    #head{padding:12px 14px;border-bottom:1px solid #334155}
+    #head h1{font-size:1rem;margin:0 0 4px} #head .sub{font-size:.78rem;color:var(--mut)}
+    #list{flex:1;overflow:auto;padding:8px}
+    .card{background:var(--card);border:1px solid #334155;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:.82rem;line-height:1.5;cursor:pointer}
+    .card:hover{border-color:var(--accent)} .card.done{opacity:.6;border-color:var(--ok)}
+    .card .nm{font-weight:700;font-size:.9rem} .card .mut{color:var(--mut);font-size:.76rem}
+    .card a{color:var(--accent);text-decoration:none}
+    .card .base{margin-top:5px;padding-top:5px;border-top:1px dashed #3b4860;color:#a5b4fc;font-size:.76rem}
+    .row{display:flex;gap:6px;align-items:center;margin-top:7px}
+    .row input{width:90px;padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.85rem}
+    .row button{padding:5px 12px;border-radius:6px;border:0;background:var(--accent);color:#04293b;font-weight:700;cursor:pointer}
+    .row button:disabled{opacity:.5;cursor:default}
+    #map{flex:1}
+    .tag{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:10px;background:#334155;color:#cbd5e1;margin-left:4px}
+    #empty{padding:24px;text-align:center;color:var(--mut)}
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="side">
+    <div id="head">
+      <h1>🆘 Habitaciones a resolver</h1>
+      <div class="sub" id="sub">Cargando…</div>
+    </div>
+    <div id="list"></div>
+  </div>
+  <div id="map"></div>
+</div>
+<script>
+const SID = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop());
+const map = L.map('map').setView([-15.65,-56.13], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(map);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
+  const u=Math.sin(x/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.sqrt(u));};
+const markers = {};
+let baselinePts = [];
+
+function nearestBaseline(lat,lng){
+  let best=null, bd=120;
+  for(const p of baselinePts){ const d=distM(lat,lng,p.lat,p.lng); if(d<bd){bd=d;best={...p,d:Math.round(d)};} }
+  return best;
+}
+
+async function guardar(hotelId, val, btn, card){
+  const n = parseInt(val,10);
+  if(isNaN(n)||n<0){ alert('Ingresá un número válido de habitaciones'); return; }
+  btn.disabled=true; btn.textContent='…';
+  try{
+    const r = await fetch(`/api/hoteles/${hotelId}/habitaciones`,{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({habitaciones:n})}).then(r=>r.json());
+    if(r.ok){ card.classList.add('done'); btn.textContent='✓ guardado';
+      card.querySelector('.nm').insertAdjacentHTML('beforeend', ` <span class="tag" style="background:#14532d;color:#bbf7d0">${n} hab.</span>`);
+      pendientes--; updateSub();
+    } else { alert(r.error||'Error'); btn.disabled=false; btn.textContent='Guardar'; }
+  }catch(e){ alert('Error de red'); btn.disabled=false; btn.textContent='Guardar'; }
+}
+
+let pendientes=0, total=0;
+function updateSub(){ document.getElementById('sub').textContent =
+  `${pendientes} sin resolver de ${total} · relevamiento ${SID.slice(0,8)}`; }
+
+async function load(){
+  const d = await fetch(`/api/surveys/${SID}/hoteles-asistencia`).then(r=>r.json());
+  if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
+  if(d.baseline_id){
+    try{ const b=await fetch(`/api/baselines/${d.baseline_id}/puntos`).then(r=>r.json());
+      if(b.ok){ baselinePts=b.puntos||[];
+        baselinePts.forEach(p=>L.circleMarker([p.lat,p.lng],{radius:4,color:'#7c3aed',
+          fillColor:'#c4b5fd',fillOpacity:.8,weight:1})
+          .bindPopup(`<b>Relevamiento anterior</b><br>${esc(p.direccion)}<br>UF: ${p.uf_total}`).addTo(map)); }
+    }catch(e){}
+  }
+  total = d.total; pendientes = d.total; updateSub();
+  const list = document.getElementById('list');
+  if(!d.hoteles.length){ list.innerHTML = '<div id="empty">✅ No hay hoteles pendientes de habitaciones.</div>'; return; }
+  const bounds=[];
+  d.hoteles.forEach(h=>{
+    const nb = (h.lat!=null)?nearestBaseline(h.lat,h.lng):null;
+    const card=document.createElement('div'); card.className='card'; card.id='c-'+h.hotel_id;
+    card.innerHTML =
+      `<div class="nm">🏨 ${esc(h.nombre||'(sin nombre)')} <span class="tag">${esc(h.fuente)}</span></div>`+
+      `<div class="mut">${esc(h.tipo||'')}${h.estado?' · '+esc(h.estado):''}</div>`+
+      (h.telefono?`<div>📞 <a href="tel:${esc(h.telefono)}">${esc(h.telefono)}</a></div>`:'<div class="mut">📞 sin teléfono</div>')+
+      (h.direccion?`<div class="mut">📍 ${esc(h.direccion)}</div>`:'')+
+      (h.cnpj?`<div class="mut">CNPJ ${esc(h.cnpj)}</div>`:'')+
+      (nb?`<div class="base">↩ Anterior (${nb.d} m): ${esc(nb.direccion)} · UF ${nb.uf_total}</div>`:'')+
+      `<div class="row"><input type="number" min="0" placeholder="habitaciones" id="i-${h.hotel_id}">`+
+      `<button>Guardar</button></div>`;
+    const btn=card.querySelector('button'), inp=card.querySelector('input');
+    btn.onclick=(e)=>{ e.stopPropagation(); guardar(h.hotel_id, inp.value, btn, card); };
+    inp.onclick=(e)=>e.stopPropagation();
+    if(h.lat!=null){
+      const mk=L.marker([h.lat,h.lng]).addTo(map).bindPopup(`🏨 ${esc(h.nombre||'')}`);
+      markers[h.hotel_id]=mk; bounds.push([h.lat,h.lng]);
+      card.onclick=()=>{ map.setView([h.lat,h.lng],17); mk.openPopup(); };
+    }
+    list.appendChild(card);
+  });
+  if(bounds.length) map.fitBounds(bounds,{padding:[40,40],maxZoom:16});
+}
+load();
+</script>
+</body>
+</html>

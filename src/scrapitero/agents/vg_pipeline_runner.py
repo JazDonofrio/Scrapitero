@@ -1,7 +1,9 @@
 """VGPipelineRunner — happy path de Várzea Grande compilado en un solo agente.
 
 Ejecuta en orden el pipeline estándar VG (CLAUDE.md):
-    SmartGISFetcher → VGBCIFetcher (con parseo inline) → BCIParser → EstablecimientoAgrupador
+    SmartGISFetcher → VGBCIFetcher (parseo inline) → BCIParser → EstablecimientoAgrupador
+    → HotelFetcher (hoteles del relevamiento; paso OPCIONAL, no tumba el pipeline si falla)
+El relevamiento no se marca `completed` hasta terminar todos los pasos (incluidos hoteles).
 
 Reemplaza la orquestación paso-a-paso del LLM por una sola invocación determinista:
 el orquestador (Hermes) llama UNA vez y el runner registra cada paso en
@@ -26,6 +28,8 @@ from pydantic import BaseModel
 from scrapitero.agents import (
     bci_parser,
     establecimiento_agrupador,
+    hotel_fetcher,
+    hotel_habitaciones_llm,
     smartgis_fetcher,
     varzea_bci_fetcher,
 )
@@ -125,28 +129,43 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
     # pasada parcial QUE AVANZA de una estancada. Para SmartGIS, "avanza" = insertó
     # parcelas nuevas; si una pasada parcial no inserta ninguna, ya recorrió todo lo
     # alcanzable de la zona → se da por completo (no re-ejecutar al infinito).
+    # Tupla: (nombre, fn, make_input, progreso?, opcional?). `opcional=True` ⇒ si el paso
+    # falla NO aborta el relevamiento (se registra el error y se sigue): los hoteles son
+    # enriquecimiento, no deben tumbar el pipeline. Hoteles usa fuentes GRATIS (sin Google
+    # pago) — para el descubrimiento con Google está el botón 🏨 de la web con su tilde.
     pasos = [
         ("smartgis_fetcher", smartgis_fetcher.run,
          lambda s: smartgis_fetcher.SmartGISInput(
              region_id=input.region_id, survey_id=input.survey_id,
              **({"max_runtime_s": s} if s is not None else {})),
-         lambda d: (d.get("parcelas_insertadas") or 0) > 0),
+         lambda d: (d.get("parcelas_insertadas") or 0) > 0, False),
         ("varzea_bci_fetcher", varzea_bci_fetcher.run,
          lambda s: varzea_bci_fetcher.BCIInput(
              region_id=input.region_id, survey_id=input.survey_id,
              **({"max_runtime_s": s} if s is not None else {"max_runtime_s": 0})),
-         None),
+         None, False),
         ("bci_parser", bci_parser.run,
          lambda s: bci_parser.BCIParserInput(
              region_id=input.region_id, survey_id=input.survey_id),
-         None),
+         None, False),
         ("establecimiento_agrupador", establecimiento_agrupador.run,
          lambda s: establecimiento_agrupador.AgrupadorInput(
              region_id=input.region_id, survey_id=input.survey_id),
-         None),
+         None, False),
+        ("hotel_fetcher", hotel_fetcher.run,
+         lambda s: hotel_fetcher.HotelFetcherInput(
+             region_id=input.region_id, survey_id=input.survey_id,
+             fuentes=["cadastur", "receita", "osm"], set_uf=True),
+         None, True),
+        # Completa con IA (Gemini + web) las habitaciones que ninguna fuente trajo.
+        # Opcional/best-effort; pago por hotel (tope max_hoteles).
+        ("hotel_habitaciones_llm", hotel_habitaciones_llm.run,
+         lambda s: hotel_habitaciones_llm.HotelHabLLMInput(
+             region_id=input.region_id, survey_id=input.survey_id),
+         None, True),
     ]
 
-    for paso, fn, make_input, progreso in pasos:
+    for paso, fn, make_input, progreso, opcional in pasos:
         res = correr_paso(paso, fn, make_input, progreso)
         if res is None:
             continue
@@ -159,7 +178,12 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
             out.detenido = True
             logger.info("VGRunner: stop externo del operador — frenando")
             return out
-        # error: abortar relayando la causa sellada del sub-agente
+        # error en un paso opcional: registrar y seguir (no tumba el relevamiento)
+        if res == "error" and opcional:
+            logger.warning(f"VGRunner: paso opcional '{paso}' falló ({out.error}) — se continúa")
+            out.error = None
+            continue
+        # error fatal: abortar relayando la causa sellada del sub-agente
         out.ok = False
         return out
 

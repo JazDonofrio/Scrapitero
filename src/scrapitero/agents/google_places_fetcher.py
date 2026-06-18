@@ -49,7 +49,7 @@ from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
 
 _PLACES_URL = "https://places.googleapis.com/v1/places:searchNearby"
-_FIELD_MASK = ("places.id,places.displayName,places.location,"
+_FIELD_MASK = ("places.id,places.displayName,places.location,places.formattedAddress,"
                "places.types,places.primaryType,places.businessStatus")
 _MAX_RESULT_COUNT = 20            # tope duro de la API (New) por llamada
 _COST_PER_REQUEST = 0.032        # USD por searchNearby (SKU Pro, aprox.)

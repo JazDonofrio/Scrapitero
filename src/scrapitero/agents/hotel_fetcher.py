@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import time
 import unicodedata
@@ -64,6 +65,9 @@ class HotelFetcherInput(BaseModel):
     proxy_hab_max: int = 400
     # Dedupe cross-fuente sin CNPJ (Google no trae): unir por nombre similar + proximidad.
     merge_dist_m: float = 200.0
+    # Buffer al recorte de zona: incluye hoteles pegados al límite (geocoding ±metros)
+    # que de otro modo caerían justo afuera del polígono.
+    borde_buffer_m: float = 40.0
 
 
 class HotelFetcherOutput(BaseModel):
@@ -78,6 +82,7 @@ class HotelFetcherOutput(BaseModel):
     cerrados: int = 0
     parcelas_con_hotel: int = 0
     total_uf_comercio: int = 0
+    sin_habitaciones: int = 0        # abiertos sin habitaciones → asistencia humana
 
 
 def _norm(s: Optional[str]) -> str:
@@ -234,7 +239,7 @@ def _fetch_receita(engine, mun_nombre: Optional[str], uf: Optional[str]) -> list
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT cnpj, nome_fantasia, razao_social, cnae_principal, tipo_logradouro,
-                   logradouro, numero, bairro, municipio_nome, situacao, lat, lng
+                   logradouro, numero, bairro, municipio_nome, situacao, lat, lng, telefone
             FROM receita_estabelecimentos_hospedagem WHERE uf = :uf
         """), {"uf": uf}).fetchall()
     mn = _norm(mun_nombre)
@@ -257,6 +262,7 @@ def _fetch_receita(engine, mun_nombre: Optional[str], uf: Optional[str]) -> list
             # son cierre definitivo (quedan abiertas pero con la situação visible).
             "cerrado": _norm(sit) in ("baixada", "nula"),
             "business_status": None, "hab_fuente": None, "fuente": "receita",
+            "telefono": r.telefone or None,
         })
     return hoteles
 
@@ -333,7 +339,7 @@ def _fetch_google(region_id: str, survey_id: Optional[str]) -> list[dict]:
         hoteles.append({
             "nombre": (pl.get("displayName") or {}).get("text"),
             "cnpj": None, "tipo": pl.get("primaryType") or "lodging",
-            "direccion": None, "lat": float(lat), "lng": float(lng),
+            "direccion": pl.get("formattedAddress"), "lat": float(lat), "lng": float(lng),
             "uh": None, "leitos": None, "estrellas": None, "situacion": None,
             "cerrado": (bs == "CLOSED_PERMANENTLY"), "business_status": bs,
             "hab_fuente": None, "fuente": "google",
@@ -370,6 +376,8 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             geoms = ([shape(f["geometry"]) for f in gj.get("features", []) if f.get("geometry")]
                      if gj.get("type") == "FeatureCollection" else [shape(gj.get("geometry", gj))])
             zona_poly = unary_union(geoms).buffer(0)
+            if input.borde_buffer_m:        # tolerancia de borde (grados ≈ m/111000)
+                zona_poly = zona_poly.buffer(input.borde_buffer_m / 111000.0)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"HotelFetcher: zona ilegible: {e}")
     if zona_poly is None:
@@ -471,6 +479,7 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         g["business_status"] = g.get("business_status") or h.get("business_status")
         g["cerrado"] = g["cerrado"] or h["cerrado"]
         g["direccion"] = g.get("direccion") or h.get("direccion")
+        g["telefono"] = g.get("telefono") or h.get("telefono")
         # la fuente de mayor prioridad manda (Cadastur tiene UHs; Receita situação oficial)
         if _FUENTE_PRIO.get(h["fuente"], 0) > _FUENTE_PRIO.get(g["fuente"], 0):
             g["fuente"] = h["fuente"]
@@ -508,14 +517,14 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         for h in hoteles:
             conn.execute(text("""
                 INSERT INTO hoteles (hotel_id, survey_id, region_id, nombre, cnpj, tipo,
-                    direccion, location, habitaciones, habitaciones_fuente, leitos,
+                    direccion, telefono, location, habitaciones, habitaciones_fuente, leitos,
                     estrellas, fuente, situacion_cadastur, business_status, cerrado_def)
-                VALUES (:id, :sid, :rid, :nombre, :cnpj, :tipo, :dir,
+                VALUES (:id, :sid, :rid, :nombre, :cnpj, :tipo, :dir, :tel,
                     ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), :uh, :habf, :leitos, :est,
                     :fuente, :sit, :bs, :cerr)
             """), {"id": str(uuid.uuid4()), "sid": input.survey_id, "rid": input.region_id,
                    "nombre": h["nombre"], "cnpj": h["cnpj"], "tipo": h["tipo"],
-                   "dir": h["direccion"], "lng": h["lng"], "lat": h["lat"],
+                   "dir": h["direccion"], "tel": h.get("telefono"), "lng": h["lng"], "lat": h["lat"],
                    "uh": h["uh"], "habf": h.get("hab_fuente"), "leitos": h["leitos"],
                    "est": h["estrellas"], "fuente": h["fuente"], "sit": h["situacion"],
                    "bs": h.get("business_status"), "cerr": h["cerrado"]})
@@ -543,6 +552,17 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             WHERE region_id = :rid AND fuente = ANY(:f) AND business_status = 'CLOSED_PERMANENTLY'
         """), {"rid": input.region_id, "f": fuentes_run})
 
+        # Habitaciones cargadas a MANO (asistencia humana): rellenan donde no hay dato
+        # exacto (Cadastur UHs / OSM rooms). Sobreviven a re-cortes (tabla por CNPJ).
+        # Prioridad: Cadastur/OSM (exacto) > manual > estimación BCI.
+        conn.execute(text("""
+            UPDATE hoteles h
+            SET habitaciones = m.habitaciones, habitaciones_fuente = 'manual'
+            FROM hotel_habitaciones_manual m
+            WHERE h.region_id = :rid AND h.fuente = ANY(:f)
+              AND m.region_id = :rid AND h.cnpj = m.cnpj AND h.habitaciones IS NULL
+        """), {"rid": input.region_id, "f": fuentes_run})
+
         # ESTIMACIÓN de habitaciones por área del BCI cuando no hay dato exacto
         # (Cadastur UHs / OSM rooms). Proxy: area_construida / m2_por_habitacion.
         # Cuando Cadastur vuelva, el dato exacto pisa esta estimación (al re-correr).
@@ -565,6 +585,13 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         out.cerrados = conn.execute(text(
             "SELECT COUNT(*) FROM hoteles WHERE region_id=:r AND fuente=ANY(:f) AND cerrado_def"),
             {"r": input.region_id, "f": fuentes_run}).scalar() or 0
+        # Hoteles ABIERTOS sin habitaciones (ninguna fuente las tiene) → asistencia humana.
+        # Cuenta TODAS las fuentes de la región (no solo las de esta corrida): un hotel de
+        # Google sin habitaciones (que un re-corte receita+osm no toca) igual necesita ayuda.
+        out.sin_habitaciones = conn.execute(text(
+            "SELECT COUNT(*) FROM hoteles WHERE region_id=:r "
+            "AND NOT cerrado_def AND habitaciones IS NULL"),
+            {"r": input.region_id}).scalar() or 0
 
         if input.set_uf:
             filas_uf = conn.execute(text("""
@@ -594,6 +621,17 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         f"({out.por_fuente}), {out.vinculados_parcela} en parcela, {out.cerrados} cerrados. "
         f"UF comercio: {out.total_uf_comercio}."
         + (f" Fuentes caídas: {out.fuentes_fallidas}." if out.fuentes_fallidas else ""))
+
+    # Asistencia humana: si quedan hoteles abiertos sin habitaciones, avisar con el link
+    # a la página de carga manual (operador autenticado).
+    if out.sin_habitaciones and input.survey_id:
+        base = os.environ.get("WEB_BASE_URL", "http://localhost:8765").rstrip("/")
+        link = f"{base}/asistencia-hoteles/{input.survey_id}"
+        _tg(f"🆘 <b>Asistencia: {out.sin_habitaciones} hotel(es)</b> de {out.municipio} "
+            "sin cantidad de habitaciones (Cadastur caído / sin dato).\n"
+            "Hay que conseguirlas (llamando al hotel) y cargarlas a mano acá:\n"
+            f"{link}")
+
     logger.info(f"HotelFetcher {input.region_id}: zona={out.hoteles_en_zona} "
                 f"por_fuente={out.por_fuente} fallidas={out.fuentes_fallidas} "
                 f"vinculados={out.vinculados_parcela} cerrados={out.cerrados} uf={out.total_uf_comercio}")

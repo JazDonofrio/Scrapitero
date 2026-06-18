@@ -626,6 +626,45 @@ async def activity_stream() -> StreamingResponse:
     )
 
 
+# ── Tipo de edificación unificado (taxonomía del cliente) ─────────────────────
+# Un solo label por parcela, de la lista fija del cliente. Prioridad:
+#   1) hotel vinculado → HOTEL/MOTEL/FLAT/PENSÃO
+#   2) establecimiento CNPJ (descripcion_uso) → esa descripción (BAR, ESCOLA, HOSPITAL…)
+#   3) uso del catastro/BCI: vacante/sin construir→LOTE VAZIO, residencial→RESIDÊNCIA
+#      (uf_vivienda=1) / APARTAMENTO (>1), industrial→INDÚSTRIA, comercial→COMÉRCIO EM
+#      GERAL, mixto→MIXTO.
+
+def _hotel_tipo_label(t: Optional[str]) -> str:
+    t = (t or "").lower()
+    if "motel" in t:
+        return "MOTEL"
+    if "apart" in t or "flat" in t:
+        return "FLAT"
+    if "pens" in t:
+        return "PENSÃO"
+    return "HOTEL"
+
+
+def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str],
+                      hotel_tipo: Optional[str]) -> str:
+    if hotel_tipo:
+        return _hotel_tipo_label(hotel_tipo)
+    if descripcion:                                  # 1+ descripciones CNPJ → la primera
+        return descripcion.split(",")[0].strip()
+    u = (uso or "").lower()
+    if u == "vacante" or not area:
+        return "LOTE VAZIO"
+    if u == "residencial":
+        return "APARTAMENTO" if (uf_v or 0) > 1 else "RESIDÊNCIA"
+    if u == "industrial":
+        return "INDÚSTRIA"
+    if u == "comercial":
+        return "COMÉRCIO EM GERAL"
+    if u == "mixto":
+        return "MIXTO"
+    return ""
+
+
 @app.get("/api/surveys/{survey_id}/parcelas")
 async def survey_parcelas(survey_id: str) -> list[dict]:
     """Devuelve centroide + metadata de cada parcela para renderizar en el mapa."""
@@ -648,7 +687,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.propietario_nombre, p.propietario_documento,
                    p.contribuyente_secundario,
                    p.establecimiento_id::text, e.tipo, e.nombre, e.n_parcelas,
-                   p.parcela_id::text, p.categoria_uso, p.descripcion_uso
+                   p.parcela_id::text, p.categoria_uso, p.descripcion_uso,
+                   COALESCE((SELECT h.tipo FROM hoteles h
+                       WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
+                       ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             WHERE p.survey_id = :sid
@@ -701,6 +743,8 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ)
             "categoria_uso": r[27] or None,
             "descripcion_uso": r[28] or None,
+            # Tipo de edificación unificado (1 label de la lista del cliente)
+            "tipo_edificacion": _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29]) or None,
         })
     return out
 
@@ -765,6 +809,26 @@ async def run_hoteles(survey_id: str, google: bool = True) -> JSONResponse:
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
 
 
+@app.post("/api/surveys/{survey_id}/habitaciones-llm")
+async def run_habitaciones_llm(survey_id: str) -> JSONResponse:
+    """Completa con IA (Gemini + búsqueda web) las habitaciones de los hoteles abiertos sin
+    dato. Pago por hotel; rellena solo donde no hay dato exacto. Solo Brasil/operador."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.hotel_habitaciones_llm import HotelHabLLMInput
+    from scrapitero.agents.hotel_habitaciones_llm import run as run_llm
+
+    def _job() -> dict:
+        _thread_survey_id.value = survey_id
+        return run_llm(HotelHabLLMInput(region_id=region_id, survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
 @app.get("/api/surveys/{survey_id}/hoteles")
 async def survey_hoteles(survey_id: str) -> JSONResponse:
     """Hoteles del relevamiento (para el mapa/popup): nombre, habitaciones, estado."""
@@ -775,10 +839,10 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
                    h.habitaciones, h.leitos, h.cerrado_def,
                    COALESCE(h.business_status, h.situacion_cadastur) AS estado,
                    ST_Y(h.location) AS lat, ST_X(h.location) AS lng, h.fuente,
-                   h.habitaciones_fuente
+                   h.habitaciones_fuente, h.direccion
             FROM hoteles h
-            WHERE h.region_id = (SELECT region_id FROM surveys WHERE survey_id = :sid)
-              AND (h.survey_id::text = :sid OR h.survey_id IS NULL)
+            WHERE h.region_id = (SELECT region_id FROM surveys WHERE survey_id = CAST(:sid AS uuid))
+              AND (h.survey_id = CAST(:sid AS uuid) OR h.survey_id IS NULL)
             ORDER BY h.cerrado_def, h.nombre
         """), {"sid": survey_id}).fetchall()
     hoteles = [{
@@ -792,6 +856,7 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
         # 'cadastur'/'osm' = exacto · 'bci_proxy' = estimado por área
         "habitaciones_estimadas": (r[11] == "bci_proxy"),
         "habitaciones_fuente": r[11],
+        "direccion": r[12],
     } for r in rows]
     abiertos = [h for h in hoteles if not h["cerrado"]]
     return JSONResponse({
@@ -799,6 +864,76 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
         "abiertos": len(abiertos), "cerrados": len(hoteles) - len(abiertos),
         "habitaciones_total": sum(h["habitaciones"] or 0 for h in abiertos),
     })
+
+
+@app.get("/asistencia-hoteles/{survey_id}")
+async def asistencia_hoteles_page(survey_id: str):
+    """Página (operador) de carga manual de habitaciones: mapa con solo los hoteles +
+    datos del hotel y del relevamiento anterior, para que un humano consiga el dato faltante."""
+    return FileResponse(STATIC_DIR / "asistencia-hoteles.html")
+
+
+@app.get("/api/surveys/{survey_id}/hoteles-asistencia")
+async def hoteles_asistencia(survey_id: str) -> JSONResponse:
+    """Hoteles ABIERTOS sin habitaciones (ninguna fuente las tiene) + datos de contacto y
+    ubicación, para resolver a mano. Incluye `baseline_id` del survey (relevamiento anterior)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text(
+            "SELECT region_id, baseline_id::text FROM surveys WHERE survey_id = :sid"),
+            {"sid": survey_id}).fetchone()
+        if not meta:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+        rows = conn.execute(text("""
+            SELECT hotel_id::text, nombre, cnpj, tipo, telefono, direccion,
+                   COALESCE(business_status, situacion_cadastur) AS estado, fuente,
+                   ST_Y(location) AS lat, ST_X(location) AS lng, parcela_id::text
+            FROM hoteles
+            WHERE region_id = :rid
+              AND (survey_id = CAST(:sid AS uuid) OR survey_id IS NULL)
+              AND NOT cerrado_def AND habitaciones IS NULL AND location IS NOT NULL
+            ORDER BY nombre
+        """), {"rid": meta[0], "sid": survey_id}).fetchall()
+    hoteles = [{
+        "hotel_id": r[0], "nombre": r[1], "cnpj": r[2], "tipo": r[3], "telefono": r[4],
+        "direccion": r[5], "estado": r[6], "fuente": r[7],
+        "lat": float(r[8]) if r[8] is not None else None,
+        "lng": float(r[9]) if r[9] is not None else None, "parcela_id": r[10],
+    } for r in rows]
+    return JSONResponse({"ok": True, "survey_id": survey_id, "baseline_id": meta[1],
+                         "hoteles": hoteles, "total": len(hoteles)})
+
+
+@app.post("/api/hoteles/{hotel_id}/habitaciones")
+async def set_habitaciones_manual(hotel_id: str, request: Request) -> JSONResponse:
+    """Carga manual de habitaciones (asistencia humana). Las marca `manual` y las persiste
+    por CNPJ en `hotel_habitaciones_manual` para que sobrevivan a un re-corte del botón 🏨."""
+    try:
+        body = await request.json()
+        n = int(body.get("habitaciones"))
+    except (ValueError, TypeError):
+        return JSONResponse({"ok": False, "error": "habitaciones inválido"}, status_code=400)
+    if n < 0:
+        return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"}, status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+            {"h": hotel_id}).fetchone()
+        if not row:
+            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
+        region_id, cnpj = row
+        conn.execute(text(
+            "UPDATE hoteles SET habitaciones = :n, habitaciones_fuente = 'manual' "
+            "WHERE hotel_id::text = :h"), {"n": n, "h": hotel_id})
+        if cnpj:
+            conn.execute(text("""
+                INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
+                VALUES (:r, :c, :n, 'operador')
+                ON CONFLICT (region_id, cnpj)
+                DO UPDATE SET habitaciones = :n, actualizado_at = now()
+            """), {"r": region_id, "c": cnpj, "n": n})
+    return JSONResponse({"ok": True, "habitaciones": n})
 
 
 @app.get("/api/surveys/{survey_id}/manzanas")
@@ -1151,7 +1286,16 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 establecimiento_id::text,
                 parcelas.parcela_id::text,
                 categoria_uso,
-                descripcion_uso
+                descripcion_uso,
+                COALESCE((
+                    SELECT string_agg(h.nombre, ' | ' ORDER BY h.nombre)
+                    FROM hoteles h
+                    WHERE h.parcela_id = parcelas.parcela_id
+                      AND h.nombre IS NOT NULL AND NOT h.cerrado_def
+                ), '') AS hoteles_nombres,
+                COALESCE((SELECT h.tipo FROM hoteles h
+                    WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
+                    ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -1195,6 +1339,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Propietario", "Documento (CPF/CNPJ)", "Contribuyente Secundario",
             "Establecimiento (tipo)", "Establecimiento (nombre)",
             "Categoría (R/C/E)", "Descripción (CNPJ)",
+            "DSC_NOME_DO_IMOVEL", "DSC_LOGRADOURO_NO",
+            "Tipo de edificación",
         ])
 
         def _fila(r, direccion, unidad, codigo, uso, uf_v, uf_c, total, area_con):
@@ -1222,6 +1368,13 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[28] or "", r[29] or "", r[30] or "",
                 r[31] or "", r[32] or "",
                 r[35] or "", r[36] or "",
+                # DSC_NOME_DO_IMOVEL = nombre(s) del comercio/hotel de la parcela (hoteles + comercios)
+                " | ".join(x for x in (r[37], r[22]) if x),
+                # DSC_LOGRADOURO_NO = número de la dirección
+                r[3] or "",
+                # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
+                # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38]
+                _tipo_edificacion(r[8], r[9], r[13], r[36], r[38]),
             ]
 
         for r in rows:

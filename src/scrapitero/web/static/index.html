@@ -702,7 +702,7 @@ async function actuCrearSurvey() {
 // El país se autodetecta al crear la zona; si no matchea, se usa el default.
 const PIPELINE_DEFAULT = [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
 const PIPELINE_BY_COUNTRY = {
-  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']],
+  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser'], ['hoteles', 'Hoteles'], ['hab_ia', 'Habitaciones IA']],
 };
 
 /* ── Avance real del pipeline (barra de progreso) ─────────────────
@@ -726,10 +726,12 @@ const STEP_MATCHERS = [
   ['ibge_census',        k => k.includes('census') || k.includes('setores')],
   ['ibge_logradouros',   k => k.includes('logradouro')],
   ['places',             k => k.includes('places')],
+  ['hab_ia',             k => k.includes('habitacion') || k.includes('_llm')],  // antes que 'hotel'
+  ['hoteles',            k => k.includes('hotel')],
 ];
 // Plan esperado por flujo (CLAUDE.md): pasos que producen datos del relevamiento.
 const PLAN_STEPS = {
-  vg:    ['smartgis', 'bci', 'parser', 'agrupador'],
+  vg:    ['smartgis', 'bci', 'parser', 'agrupador', 'hoteles', 'hab_ia'],
   salta: ['salta_catastro', 'osm', 'address', 'salta_registro', 'salta_zonificacion', 'salta_rentas', 'unidades'],
   pba:   ['arba', 'osm', 'address', 'uso'],
 };
@@ -1373,13 +1375,10 @@ function renderCard(s) {
             <label style="font-size:.72rem;color:#6b7280;cursor:pointer"
                title="Incluir Google Places, la fuente PAGA (~USD 0,032/req). Sin tilde corre solo las fuentes gratuitas (Cadastur + Receita + OSM).">
                <input type="checkbox" id="hot-google-${sid}" checked style="vertical-align:middle"> Google (pago)</label>
-            <span id="hot-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
-            <a class="btn btn-sm btn-outline" href="/api/regions/${s.region_id}/export/csv-consolidado" download
-               style="text-decoration:none"
-               title="CSV consolidado de la región: el dato más reciente de cada parcela entre todos los relevamientos (completos y parciales)">⬇ CSV Consolidado</a>
-            ${OPERADOR && !s.archivado ? `<button class="btn btn-sm btn-outline"
-               onclick="toggleParcialForm('${sid}')"
-               title="Re-relevar solo una parte de esta región: crea un relevamiento nuevo acotado a un polígono (el actual queda intacto)">🔁 Sub-zona</button>` : ''}
+            <span id="hot-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <button class="btn btn-sm btn-outline" onclick="runHabitacionesIA('${sid}', this)"
+               title="Completar con IA (Gemini + búsqueda web) las habitaciones de los hoteles abiertos sin dato. Pago por hotel.">🛏️ Habitaciones IA</button>
+            <span id="hab-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
           </div>
           ${OPERADOR ? `<div id="parcial-form-${sid}"></div>` : ''}
         </div>
@@ -1527,12 +1526,15 @@ async function loadHoteles(sid) {
         }) });
         const estado = h.cerrado ? '<b style="color:#dc2626">CERRADO definitivamente</b>' : '<b style="color:#16a34a">abierto</b>';
         const habTxt = h.habitaciones != null
-          ? (h.habitaciones_estimadas
-              ? `≈ ${fmt(h.habitaciones)} habitaciones <span style="color:#d97706" title="Estimado por área de construcción del catastro (BCI); el dato exacto lo da Cadastur">(estimado)</span>`
-              : `${fmt(h.habitaciones)} habitaciones`)
+          ? (h.habitaciones_fuente === 'llm'
+              ? `${fmt(h.habitaciones)} habitaciones <span style="color:#7c3aed;font-weight:700" title="Obtenida por IA (Gemini + búsqueda web) — conviene verificar">(IA)</span>`
+              : h.habitaciones_estimadas
+                ? `≈ ${fmt(h.habitaciones)} habitaciones <span style="color:#d97706" title="Estimado por área de construcción del catastro (BCI); el dato exacto lo da Cadastur">(estimado)</span>`
+                : `${fmt(h.habitaciones)} habitaciones`)
           : 'habitaciones s/d';
         mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">🏨 <b>${escHtml(h.nombre || 'Hotel')}</b>`
           + (h.tipo ? ` <span style="color:#9ca3af">(${escHtml(h.tipo)})</span>` : '')
+          + (h.direccion ? `<br><span style="color:#6b7280;font-size:.74rem">📍 ${escHtml(h.direccion)}</span>` : '')
           + `<br>${habTxt}`
           + (h.leitos != null ? ` · ${fmt(h.leitos)} leitos` : '') + `<br>${estado}`
           + (h.cnpj ? `<br><span style="color:#6b7280;font-size:.72rem">CNPJ ${escHtml(h.cnpj)}</span>` : '')
@@ -1541,9 +1543,33 @@ async function loadHoteles(sid) {
       });
       grp.addTo(map);
       hotelLayers[sid] = grp;
-      if (d.total) loadParcelasMap(sid);   // re-pintar para que el popup de la parcela muestre el hotel
+      // Conteos para la leyenda del mapa (referencias)
+      const enMapa = (d.hoteles || []).filter(h => h.lat != null && h.lng != null).length;
+      map._hotelN = d.total || 0; map._hotelAbiertos = d.abiertos || 0;
+      map._hotelCerrados = d.cerrados || 0; map._hotelEnMapa = enMapa;
+      if (d.total) loadParcelasMap(sid);   // re-pinta parcelas (popup con hotel) + leyenda con hoteles
+      else setHotelLegend(map);            // 0 hoteles: igual reflejarlo en las referencias
     }
   } catch(_) {}
+}
+
+// Línea de hoteles en la leyenda del mapa (referencias). Muestra el total, los cerrados
+// y, clave para el debug, cuántos quedaron SIN ubicar (sin coordenada → no se ven en el mapa).
+function setHotelLegend(map){
+  if (!map || !map._leyenda) return;
+  const c = map._leyenda.getContainer(); if (!c) return;
+  let el = c.querySelector('.legend-hoteles');
+  if (map._hotelN == null) { if (el) el.remove(); return; }
+  const sinUbicar = Math.max(0, (map._hotelN || 0) - (map._hotelEnMapa || 0));
+  const html = '<span style="display:inline-block;width:14px;height:14px;line-height:14px;'
+      + 'text-align:center;font-size:10px;background:#fff;border:2px solid #7c3aed;border-radius:50%;'
+      + 'margin-right:5px;vertical-align:middle">🏨</span>Hoteles <b>(' + (map._hotelN || 0) + ')</b>'
+      + (map._hotelCerrados ? ' <span style="color:#9ca3af">· ' + map._hotelCerrados + ' cerr.</span>' : '')
+      + (sinUbicar ? ' <span style="color:#dc2626" title="Sin coordenada precisa: no se muestran como pin en el mapa">· ' + sinUbicar + ' sin ubicar</span>' : '');
+  if (!el) { el = document.createElement('div'); el.className = 'legend-hoteles';
+    el.style.cssText = 'margin-top:3px;border-top:1px solid rgba(148,163,184,.25);padding-top:3px';
+    c.appendChild(el); }
+  el.innerHTML = html;
 }
 
 async function runHoteles(sid, btn) {
@@ -1558,6 +1584,22 @@ async function runHoteles(sid, btn) {
       if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
     } else {
       if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.hoteles_en_zona} en zona · ${d.vinculados_parcela} en parcela · ${d.cerrados} cerrados · ${fmt(d.total_uf_comercio)} UF`; }
+      await loadHoteles(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+async function runHabitacionesIA(sid, btn) {
+  const msg = document.getElementById('hab-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ IA…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'Preguntando a la IA (Gemini + web)…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/habitaciones-llm`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.resueltos} resuelto(s) · ${d.desconocidos} sin dato · de ${d.consultados}`; }
       await loadHoteles(sid);
     }
   } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
@@ -1897,6 +1939,7 @@ async function loadParcelasMap(sid) {
       '<b>' + escHtml(addr) + '</b>' +
       (p.barrio ? '<br><span style="color:#9ca3af">' + escHtml(p.barrio) + '</span>' : '') +
       '<br><span style="color:' + color + ';font-weight:700;text-transform:capitalize">' + escHtml(CAT_LABEL[cat] || uso) + '</span>' +
+      (p.tipo_edificacion ? '<br><span style="color:#0ea5e9;font-weight:700;font-size:.8rem" title="Tipo de edificación (taxonomía del cliente)">🏢 ' + escHtml(p.tipo_edificacion) + '</span>' : '') +
       '<br>' + ufLine +
       (p.area_t ? '<br><span style="color:#9ca3af">' + p.area_t + ' m² terreno</span>' : '') +
       (p.area_c ? '<br><span style="color:#9ca3af">' + p.area_c + ' m² construida</span>' : '') +
@@ -1959,6 +2002,7 @@ async function loadParcelasMap(sid) {
   };
   ley.addTo(map);
   map._leyenda = ley;
+  setHotelLegend(map);   // sumar la línea de hoteles a las referencias
 }
 
 function startMapPolling(sid) {
