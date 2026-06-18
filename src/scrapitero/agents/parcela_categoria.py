@@ -62,6 +62,12 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
                 FROM receita_estabelecimentos re, bb
                 WHERE re.lat IS NOT NULL AND re.categoria IS NOT NULL
                   AND ST_SetSRID(ST_MakePoint(re.lng, re.lat), 4326) && bb.box
+                UNION ALL
+                -- POIs no-CNPJ (shoppings de OSM/Google), por región
+                SELECT poi.categoria, poi.descripcion,
+                       ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326) AS geom
+                FROM establecimientos_poi poi
+                WHERE poi.region_id = :rid AND poi.categoria IS NOT NULL
             ),
             hit AS (
                 SELECT p.parcela_id,

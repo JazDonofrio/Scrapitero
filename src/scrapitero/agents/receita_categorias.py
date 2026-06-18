@@ -49,9 +49,11 @@ _CNAE_MAP: dict[str, tuple[str, str]] = {
     "4711301": ("E", "SUPERMERCADO"),
     "4711302": ("E", "SUPERMERCADO"),
     "47": ("C", "COMÉRCIO EM GERAL"),          # catch-all varejo (prefijo corto = baja prioridad)
-    # ── Estacionamiento / shopping (E) ──
+    # ── Estacionamiento (E) ──
     "5223100": ("E", "ESTACIONAMENTO"),
-    "6822600": ("E", "SHOPPING"),
+    # 6822 = administração de propriedade imobiliária → IMOBILIÁRIA (NO es shopping: ese CNAE
+    # captura todas las administradoras/inmobiliarias. Los shoppings reales salen de OSM/Google).
+    "6822": ("C", "IMOBILIÁRIA"),
     # ── Hospedaje (E) / pensão (R) ──
     "5510801": ("E", "HOTEL"),
     "5510802": ("E", "FLAT"),                   # apart-hotel ≈ flat

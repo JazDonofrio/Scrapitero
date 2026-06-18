@@ -702,7 +702,7 @@ async function actuCrearSurvey() {
 // El país se autodetecta al crear la zona; si no matchea, se usa el default.
 const PIPELINE_DEFAULT = [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
 const PIPELINE_BY_COUNTRY = {
-  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser'], ['hoteles', 'Hoteles'], ['hab_ia', 'Habitaciones IA']],
+  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser'], ['shoppings', 'Shoppings'], ['categorias', 'Categorías'], ['hoteles', 'Hoteles'], ['hab_ia', 'Habitaciones IA']],
 };
 
 /* ── Avance real del pipeline (barra de progreso) ─────────────────
@@ -726,12 +726,14 @@ const STEP_MATCHERS = [
   ['ibge_census',        k => k.includes('census') || k.includes('setores')],
   ['ibge_logradouros',   k => k.includes('logradouro')],
   ['places',             k => k.includes('places')],
+  ['shoppings',          k => k.includes('shopping')],
+  ['categorias',         k => k.includes('categoria')],
   ['hab_ia',             k => k.includes('habitacion') || k.includes('_llm')],  // antes que 'hotel'
   ['hoteles',            k => k.includes('hotel')],
 ];
 // Plan esperado por flujo (CLAUDE.md): pasos que producen datos del relevamiento.
 const PLAN_STEPS = {
-  vg:    ['smartgis', 'bci', 'parser', 'agrupador', 'hoteles', 'hab_ia'],
+  vg:    ['smartgis', 'bci', 'parser', 'agrupador', 'shoppings', 'categorias', 'hoteles', 'hab_ia'],
   salta: ['salta_catastro', 'osm', 'address', 'salta_registro', 'salta_zonificacion', 'salta_rentas', 'unidades'],
   pba:   ['arba', 'osm', 'address', 'uso'],
 };
@@ -942,6 +944,17 @@ async function archivarSurvey(surveyId, nombre, archivar) {
     });
     const data = await res.json();
     if (data.ok) { loadSurveys(); }
+    else { alert(`Error: ${data.error||'desconocido'}`); }
+  } catch(err) { alert(`Error de red: ${err.message}`); }
+}
+
+// Clonar: crea un relevamiento nuevo y vacío con la misma zona, para empezar de cero.
+async function clonarSurvey(surveyId, nombre) {
+  if (!confirm(`¿Clonar "${nombre}"?\nSe crea un relevamiento NUEVO y VACÍO con la misma zona, en estado detenido, listo para ▶ Iniciar de cero. El original queda intacto.`)) return;
+  try {
+    const res = await fetch(`/api/surveys/${surveyId}/clonar`, {method:'POST'});
+    const data = await res.json();
+    if (data.ok) { loadSurveys(); alert(`Clon creado: "${data.name}". Buscalo en la lista y apretá ▶ Iniciar.`); }
     else { alert(`Error: ${data.error||'desconocido'}`); }
   } catch(err) { alert(`Error de red: ${err.message}`); }
 }
@@ -1277,6 +1290,8 @@ function renderCard(s) {
     btnArchivo = `<button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
          onclick="archivarSurvey('${sid}', '${s.region_nombre}', true)" title="Archivar: lo saca de la lista pero queda guardado y disponible en 'Comparar con…'">📦</button>`;
   }
+  if (OPERADOR) btnArchivo += ` <button class="btn btn-sm btn-outline" style="padding:.25rem .5rem;font-size:.72rem"
+         onclick="clonarSurvey('${sid}', '${s.region_nombre}')" title="Clonar: crea un relevamiento nuevo y vacío con la misma zona, para empezar de cero (el original queda intacto)">📋</button>`;
 
   const pasoActual = s.pipeline && s.pipeline.paso_actual;
   const pasoLabel = pasoActual ? stepLabel(pasoActual) : '';

@@ -30,6 +30,8 @@ from scrapitero.agents import (
     establecimiento_agrupador,
     hotel_fetcher,
     hotel_habitaciones_llm,
+    parcela_categoria,
+    shopping_fetcher,
     smartgis_fetcher,
     varzea_bci_fetcher,
 )
@@ -152,6 +154,15 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
          lambda s: establecimiento_agrupador.AgrupadorInput(
              region_id=input.region_id, survey_id=input.survey_id),
          None, False),
+        # Shoppings (OSM gratis; Google es pago → se corre aparte) + sellar categorías CNPJ
+        # sobre las parcelas (tipo de edificación). Opcionales/best-effort.
+        ("shopping_fetcher", shopping_fetcher.run,
+         lambda s: shopping_fetcher.ShoppingFetcherInput(
+             region_id=input.region_id, survey_id=input.survey_id, fuentes=["osm"]),
+         None, True),
+        ("parcela_categoria", parcela_categoria.run,
+         lambda s: parcela_categoria.ParcelaCategoriaInput(region_id=input.region_id),
+         None, True),
         ("hotel_fetcher", hotel_fetcher.run,
          lambda s: hotel_fetcher.HotelFetcherInput(
              region_id=input.region_id, survey_id=input.survey_id,

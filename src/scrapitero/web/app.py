@@ -829,6 +829,43 @@ async def run_habitaciones_llm(survey_id: str) -> JSONResponse:
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
 
 
+@app.post("/api/surveys/{survey_id}/clonar")
+async def clonar_relevamiento(survey_id: str) -> JSONResponse:
+    """Clona un relevamiento: copia la región (polígono + município + país) a una región +
+    survey NUEVOS y VACÍOS en estado 'stopped', listos para ▶ Iniciar de cero. El original
+    queda intacto. NO copia parcelas/hoteles/baseline/sub-zona — arranca limpio."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        src = conn.execute(text("""
+            SELECT r.name, r.country_code, r.zone_geojson, r.bbox_wkt, r.municipio_codigo
+            FROM surveys s JOIN regions r ON r.region_id = s.region_id
+            WHERE s.survey_id = CAST(:sid AS uuid)
+        """), {"sid": survey_id}).fetchone()
+    if not src:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    if not src[2]:
+        return JSONResponse({"ok": False, "error": "La región no tiene zona (zone_geojson) para clonar"},
+                            status_code=422)
+    name, cc, geojson, bbox, muni = src
+    new_name = f"{name} (copia)"
+    new_region = f"zona-{_slugify(name)}-copia-{uuid.uuid4().hex[:6]}"
+    new_survey = str(uuid.uuid4())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO regions (region_id, name, country_code, zone_geojson, bbox_wkt, municipio_codigo)
+                VALUES (:rid, :name, :cc, :geojson, :bbox, :muni)
+            """), {"rid": new_region, "name": new_name, "cc": cc,
+                   "geojson": geojson, "bbox": bbox, "muni": muni})
+            conn.execute(text(
+                "INSERT INTO surveys (survey_id, region_id, status) VALUES (:sid, :rid, 'stopped')"),
+                {"sid": new_survey, "rid": new_region})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "survey_id": new_survey, "region_id": new_region,
+                         "name": new_name})
+
+
 @app.get("/api/surveys/{survey_id}/hoteles")
 async def survey_hoteles(survey_id: str) -> JSONResponse:
     """Hoteles del relevamiento (para el mapa/popup): nombre, habitaciones, estado."""
