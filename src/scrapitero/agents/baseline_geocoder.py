@@ -38,6 +38,12 @@ class BaselineGeocoderInput(BaseModel):
     baseline_id: str
     delay_ms: int = 1100        # Nominatim pide ~1 req/s — respetarlo
     batch_size: Optional[int] = None   # tope opcional de direcciones por corrida
+    usar_cache: bool = True     # False → NO reusar geocode_cache (geocodifica todo de nuevo)
+    regeocodificar: bool = False  # True → resetea lat/lng del baseline para reprocesar TODO
+    usar_geocodebr: bool = True   # Brasil: geocodebr (CNEFE, gratis/offline) como paso 0
+    geocodebr_max_desvio_m: float = 300.0   # escribir coord de geocodebr solo si desvío ≤ esto
+    usar_mapbox: bool = True       # capa paga barata Nominatim→**Mapbox**→Google
+    mapbox_max_requests: int = 1000  # tope de llamadas a Mapbox (tramo gratis); el resto cae a Google
 
 
 class BaselineGeocoderOutput(BaseModel):
@@ -66,13 +72,15 @@ def _tg(msg: str) -> None:
         pass
 
 
-def _query(calle: str, numero: Optional[str], ciudad: Optional[str] = None) -> str:
-    """Texto a geocodificar: 'calle número, ciudad'. La ciudad desambigua (sin ella
-    la dirección cae en cualquier parte del país)."""
+def _query(calle: str, numero: Optional[str], barrio: Optional[str] = None,
+           ciudad: Optional[str] = None, estado: Optional[str] = None) -> str:
+    """Texto a geocodificar: 'calle número, bairro, ciudad, UF'. El bairro, la ciudad y
+    el estado (UF) desambiguan (sin ellos la dirección cae en cualquier parte del país)."""
     base = " ".join(x for x in (calle or "", numero or "") if x).strip()
-    if base and ciudad:
-        return f"{base}, {ciudad}"
-    return base
+    extra = ", ".join(x for x in (barrio or "", ciudad or "", estado or "") if x and x.strip())
+    if base and extra:
+        return f"{base}, {extra}"
+    return base or extra
 
 
 def _norm_ciudad(ciudad: Optional[str]) -> str:
@@ -83,14 +91,18 @@ def _norm_ciudad(ciudad: Optional[str]) -> str:
 
 
 def _clave(calle: str, numero: Optional[str], iso2: Optional[str],
-           ciudad: Optional[str] = None) -> Optional[str]:
-    """Clave de caché: dirección normalizada + ciudad + país. None si no hay calle
-    normalizable. Incluye la ciudad para no mezclar misma calle de distintas ciudades."""
+           barrio: Optional[str] = None, ciudad: Optional[str] = None,
+           estado: Optional[str] = None) -> Optional[str]:
+    """Clave de caché: dirección normalizada + bairro + ciudad + UF + país. None si no hay
+    calle normalizable. Incluye bairro/ciudad/estado para no mezclar la misma calle de
+    distintos barrios/ciudades/estados."""
     from scrapitero.agents.direccion_norm import normalizar_calle, normalizar_numero
     calle_norm = normalizar_calle(calle or "")
     if not calle_norm:
         return None
-    return f"{iso2 or ''}|{_norm_ciudad(ciudad)}|{calle_norm}|{normalizar_numero(numero or '') or ''}"
+    return (f"{iso2 or ''}|{_norm_ciudad(ciudad)}|{_norm_ciudad(barrio)}|"
+            f"{(estado or '').strip().upper()}|"
+            f"{calle_norm}|{normalizar_numero(numero or '') or ''}")
 
 
 def _nominatim(query: str, iso2: Optional[str], client: httpx.Client):
@@ -138,20 +150,98 @@ def _google(query: str, iso2: Optional[str], client: httpx.Client):
     return None
 
 
+_MAPBOX_FWD_URL = "https://api.mapbox.com/search/geocode/v6/forward"
+
+
+def _mapbox_token() -> Optional[str]:
+    return os.environ.get("MAPBOX_TOKEN") or os.environ.get("MAPBOX_ACCESS_TOKEN")
+
+
+def _mapbox(query: str, iso2: Optional[str], client: httpx.Client):
+    """(lat, lng, confidence) por Mapbox Geocoding v6 forward, o None. Capa paga barata."""
+    key = _mapbox_token()
+    if not key:
+        return None
+    params = {"q": query, "access_token": key, "limit": 1, "autocomplete": "false"}
+    if iso2:
+        params["country"] = iso2.lower()
+    try:
+        r = client.get(_MAPBOX_FWD_URL, params=params)
+        if r.status_code == 200:
+            feats = (r.json() or {}).get("features") or []
+            if feats:
+                props = feats[0].get("properties") or {}
+                coords = (props.get("coordinates") or
+                          (feats[0].get("geometry") or {}).get("coordinates") or {})
+                if isinstance(coords, dict):
+                    lat, lng = coords.get("latitude"), coords.get("longitude")
+                else:  # geometry.coordinates = [lng, lat]
+                    lng, lat = (coords + [None, None])[:2]
+                if lat is not None and lng is not None:
+                    # match_code.confidence (exact/high/medium/low) → conf; si no, por tipo.
+                    mc = (props.get("match_code") or {}).get("confidence")
+                    conf = {"exact": 0.95, "high": 0.85, "medium": 0.6, "low": 0.4}.get(
+                        mc, {"address": 0.9, "street": 0.6, "place": 0.4}.get(
+                            props.get("feature_type", ""), 0.5))
+                    return float(lat), float(lng), conf
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _geocodebr_step(engine, pendientes: list, municipio_codigo: Optional[str],
+                    ciudad_global: Optional[str], max_desvio_m: float) -> set:
+    """Paso 0 (Brasil): geocodifica las pendientes con geocodebr (CNEFE, gratis/offline) vía
+    el helper compartido `geocode_forward`. Escribe lat/lng de las que ubican con desvío
+    aceptable y devuelve el set de ids resueltos, para sacarlos del resto. Si geocodebr no
+    está disponible o falla, devuelve set() y el flujo sigue con Nominatim/Google."""
+    from scrapitero.agents.geocode_forward import geocodebr_lote, uf_de_municipio_codigo
+    uf = uf_de_municipio_codigo(municipio_codigo)
+    # estado por fila (COD_UF del CSV) si vino; si no, la UF de la región (municipio_codigo).
+    items = [{"id": pid, "logradouro": calle or "", "numero": numero or "",
+              "bairro": barrio or "", "municipio": (ciu or ciudad_global or ""),
+              "estado": (est or uf)}
+             for pid, calle, numero, barrio, ciu, est in pendientes]
+    res = geocodebr_lote(items, uf=uf, max_desvio_m=max_desvio_m)
+    ids_ok: set = set()
+    with engine.begin() as conn:
+        for pid, (lat, lng, src) in res.items():
+            conn.execute(text("""
+                UPDATE baseline_direcciones
+                SET lat=:lat, lng=:lng, geocode_source=:src, geocode_confidence=NULL
+                WHERE id=:id
+            """), {"lat": lat, "lng": lng, "src": src, "id": pid})
+            ids_ok.add(pid)
+    return ids_ok
+
+
 @agent_run
 def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     engine = get_engine()
     with engine.connect() as conn:
         meta = conn.execute(text(
-            "SELECT b.nombre, r.country_code, b.ciudad FROM baselines b "
+            "SELECT b.nombre, r.country_code, b.ciudad, r.municipio_codigo FROM baselines b "
             "JOIN regions r ON r.region_id = b.region_id WHERE b.baseline_id = :bid"),
             {"bid": input.baseline_id}).fetchone()
         if not meta:
             return BaselineGeocoderOutput(ok=False, baseline_id=input.baseline_id,
                                           error="baseline no encontrado")
-        nombre, country_code, ciudad = meta[0], meta[1], meta[2]
+        nombre, country_code, ciudad, municipio_codigo = meta[0], meta[1], meta[2], meta[3]
+
+    # Re-geocodificar: borrar las coordenadas previas para que se reprocese TODO el
+    # baseline (el geocoder solo toca filas con lat NULL).
+    if input.regeocodificar:
+        with engine.begin() as conn:
+            reset = conn.execute(text("""
+                UPDATE baseline_direcciones
+                SET lat = NULL, lng = NULL, geocode_source = NULL, geocode_confidence = NULL
+                WHERE baseline_id = :bid
+            """), {"bid": input.baseline_id}).rowcount
+        logger.info(f"BaselineGeocoder: regeocodificar=on → {reset} direcciones reseteadas")
+
+    with engine.connect() as conn:
         pendientes = conn.execute(text("""
-            SELECT id::text, calle, numero, ciudad FROM baseline_direcciones
+            SELECT id::text, calle, numero, barrio, ciudad, estado FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NULL AND calle IS NOT NULL
             ORDER BY calle, numero
         """), {"bid": input.baseline_id}).fetchall()
@@ -161,12 +251,31 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     if input.batch_size:
         pendientes = pendientes[:input.batch_size]
 
+    geocodificadas = fallidas = reusadas = 0
+    por_fuente: dict = {}
+
+    # ── Paso 0 (Brasil): geocodebr — CNEFE/IBGE, gratis y offline. Resuelve la mayoría
+    # sin pegarle a Nominatim/Google; lo que no ubique con desvío aceptable cae al resto.
+    if iso2 == "br" and input.usar_geocodebr and pendientes:
+        ids_ok = _geocodebr_step(engine, pendientes, municipio_codigo, ciudad,
+                                 input.geocodebr_max_desvio_m)
+        if ids_ok:
+            geocodificadas += len(ids_ok)
+            por_fuente["geocodebr"] = len(ids_ok)
+            pendientes = [t for t in pendientes if t[0] not in ids_ok]
+            logger.info(f"geocodebr paso 0: {len(ids_ok)} ubicadas gratis (CNEFE), "
+                        f"{len(pendientes)} restantes → Nominatim/Google")
+            _tg(f"📍 geocodebr (gratis): {len(ids_ok)} ubicadas, "
+                f"{len(pendientes)} van a Nominatim/Google.")
+
     # Caché de geocoding (migración 021): reusa coordenadas ya resueltas por
     # dirección normalizada + país, sin volver a pegarle a Nominatim/Google.
-    claves = {c for c in (_clave(calle, numero, iso2, ciu or ciudad)
-                          for _, calle, numero, ciu in pendientes) if c}
+    # Con usar_cache=False se omite la precarga → se geocodifica todo de nuevo
+    # (el dict `cache` sigue sirviendo de dedup dentro de ESTE run).
+    claves = {c for c in (_clave(calle, numero, iso2, barrio, ciu or ciudad, est)
+                          for _, calle, numero, barrio, ciu, est in pendientes) if c}
     cache: dict[str, tuple] = {}
-    if claves:
+    if claves and input.usar_cache:
         with engine.connect() as conn:
             for row in conn.execute(text("""
                 SELECT clave, lat, lng, geocode_source, geocode_confidence
@@ -175,12 +284,17 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
                 cache[row[0]] = (row[1], row[2], row[3], row[4])
 
     _tg(f"📍 <b>Geocodificando «{nombre}»</b>\n{len(pendientes)} direcciones del "
-        f"relevamiento anterior (caché + Nominatim + Google fallback)…")
+        f"relevamiento anterior (geocodebr + caché + Nominatim + Mapbox + Google)…")
 
-    geocodificadas = fallidas = reusadas = 0
-    por_fuente: dict = {}
     fallidas_claves: set = set()        # claves que ya fallaron en este run → no re-pegar
     delay = max(input.delay_ms, 0) / 1000.0
+
+    # Mapbox: capa paga barata entre Nominatim y Google, con tope para no pasar el tramo gratis.
+    mapbox_on = input.usar_mapbox and bool(_mapbox_token())
+    mapbox_reqs = 0
+    mapbox_aviso = False
+    if input.usar_mapbox and not _mapbox_token():
+        logger.info("BaselineGeocoder: usar_mapbox=True pero falta MAPBOX_TOKEN — se omite Mapbox")
 
     def _guardar(dir_id, lat, lng, src, conf):
         with engine.begin() as conn:
@@ -191,13 +305,13 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
             """), {"lat": lat, "lng": lng, "src": src, "conf": conf, "id": dir_id})
 
     with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
-        for i, (dir_id, calle, numero, ciu_fila) in enumerate(pendientes):
+        for i, (dir_id, calle, numero, barrio, ciu_fila, est) in enumerate(pendientes):
             ciu = ciu_fila or ciudad        # ciudad de la fila, o la global del baseline
-            q = _query(calle, numero, ciu)
+            q = _query(calle, numero, barrio, ciu, est)
             if not q:
                 fallidas += 1
                 continue
-            clave = _clave(calle, numero, iso2, ciu)
+            clave = _clave(calle, numero, iso2, barrio, ciu, est)
 
             # 1) Caché (DB o resuelto antes en este mismo run) → sin API
             if clave and clave in cache:
@@ -212,9 +326,20 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
                 fallidas += 1
                 continue
 
-            # 2) Geocoding real (Nominatim gratis → Google fallback)
+            # 2) Geocoding real (Nominatim gratis → Mapbox pago barato → Google fallback)
             hit = _nominatim(q, iso2, client)
             fuente = "nominatim"
+            if not hit and mapbox_on:
+                if mapbox_reqs < input.mapbox_max_requests:
+                    mapbox_reqs += 1
+                    hit = _mapbox(q, iso2, client)
+                    fuente = "mapbox"
+                elif not mapbox_aviso:
+                    mapbox_aviso = True
+                    _tg(f"💳 «{nombre}»: Mapbox alcanzó el tope de "
+                        f"{input.mapbox_max_requests} consultas — el resto cae a Google (pago).")
+                    logger.info(f"BaselineGeocoder: tope Mapbox ({input.mapbox_max_requests}) "
+                                "alcanzado — resto a Google")
             if not hit:
                 hit = _google(q, iso2, client)
                 fuente = "google"

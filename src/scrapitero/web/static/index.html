@@ -96,7 +96,7 @@
     /* Card detail */
     .card-detail { display: none; border-top: 1px solid #f3f4f6; }
     .card-detail.open { display: flex; }
-    .detail-map { width: 400px; min-width: 400px; height: 340px; flex-shrink: 0; position: relative; }
+    .detail-map { width: 580px; min-width: 580px; height: 460px; flex-shrink: 0; position: relative; }
     .detail-body { flex: 1; padding: 1.1rem 1.2rem; overflow: auto; }
 
     /* Botón fullscreen y contador sobre el mapa */
@@ -116,6 +116,15 @@
       transition: background .15s; text-decoration: none;
     }
     .map-gmaps-btn:hover { background: rgba(15,23,42,1); }
+    /* Actualizar + re-centrar en la zona (útil sobre todo en fullscreen) */
+    .map-refresh-btn {
+      position: absolute; top: 44px; right: 8px; z-index: 1000;
+      background: rgba(15,23,42,.75); color: #e2e8f0; border: none;
+      border-radius: 6px; height: 28px; padding: 0 9px; font-size: .72rem; font-weight: 700;
+      cursor: pointer; display: flex; align-items: center; gap: 4px;
+      transition: background .15s;
+    }
+    .map-refresh-btn:hover { background: rgba(15,23,42,1); }
     /* Comentarios sobre parcelas (sugerencias/correcciones del cliente) */
     .cmt-pin {
       width: 26px; height: 26px; border-radius: 50% 50% 50% 4px;
@@ -147,7 +156,7 @@
     .map-legend {
       background: rgba(15,23,42,.82); border-radius: 7px;
       padding: 6px 10px; font-size: .7rem; color: #e2e8f0; line-height: 1.8;
-      pointer-events: none;
+      max-height: 55%; overflow-y: auto; pointer-events: auto;
     }
     .map-legend-dot {
       display: inline-block; width: 9px; height: 9px;
@@ -179,6 +188,10 @@
     .old-uf-box.old-count-box {
       width: 20px; height: 20px; min-width: 20px; border-radius: 50%;
       background: #ffffff; border-color: #7c3aed; color: #6d28d9; font-size: .66rem;
+    }
+    /* Status contrato = CONECTADO → cliente vigente del cliente: verde lleno. */
+    .old-uf-box.old-conectado {
+      background: #16a34a; color: #ffffff; border-color: #15803d;
     }
 
     /* Mapa en fullscreen (sobre el wrapper) */
@@ -332,7 +345,7 @@
 
     @media (max-width: 720px) {
       .card-detail.open { flex-direction: column; }
-      .detail-map { width: 100%; min-width: 0; height: 260px; }
+      .detail-map { width: 100%; min-width: 0; height: 340px; }
       .form-grid { grid-template-columns: 1fr; }
       .card-kpis { gap: .75rem; }
     }
@@ -567,8 +580,13 @@ function actuRenderMapeo(p) {
   };
   document.getElementById('actu-mapeo').innerHTML = `
     <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas)} filas detectadas (separador «${p.separador}»). Confirmá el mapeo de columnas:</div>
-    <div class="comp-map-grid" style="margin-top:.3rem">
+    <div class="comp-map-grid" style="margin-top:.3rem;grid-template-columns:1fr;max-width:440px">
       ${ACTU_CAMPOS.map(([c, l]) => `<div><label>${l}</label>${sel(c)}</div>`).join('')}
+      <div><label>Ciudad (si el CSV no trae columna)</label>
+        <input id="actu-ciudad-manual" type="text" placeholder="Ej: Várzea Grande"
+               style="width:100%;padding:.3rem;box-sizing:border-box">
+        <div class="comp-meta" style="margin-top:.2rem">Obligatoria: sin ciudad el geocoding ubica las direcciones en cualquier parte del país.</div>
+      </div>
     </div>`;
   document.getElementById('actu-paso2').style.display = '';
 }
@@ -591,6 +609,7 @@ async function actuPreparar() {
   fd.append('country_code', document.getElementById('f-country').value);
   fd.append('archivo', f);
   fd.append('mapeo', JSON.stringify(mapeo));
+  { const cm = document.getElementById('actu-ciudad-manual'); if (cm && cm.value.trim()) fd.append('ciudad', cm.value.trim()); }
   try {
     const d = await (await fetch('/api/actualizaciones/preparar', {method:'POST', body:fd})).json();
     if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = '📍 Geocodificar y graficar'; return; }
@@ -1138,18 +1157,23 @@ const BL_CAMPOS = [
   ['calle', 'Calle (si viene separada)'],
   ['numero', 'Número'],
   ['uso', 'Uso / tipología'],
+  ['barrio', 'Barrio / Bairro'],
+  ['ciudad', 'Ciudad / Cidade'],
+  ['estado', 'Estado / UF (COD_UF)'],
   ['uf_vivienda', 'UF Vivienda'],
   ['uf_comercio', 'UF Comercio'],
 ];
 
-// Mapeo de la ACTUALIZACIÓN: dirección + uso/tipología + ciudad (por fila), y la
-// UF (vivienda/comercio) para mostrar su cantidad sobre cada punto del mapa.
+// Mapeo de la ACTUALIZACIÓN: estas columnas definen la dirección completa con la que se
+// recuperan las coordenadas (endereço + bairro + cidade + UF). El COD_UF (estado de Brasil)
+// desambigua municípios homónimos al geocodificar. No se pide uso (se deriva del backend).
 const ACTU_CAMPOS = [
-  ['direccion', 'Dirección completa'],
-  ['uso', 'Uso / tipología'],
-  ['ciudad', 'Ciudad'],
-  ['uf_vivienda', 'UF Vivienda'],
-  ['uf_comercio', 'UF Comercio'],
+  ['direccion', 'Dirección / Endereço completo'],
+  ['barrio', 'Barrio / Bairro'],
+  ['ciudad', 'Ciudad / Cidade'],
+  ['estado', 'Estado / UF (COD_UF)'],
+  ['status_contrato', 'Status contrato'],
+  ['status_node', 'Status node'],
 ];
 
 function toggleImportBaseline(sid) {
@@ -1200,6 +1224,7 @@ function renderMapeoForm(sid, p, fname) {
     <div class="comp-map-grid" style="margin-top:.45rem">
       <div><label>Nombre del baseline</label><input type="text" id="bl-nombre-${sid}" value="${escHtml((fname || '').replace(/\.[^.]+$/, ''))}"></div>
       <div><label>Fecha del relevamiento original</label><input type="date" id="bl-fecha-${sid}"></div>
+      <div><label>Ciudad (si el CSV no trae columna)</label><input type="text" id="bl-ciudad-${sid}" placeholder="Ej: Várzea Grande"></div>
     </div>
     <div style="text-align:right;margin-top:.55rem">
       <button class="btn btn-sm btn-primary" style="font-size:.75rem"
@@ -1227,6 +1252,7 @@ async function importarBaseline(sid, btn) {
   fd.append('nombre', (document.getElementById('bl-nombre-' + sid).value || '').trim() || 'Relevamiento anterior');
   fd.append('fecha', document.getElementById('bl-fecha-' + sid).value || '');
   fd.append('mapeo', JSON.stringify(mapeo));
+  { const cm = document.getElementById('bl-ciudad-' + sid); if (cm && cm.value.trim()) fd.append('ciudad', cm.value.trim()); }
   try {
     const res = await fetch(`/api/surveys/${sid}/baselines`, {method: 'POST', body: fd});
     const data = await res.json();
@@ -1340,6 +1366,7 @@ function renderCard(s) {
           <div id="${mapId}" style="width:100%;height:100%"></div>
           <button class="map-gmaps-btn" title="Abrir esta ubicación en Google Maps (con nombres de calles)" onclick="openGoogleMaps('${sid}')">📍 Google Maps</button>
           <button class="map-fs-btn" title="Pantalla completa" onclick="toggleMapFullscreen('${sid}')">⛶</button>
+          <button class="map-refresh-btn" title="Actualizar y centrar en la zona marcada" onclick="refreshMap('${sid}')">🔄 Actualizar</button>
           <div class="map-parcel-count" id="mcount-${sid}"></div>
         </div>
         <div class="detail-body">
@@ -1479,13 +1506,21 @@ function initMap(sid) {
         interactive: false,   // es solo el contorno de la zona; no debe tapar clics
         style: {color: '#38bdf8', weight: 2, fillOpacity: .07, fillColor: '#38bdf8', dashArray: '5 4'}
       }).addTo(map);
-      map.fitBounds(layer.getBounds(), {padding: [16, 16]});
+      map._zoneBounds = layer.getBounds();   // recordar la zona marcada para re-centrar en cada update
+      map.fitBounds(map._zoneBounds, {padding: [16, 16]});
     } catch(_) { map.setView([-15.65, -56.134], 15); }
   } else {
     map.setView([-20, -50], 5);
   }
 
   maps[sid] = map;
+
+  // Mientras el usuario no toque el mapa, cada actualización lo deja centrado en la zona
+  // marcada. Si el usuario hace pan/zoom para inspeccionar, dejamos de re-centrar (para no
+  // pelearle el encuadre); el botón "🔄 Actualizar" vuelve a fijarlo en la zona.
+  map._userMoved = false;
+  map.on('dragstart', () => { map._userMoved = true; });
+  map.on('zoomstart', () => { if (!map._recentering) map._userMoved = true; });
 
   // Actualización: graficar el relevamiento ANTERIOR (gris) por DEBAJO de las
   // parcelas nuevas → comparación directa viejo/nuevo. Pane propio con z-index
@@ -1840,7 +1875,10 @@ function oldRelevMarker(g, paneName) {
   // Número del marcador: la UF total (vivienda + comercio) en el punto; si no hay
   // UF, la cantidad de direcciones (multi) o vacío (single).
   const num = ufTot > 0 ? ufTot : (multi ? n : '');
-  const cls = 'old-uf-box' + (multi ? ' old-count-box' : (num === '' ? ' old-uf-empty' : ''));
+  // status_contrato = CONECTADO → cliente vigente del cliente: marcador verde.
+  const conectado = g.items.some(p => (p.status_contrato || '').trim().toUpperCase() === 'CONECTADO');
+  const cls = 'old-uf-box' + (multi ? ' old-count-box' : (num === '' ? ' old-uf-empty' : ''))
+    + (conectado ? ' old-conectado' : '');
   const size = (num === '') ? [12, 12] : (multi ? [22, 22] : [18, 16]);
   const opts = { icon: L.divIcon({
     className: 'old-uf-marker', html: `<div class="${cls}">${num}</div>`,
@@ -1849,20 +1887,38 @@ function oldRelevMarker(g, paneName) {
   if (paneName) opts.pane = paneName;
   const m = L.marker([g.lat, g.lng], opts);
 
+  // Status del relevamiento anterior (contrato / node), si vinieron mapeados.
+  const stLine = p => {
+    const parts = [];
+    if (p.status_contrato) parts.push('Contrato: <b>' + escHtml(p.status_contrato) + '</b>');
+    if (p.status_node) parts.push('Node: <b>' + escHtml(p.status_node) + '</b>');
+    return parts.length
+      ? '<br><span style="color:#6b7280;font-size:.74rem">' + parts.join(' · ') + '</span>' : '';
+  };
+
+  // Aviso de cliente vigente (status_contrato = CONECTADO).
+  const clienteLine = conectado
+    ? `<br><span style="color:#15803d;font-weight:700;font-size:.74rem">✓ Cliente vigente (conectado)</span>`
+    : '';
+
   let body;
   if (!multi) {
     const p = g.items[0];
     body = `<b>${escHtml(p.direccion || '(sin dirección)')}</b>`
       + `<br><span style="color:#9ca3af">Relevamiento anterior</span>`
+      + clienteLine
       + `<br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${ufTot}</b>`
-      + ` <span style="color:#9ca3af;font-size:.72rem">(viv ${ufV} / com ${ufC})</span>`;
+      + ` <span style="color:#9ca3af;font-size:.72rem">(viv ${ufV} / com ${ufC})</span>`
+      + stLine(p);
   } else {
     const lista = g.items.map(p => {
       const uf = (p.uf_v || 0) + (p.uf_c || 0);
       return `<div style="padding:1px 0;border-top:1px solid rgba(148,163,184,.18)">`
-        + `${escHtml(p.direccion || '(sin dirección)')} <span style="color:#9ca3af">· UF ${uf}</span></div>`;
+        + `${escHtml(p.direccion || '(sin dirección)')} <span style="color:#9ca3af">· UF ${uf}</span>`
+        + stLine(p) + `</div>`;
     }).join('');
     body = `<b>${n} direcciones en este punto</b>`
+      + clienteLine
       + `<br><span style="color:#9ca3af">Relevamiento anterior · UF total <b style="color:#6d28d9">${ufTot}</b> (viv ${ufV} / com ${ufC})</span>`
       + `<div style="max-height:170px;overflow:auto;margin-top:4px;font-size:.74rem;line-height:1.5">${lista}</div>`;
   }
@@ -1909,6 +1965,11 @@ async function loadParcelasMap(sid) {
   if (map._leyenda) { try { map.removeControl(map._leyenda); } catch(_) {} delete map._leyenda; }
 
   const counts = {};
+  // Conteo por tipo de edificación (taxonomía del cliente) para las referencias del mapa.
+  // tipoColor[label] = color del marcador (categoría amplia) para que el punto de la
+  // leyenda coincida con el color que tiene la parcela en el mapa.
+  const tipoCounts = {};
+  const tipoColor = {};
   const markers = [];
   const byPid = {};
 
@@ -1926,6 +1987,14 @@ async function loadParcelasMap(sid) {
     const color = compEst
       ? (ESTADO_COLOR[catLeyenda] || '#e2e8f0')
       : (CAT_COLOR[cat] || CAT_DEFAULT);
+
+    // Referencias por taxonomía: agrupar por tipo de edificación (si no hay, cae a la
+    // etiqueta de categoría amplia, p.ej. relevamientos fuera de Brasil sin tipología).
+    if (!compEst) {
+      const tipoLbl = p.tipo_edificacion || CAT_LABEL[cat] || uso;
+      tipoCounts[tipoLbl] = (tipoCounts[tipoLbl] || 0) + 1;
+      if (!(tipoLbl in tipoColor)) tipoColor[tipoLbl] = color;
+    }
 
     const m = L.circleMarker([p.lat, p.lng], {
       radius: 7, fillColor: color,
@@ -1994,14 +2063,15 @@ async function loadParcelasMap(sid) {
   const cntEl = document.getElementById('mcount-' + sid);
   if (cntEl) { cntEl.textContent = markers.length + ' parcelas'; cntEl.style.display = 'block'; }
 
-  // Leyenda: tipologías (vivienda / comercio / edificios / mixto) con su conteo
-  const catEntries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  // Leyenda (referencias): con comparativa activa va por estado (nueva/cambió/igual);
+  // si no, por tipo de edificación de la taxonomía del cliente con su conteo.
+  const catEntries = Object.entries(compEst ? counts : tipoCounts).sort((a, b) => b[1] - a[1]);
   const ley = L.control({position: 'bottomleft'});
   ley.onAdd = function() {
     const d = L.DomUtil.create('div', 'map-legend');
-    let html = catEntries.map(([cat, n]) => {
-      const c = compEst ? (ESTADO_COLOR[cat] || '#e2e8f0') : (CAT_COLOR[cat] || CAT_DEFAULT);
-      const lbl = compEst ? (ESTADO_LABEL[cat] || cat) : (CAT_LABEL[cat] || cat);
+    let html = catEntries.map(([key, n]) => {
+      const c = compEst ? (ESTADO_COLOR[key] || '#e2e8f0') : (tipoColor[key] || CAT_DEFAULT);
+      const lbl = compEst ? (ESTADO_LABEL[key] || key) : key;
       return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
     }).join('');
     // Relevamiento anterior (gris, cuadrado): comparación viejo/nuevo
@@ -2013,11 +2083,17 @@ async function loadParcelasMap(sid) {
         + 'Relev. anterior <b>(' + nA + ')</b>' + detalle + '</div>';
     }
     d.innerHTML = html;
+    L.DomEvent.disableScrollPropagation(d);
+    L.DomEvent.disableClickPropagation(d);
     return d;
   };
   ley.addTo(map);
   map._leyenda = ley;
   setHotelLegend(map);   // sumar la línea de hoteles a las referencias
+
+  // Mantener el encuadre sobre la zona marcada en cada update, salvo que el usuario
+  // haya hecho pan/zoom (entonces respetamos su vista hasta que pulse "🔄 Actualizar").
+  if (!map._userMoved) centerOnZone(sid);
 }
 
 function startMapPolling(sid) {
@@ -2030,6 +2106,33 @@ function startMapPolling(sid) {
 
 function stopMapPolling(sid) {
   if (mapPollTimers[sid]) { clearInterval(mapPollTimers[sid]); delete mapPollTimers[sid]; }
+}
+
+/* ── Centrar en la zona marcada + actualizar ────────────────────── */
+// Re-encuadra el mapa sobre el polígono de la zona (regions.zone_geojson). Marca el
+// movimiento como programático (`_recentering`) para no confundirlo con un pan/zoom del
+// usuario en los handlers de initMap.
+function centerOnZone(sid) {
+  const map = maps[sid];
+  if (!map) return;
+  let b = map._zoneBounds;
+  if (!b) { try { b = L.geoJSON(JSON.parse(zoneData[sid])).getBounds(); } catch(_) {} }
+  if (!b || !b.isValid()) return;
+  map._recentering = true;
+  try { map.fitBounds(b, {padding: [16, 16]}); } catch(_) {}
+  map.once('moveend', () => { map._recentering = false; });
+}
+
+// Botón "🔄 Actualizar" (sobre el mapa, también en fullscreen): refresca los datos y
+// vuelve a fijar el encuadre en la zona marcada, aunque el usuario haya hecho pan/zoom.
+function refreshMap(sid) {
+  const map = maps[sid];
+  if (!map) return;
+  map._userMoved = false;        // re-habilita el auto-centrado en la zona
+  centerOnZone(sid);             // re-centra ya (feedback inmediato)
+  loadParcelasMap(sid);          // refresca parcelas + leyenda (re-centra al terminar)
+  loadHoteles(sid);
+  loadComentarios(sid);
 }
 
 /* ── Fullscreen ─────────────────────────────────────────────────── */
@@ -2064,7 +2167,20 @@ function openGoogleMaps(sid) {
 }
 
 document.addEventListener('fullscreenchange', () => {
-  setTimeout(() => { Object.values(maps).forEach(m => { try { m.invalidateSize(); } catch(_) {} }); }, 150);
+  // Al cambiar de tamaño (entrar/salir de fullscreen) revalidamos y, si el usuario no
+  // movió el mapa, lo re-encuadramos sobre la zona marcada para el nuevo aspecto.
+  setTimeout(() => {
+    Object.values(maps).forEach(m => {
+      try {
+        m.invalidateSize();
+        if (!m._userMoved && m._zoneBounds && m._zoneBounds.isValid()) {
+          m._recentering = true;
+          m.fitBounds(m._zoneBounds, {padding: [16, 16]});
+          m.once('moveend', () => { m._recentering = false; });
+        }
+      } catch(_) {}
+    });
+  }, 150);
   if (!document.fullscreenElement) scheduleRefresh(800); // al salir, recuperar updates pendientes
 });
 

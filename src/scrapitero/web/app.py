@@ -631,8 +631,8 @@ async def activity_stream() -> StreamingResponse:
 #   1) hotel vinculado → HOTEL/MOTEL/FLAT/PENSÃO
 #   2) establecimiento CNPJ (descripcion_uso) → esa descripción (BAR, ESCOLA, HOSPITAL…)
 #   3) uso del catastro/BCI: vacante/sin construir→LOTE VAZIO, residencial→RESIDÊNCIA
-#      (uf_vivienda=1) / APARTAMENTO (>1), industrial→INDÚSTRIA, comercial→COMÉRCIO EM
-#      GERAL, mixto→MIXTO.
+#      (uf_vivienda=1) / APARTAMENTO (>1), industrial→INDÚSTRIA, comercial y mixto→
+#      COMÉRCIO EM GERAL (la taxonomía del cliente no tiene 'MIXTO').
 
 def _hotel_tipo_label(t: Optional[str]) -> str:
     t = (t or "").lower()
@@ -661,7 +661,9 @@ def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str]
     if u == "comercial":
         return "COMÉRCIO EM GERAL"
     if u == "mixto":
-        return "MIXTO"
+        # 'MIXTO' no está en la taxonomía del cliente (solo Brasil): la parcela mixta
+        # (vivienda + comercio) se reporta como comercial. Ver docs/TIPOS_PROPIEDAD.md.
+        return "COMÉRCIO EM GERAL"
     return ""
 
 
@@ -1673,7 +1675,12 @@ _BASELINE_CAMPOS = {
     "numero":      ["numero", "nro", "altura", "num"],
     "uso":         ["uso", "tipologia", "tipo", "categoria", "tipo de inmueble",
                     "tipo inmueble", "inmueble", "imovel", "tipo de imovel"],
+    "barrio":      ["barrio", "bairro", "neighborhood", "neighbourhood"],
     "ciudad":      ["ciudad", "cidade", "localidad", "localidade", "municipio", "city"],
+    "estado":      ["cod_uf", "cod uf", "coduf", "uf", "estado", "state", "sigla uf",
+                    "sigla_uf", "cod estado", "cod_estado"],
+    "status_contrato": ["status_contrato", "status contrato", "status do contrato", "contrato"],
+    "status_node":     ["status_node", "status node", "status do node", "node"],
     "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
     "uf_comercio": ["uf comercio", "uf com", "comercios", "comercio", "unidades comercio"],
 }
@@ -1787,7 +1794,8 @@ def _agregar_por_direccion(registros: list[dict], baseline_id: str) -> list[dict
     grupos: dict = {}
     orden: list = []
     for r in registros:
-        key = (r["calle_norm"], r["numero_norm"] or "", (r["ciudad"] or "").lower())
+        key = (r["calle_norm"], r["numero_norm"] or "",
+               (r.get("barrio") or "").lower().strip(), (r["ciudad"] or "").lower())
         g = grupos.get(key)
         if not g:
             g = {**r, "id": str(uuid.uuid4()), "bid": baseline_id, "uf_v": 0, "uf_c": 0, "_n": 0}
@@ -1818,6 +1826,7 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
     Con `agregar=True` colapsa por dirección y deriva la UF del tipo de inmueble."""
     from scrapitero.agents.direccion_norm import (normalizar_calle, normalizar_numero,
                                                   separar_numero)
+    from scrapitero.agents.geocode_forward import sigla_uf
     idx = {h: i for i, h in enumerate(headers)}
     faltantes = [h for h in mapeo_d.values() if h and h not in idx]
     if faltantes:
@@ -1852,13 +1861,21 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
             continue
         extras = {h: str(fila[i]).strip() for h, i in idx.items()
                   if h and h not in mapeadas and i < len(fila) and str(fila[i]).strip()}
+        # Status del relevamiento anterior (mapeados, no son dirección): se guardan en
+        # extras con clave canónica para mostrarlos en el popup del punto viejo.
+        for _stf in ("status_contrato", "status_node"):
+            _v = celda(fila, _stf)
+            if _v:
+                extras[_stf] = _v
         registros.append({
             "id": str(uuid.uuid4()), "bid": baseline_id,
             "raw": raw, "calle": calle, "numero": numero[:30] or None,
             "calle_norm": calle_norm,
             "numero_norm": normalizar_numero(numero),
             "uso": (celda(fila, "uso").lower()[:30] or None),
+            "barrio": (celda(fila, "barrio")[:200] or None),
             "ciudad": (celda(fila, "ciudad")[:200] or None),
+            "estado": (sigla_uf(celda(fila, "estado")) or None),  # COD_UF → sigla (51→MT)
             "uf_v": entero(celda(fila, "uf_vivienda")),
             "uf_c": entero(celda(fila, "uf_comercio")),
             "extras": json.dumps(extras, ensure_ascii=False)[:4000] if extras else None,
@@ -1866,6 +1883,31 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
     if agregar and registros:
         registros = _agregar_por_direccion(registros, baseline_id)
     return registros, sin_direccion
+
+
+def _aplicar_ciudad_baseline(registros: list[dict], ciudad_form: str = "") -> str:
+    """Garantiza que CADA fila del baseline tenga ciudad antes de geocodificar.
+
+    Sin ciudad, el geocoder recibe solo la calle ("R MAL RONDON") y puede ubicarla en
+    cualquier estado del país (geocodes en otra ciudad/UF). La ciudad efectiva es la
+    **ingresada a mano** (form) o, si no, la **predominante** de la columna mapeada; con
+    ella se rellenan las filas que vinieron sin ciudad. Si no hay ninguna, lanza ValueError
+    para que el wizard la exija (no se importa un baseline sin ciudad).
+    """
+    from collections import Counter
+    pred = Counter((r.get("ciudad") or "").strip() for r in registros
+                   if (r.get("ciudad") or "").strip())
+    ciudad = (ciudad_form or "").strip() or (pred.most_common(1)[0][0] if pred else "")
+    if not ciudad:
+        raise ValueError(
+            "El relevamiento anterior no trae ciudad: mapeá la columna Ciudad del CSV o "
+            "escribí la ciudad del relevamiento. Sin ciudad el geocoding ubica las "
+            "direcciones en cualquier parte del país.")
+    ciudad = ciudad[:200]
+    for r in registros:
+        if not (r.get("ciudad") or "").strip():
+            r["ciudad"] = ciudad
+    return ciudad
 
 
 def _persistir_baseline(conn, region_id: str, nombre: str, fecha_val, archivo_nombre: str,
@@ -1883,11 +1925,21 @@ def _persistir_baseline(conn, region_id: str, nombre: str, fecha_val, archivo_no
     conn.execute(text("""
         INSERT INTO baseline_direcciones
                (id, baseline_id, direccion_raw, calle, numero, calle_norm,
-                numero_norm, uso, ciudad, uf_vivienda, uf_comercio, extras)
+                numero_norm, uso, barrio, ciudad, estado, uf_vivienda, uf_comercio, extras)
         VALUES (:id, :bid, :raw, :calle, :numero, :calle_norm, :numero_norm,
-                :uso, :ciudad, :uf_v, :uf_c, :extras)
+                :uso, :barrio, :ciudad, :estado, :uf_v, :uf_c, :extras)
     """), registros)
     return baseline_id
+
+
+def _status_de_extras(extras_json) -> dict:
+    """Extrae los status del relevamiento anterior guardados en `extras` (JSON)."""
+    try:
+        e = json.loads(extras_json) if extras_json else {}
+    except (ValueError, TypeError):
+        e = {}
+    return {"status_contrato": e.get("status_contrato") or None,
+            "status_node": e.get("status_node") or None}
 
 
 def _parse_fecha(fecha: str):
@@ -1907,6 +1959,7 @@ async def baseline_import(
     nombre: str = Form(...),
     fecha: str = Form(""),               # fecha del relevamiento ORIGINAL (YYYY-MM-DD)
     mapeo: str = Form(...),              # JSON {campo: header} confirmado por el usuario
+    ciudad: str = Form(""),              # ciudad manual (si el CSV no trae columna de ciudad)
 ) -> JSONResponse:
     """Paso 2 del import: persiste el baseline con una fila normalizada por dirección."""
     row = _get_survey_row(survey_id)
@@ -1933,10 +1986,16 @@ async def baseline_import(
                              "Ninguna fila tiene dirección legible con el mapeo elegido — "
                              "revisá qué columna es la dirección"}, status_code=400)
 
+    try:
+        ciudad_efectiva = _aplicar_ciudad_baseline(registros, ciudad)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
     engine = get_engine()
     with engine.begin() as conn:
         baseline_id = _persistir_baseline(conn, region_id, nombre, fecha_val,
-                                          archivo.filename or "", mapeo_d, registros)
+                                          archivo.filename or "", mapeo_d, registros,
+                                          ciudad_efectiva)
 
     logger.info(f"Baseline «{nombre}» importado para {region_id}: "
                 f"{len(registros)} direcciones ({sin_direccion} filas sin dirección descartadas)")
@@ -1998,7 +2057,8 @@ def _detectar_pais_baseline(registros: list[dict], ciudad: str = "",
     from scrapitero.agents.baseline_geocoder import _HEADERS, _google, _nominatim, _query
     with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
         for reg in registros[:muestra]:
-            q = _query(reg.get("calle") or "", reg.get("numero") or "", ciudad or None)
+            q = _query(reg.get("calle") or "", reg.get("numero") or "",
+                       reg.get("barrio") or None, (reg.get("ciudad") or ciudad) or None)
             if not q:
                 continue
             hit = _nominatim(q, None, client) or _google(q, None, client)
@@ -2037,6 +2097,7 @@ async def actualizacion_preparar(
     country_code: str = Form("AUTO"),
     archivo: UploadFile = File(...),
     mapeo: str = Form(...),
+    ciudad: str = Form(""),              # ciudad manual (si el CSV no trae columna de ciudad)
 ) -> JSONResponse:
     """Paso 2: crea la región + persiste el baseline y lanza el geocoding en background.
     El polígono de la nueva zona se dibuja después (crear-survey). La ciudad sale de
@@ -2061,12 +2122,12 @@ async def actualizacion_preparar(
                              "Ninguna fila tiene dirección legible con el mapeo elegido — "
                              "revisá qué columna es la dirección"}, status_code=400)
 
-    # Ciudad predominante de la columna del CSV (fallback para filas sin ciudad y
-    # para la detección de país). Cada fila ya lleva su propia ciudad por separado.
-    from collections import Counter
-    _ciud = Counter((r.get("ciudad") or "").strip() for r in registros
-                    if (r.get("ciudad") or "").strip())
-    ciudad = _ciud.most_common(1)[0][0] if _ciud else ""
+    # Ciudad efectiva (manual o predominante de la columna): rellena las filas sin ciudad
+    # y ancla la detección de país y el geocoding. Si no hay ninguna, se rechaza el import.
+    try:
+        ciudad = _aplicar_ciudad_baseline(registros, ciudad)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     cc = (country_code or "AUTO").upper()
     if cc in ("BRA", "ARG"):
@@ -2125,7 +2186,7 @@ async def actualizacion_geocoding_status(baseline_id: str) -> JSONResponse:
     if listo:
         with engine.connect() as conn:
             rows = conn.execute(text("""
-                SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw
+                SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw, extras
                 FROM baseline_direcciones
                 WHERE baseline_id = :bid AND lat IS NOT NULL
             """), {"bid": baseline_id}).fetchall()
@@ -2133,6 +2194,7 @@ async def actualizacion_geocoding_status(baseline_id: str) -> JSONResponse:
             "lat": float(r[0]), "lng": float(r[1]),
             "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
             "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
+            **_status_de_extras(r[8]),
         } for r in rows]
 
     return JSONResponse({
@@ -2152,7 +2214,7 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw
+            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw, extras
             FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NOT NULL
         """), {"bid": baseline_id}).fetchall()
@@ -2162,6 +2224,7 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
         "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
         "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
         "uf_total": int((r[5] or 0) + (r[6] or 0)),
+        **_status_de_extras(r[8]),
     } for r in rows]
     return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})
 

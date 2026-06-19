@@ -37,7 +37,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
-from scrapitero.agents.baseline_geocoder import _HEADERS, _google, _nominatim, _tg
+from scrapitero.agents.baseline_geocoder import _HEADERS, _google, _mapbox, _nominatim, _tg
 from scrapitero.db.engine import get_engine
 
 _CKAN_PACKAGE = "https://dados.turismo.gov.br/api/3/action/package_show?id=meios-de-hospedagem"
@@ -68,6 +68,10 @@ class HotelFetcherInput(BaseModel):
     # Buffer al recorte de zona: incluye hoteles pegados al límite (geocoding ±metros)
     # que de otro modo caerían justo afuera del polígono.
     borde_buffer_m: float = 40.0
+    # geocodebr (CNEFE/IBGE, gratis) es la PRIMERA opción para geocodificar hoteles sin
+    # coordenadas (Cadastur/Receita); escribe coord solo si el desvío es ≤ esto, el resto
+    # cae a Nominatim/Google. Ver `geocode_forward`.
+    geocodebr_max_desvio_m: float = 300.0
 
 
 class HotelFetcherOutput(BaseModel):
@@ -210,6 +214,9 @@ def _fetch_cadastur(mun_nombre: str, uf: str, client: httpx.Client) -> list[dict
             "tipo": (cell(fila, "tipo")[:60] or None),
             "direccion": " ".join(x for x in (cell(fila, "logr"), cell(fila, "num"),
                                               cell(fila, "bairro")) if x) or None,
+            # campos estructurados para geocodebr (geocoding gratis primero)
+            "logradouro": cell(fila, "logr") or None, "numero": cell(fila, "num") or None,
+            "bairro": cell(fila, "bairro") or None,
             "lat": None, "lng": None,
             "uh": _entero(cell(fila, "uh")), "leitos": _entero(cell(fila, "leitos")),
             "estrellas": None, "situacion": (sit[:40] or None),
@@ -254,6 +261,8 @@ def _fetch_receita(engine, mun_nombre: Optional[str], uf: Optional[str]) -> list
             "cnpj": (re.sub(r"\D", "", r.cnpj)[:20] or None),
             "tipo": _CNAE_TIPO.get(r.cnae_principal, "hospedagem"),
             "direccion": " ".join(x for x in (logr, r.numero, r.bairro) if x) or None,
+            # campos estructurados para geocodebr (geocoding gratis primero)
+            "logradouro": logr or None, "numero": r.numero or None, "bairro": r.bairro or None,
             "lat": float(r.lat) if r.lat is not None else None,
             "lng": float(r.lng) if r.lng is not None else None,
             "uh": None, "leitos": None, "estrellas": None,
@@ -348,7 +357,9 @@ def _fetch_google(region_id: str, survey_id: Optional[str]) -> list[dict]:
 
 
 def _geocode(query: str, client: httpx.Client) -> Optional[tuple]:
-    return _nominatim(query, "br", client) or _google(query, "br", client)
+    # Nominatim (gratis) → Mapbox (pago barato, si hay MAPBOX_TOKEN) → Google (pago caro).
+    return (_nominatim(query, "br", client) or _mapbox(query, "br", client)
+            or _google(query, "br", client))
 
 
 @agent_run
@@ -448,8 +459,30 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             _tg(f"🏨 {out.municipio}: 0 hoteles.")
             return out
 
-        # Geocodificar los que no traen coordenadas (Cadastur) + recortar a zona
+        # Geocodificar los que no traen coordenadas (Cadastur/Receita) + recortar a zona.
+        # PRIMERA opción: geocodebr (CNEFE/IBGE, gratis) en LOTE para todos los sin-coords
+        # de Brasil; lo que no ubique con desvío aceptable cae al loop Nominatim/Google.
         from shapely.geometry import Point
+        sin_coords = [h for h in crudos if h["lat"] is None or h["lng"] is None]
+        if sin_coords and (country or "").upper() == "BRA":
+            from scrapitero.agents.geocode_forward import geocodebr_lote
+            items = [{"id": str(idx), "logradouro": h.get("logradouro") or "",
+                      "numero": h.get("numero") or "", "bairro": h.get("bairro") or "",
+                      "municipio": mun_nombre or "", "estado": uf or ""}
+                     for idx, h in enumerate(sin_coords)]
+            res = geocodebr_lote(items, uf=uf, max_desvio_m=input.geocodebr_max_desvio_m)
+            n_gb = 0
+            for idx, h in enumerate(sin_coords):
+                hit = res.get(str(idx))
+                if hit:
+                    h["lat"], h["lng"], h["geo_source"] = hit[0], hit[1], hit[2]
+                    n_gb += 1
+            if n_gb:
+                logger.info(f"HotelFetcher: geocodebr ubicó {n_gb}/{len(sin_coords)} sin-coords "
+                            f"(gratis); el resto va a Nominatim/Google")
+                _tg(f"📍 geocodebr (gratis): {n_gb}/{len(sin_coords)} hoteles ubicados; "
+                    f"el resto va a Nominatim/Google.")
+
         ubicados = []
         for h in crudos:
             if h["lat"] is None or h["lng"] is None:
