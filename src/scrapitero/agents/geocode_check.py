@@ -82,7 +82,7 @@ def run(input: GeocodeCheckInput) -> GeocodeCheckOutput:
         municipio_codigo = meta[1] if meta else None
         filas = conn.execute(text("""
             SELECT id::text, direccion_raw, calle, numero, barrio, ciudad, estado,
-                   lat, lng, geocode_source
+                   lat, lng, geocode_source, cep
             FROM baseline_direcciones
             WHERE baseline_id=:b AND lat IS NOT NULL AND lng IS NOT NULL
         """), {"b": input.baseline_id}).fetchall()
@@ -119,6 +119,7 @@ def run(input: GeocodeCheckInput) -> GeocodeCheckOutput:
             "bairro": r[4] or "",
             "municipio": r[5] or ciudad_def or "",
             "estado": r[6] or uf,
+            "cep": r[10] or "",
         })
 
     # Segunda fuente: geocodebr en lote (gratis/offline). {id: (lat, lng, "g:precisao")}

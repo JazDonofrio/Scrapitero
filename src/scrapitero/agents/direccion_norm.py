@@ -82,6 +82,17 @@ def _sin_acentos(s: str) -> str:
                    if not unicodedata.combining(c))
 
 
+_VIA_TODAS = set(TIPOS_VIA) | set(TIPOS_VIA.values())
+
+
+def _tiene_nombre(prefijo: str) -> bool:
+    """True si el texto antes de un número tiene al menos una palabra de NOMBRE real
+    (2+ letras que NO es un tipo de vía: av/rua/tv…). Sirve para distinguir la altura
+    ('AV FOO 66') del número que es parte del nombre ('RUA 15 DE NOVEMBRO')."""
+    toks = [_sin_acentos(t) for t in re.findall(r"[^\W\d_]{2,}", (prefijo or "").lower())]
+    return any(t not in _VIA_TODAS for t in toks)
+
+
 def normalizar_calle(calle: str | None) -> str:
     """Nombre de calle normalizado para matching. '' si no hay calle."""
     if not calle:
@@ -169,6 +180,15 @@ def separar_numero(direccion: str | None) -> tuple[str, str]:
                   if re.search(r"[^\W\d_]{2,}", s[:m.start()])]
     if not candidatos:
         return s, ""
+
+    # 2) la altura es el PRIMER número precedido por una palabra de NOMBRE real (no un tipo
+    #    de vía): distingue "AV COUTO MAGALHAES 66 AC 23" (altura=66, resto complemento) de
+    #    "RUA 15 DE NOVEMBRO 850" (15 es parte del nombre → altura=850). El resto se descarta.
+    for m in candidatos:
+        if _tiene_nombre(s[:m.start()]):
+            return s[:m.start()].strip(" ,"), m.group(1)
+
+    # 3) fallback: primer número con complemento/fin detrás; si no, el último.
     for m in candidatos:
         resto = s[m.end():].strip(" ,-")
         if not resto or _COMPLEMENTO_RE.match(resto):

@@ -1159,19 +1159,23 @@ const BL_CAMPOS = [
   ['uso', 'Uso / tipología'],
   ['barrio', 'Barrio / Bairro'],
   ['ciudad', 'Ciudad / Cidade'],
-  ['estado', 'Estado / UF (COD_UF)'],
+  ['estado', 'Estado / UF (sigla, COD_UF o nombre)'],
+  ['cep', 'CEP / Código postal'],
   ['uf_vivienda', 'UF Vivienda'],
   ['uf_comercio', 'UF Comercio'],
 ];
 
 // Mapeo de la ACTUALIZACIÓN: estas columnas definen la dirección completa con la que se
 // recuperan las coordenadas (endereço + bairro + cidade + UF). El COD_UF (estado de Brasil)
-// desambigua municípios homónimos al geocodificar. No se pide uso (se deriva del backend).
+// desambigua municípios homónimos al geocodificar. El "uso" (tipo de inmueble) SÍ se mapea:
+// sin él, todo cae a comercio por default (el backend deriva la UF de vivienda/comercio del uso).
 const ACTU_CAMPOS = [
   ['direccion', 'Dirección / Endereço completo'],
+  ['uso', 'Tipo de inmueble / uso (residencial vs comercial)'],
   ['barrio', 'Barrio / Bairro'],
   ['ciudad', 'Ciudad / Cidade'],
-  ['estado', 'Estado / UF (COD_UF)'],
+  ['estado', 'Estado / UF (sigla, COD_UF o nombre)'],
+  ['cep', 'CEP / Código postal'],
   ['status_contrato', 'Status contrato'],
   ['status_node', 'Status node'],
 ];
@@ -1422,9 +1426,36 @@ function renderCard(s) {
                title="Completar con IA (Gemini + búsqueda web) las habitaciones de los hoteles abiertos sin dato. Pago por hotel.">🛏️ Habitaciones IA</button>
             <span id="hab-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
           </div>
+          ${OPERADOR && s.country_code === 'BRA' ? `<div id="asist-${sid}" class="asist-box" style="display:none"></div>` : ''}
           ${OPERADOR ? `<div id="parcial-form-${sid}"></div>` : ''}
         </div>
       </div>
+    </div>`;
+}
+
+// Pedidos de asistencia humana (hoteles abiertos sin habitaciones): los lista en el detalle
+// con el link a la página de carga manual (la misma que se avisa por Telegram).
+async function loadAsistencia(sid) {
+  const box = document.getElementById('asist-' + sid);
+  if (!box) return;
+  let d;
+  try { d = await fetch(`/api/surveys/${sid}/hoteles-asistencia`).then(r => r.json()); }
+  catch(_) { return; }
+  if (!d || !d.ok || !d.total) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const items = d.hoteles.map(h =>
+    `<li>${escHtml(h.nombre || '(sin nombre)')}`
+    + (h.direccion ? ` — <span style="color:#6b7280">${escHtml(h.direccion)}</span>` : '')
+    + (h.telefono ? ` · ☎ ${escHtml(h.telefono)}` : '') + '</li>').join('');
+  box.style.display = '';
+  box.innerHTML = `
+    <div style="margin-top:.5rem;padding:.5rem .7rem;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;font-size:.78rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+        <span>🆘 <b>Asistencia humana</b>: ${d.total} hotel(es) abierto(s) sin habitaciones por resolver.</span>
+        <a href="/asistencia-hoteles/${sid}" target="_blank"
+           class="btn btn-sm" style="text-decoration:none;background:#f59e0b;color:#fff;border:1px solid #d97706">
+           Abrir página de carga →</a>
+      </div>
+      <ul style="margin:.4rem 0 0;padding-left:1.1rem;color:#374151">${items}</ul>
     </div>`;
 }
 
@@ -1529,11 +1560,14 @@ function initMap(sid) {
   if (sv && sv.baseline_id) {
     map.createPane('anteriorPane');
     map.getPane('anteriorPane').style.zIndex = 350;
-    renderRelevamientoAnterior(map, sv.baseline_id, 'anteriorPane').then(res => {
+    renderRelevamientoAnterior(map, sv.baseline_id, 'anteriorPane', zoneData[sid]).then(res => {
       if (!res || maps[sid] !== map) return;
       map._anteriorGrp = res.grupo;
       map._anteriorN = res.total;
       map._anteriorDistintas = res.distintas;
+      map._anteriorEnZona = res.enZona;
+      map._anteriorEnZonaDist = res.enZonaDistintas;
+      map._anteriorEnZonaUF = res.enZonaUF;
       // Si todavía no hay parcelas nuevas, encuadrar al relevamiento anterior.
       if (res.bounds && (!activeMarkers[sid] || !activeMarkers[sid].length)) {
         try { map.fitBounds(res.bounds, { padding: [24, 24], maxZoom: 17 }); } catch(_) {}
@@ -1559,6 +1593,7 @@ async function loadHoteles(sid) {
     const m = {};
     (d.hoteles || []).forEach(h => { if (h.parcela_id) (m[h.parcela_id] = m[h.parcela_id] || []).push(h); });
     surveyHoteles[sid] = m;
+    loadAsistencia(sid);   // pedidos de asistencia humana (hoteles sin habitaciones) + link
     const msg = document.getElementById('hot-msg-' + sid);
     if (msg && d.total) msg.textContent = `${d.abiertos} hotel(es) · ${fmt(d.habitaciones_total)} hab.${d.cerrados ? ` · ${d.cerrados} cerrado(s)` : ''}`;
     // Pines 🏨 sobre el mapa (violeta=abierto, rojo=cerrado)
@@ -1606,20 +1641,13 @@ async function loadHoteles(sid) {
 // Línea de hoteles en la leyenda del mapa (referencias). Muestra el total, los cerrados
 // y, clave para el debug, cuántos quedaron SIN ubicar (sin coordenada → no se ven en el mapa).
 function setHotelLegend(map){
+  // Línea genérica "🏨 Hoteles" RETIRADA a pedido: los hoteles ya se cuentan en la leyenda
+  // por la taxonomía del cliente (HOTEL/MOTEL/FLAT/PENSÃO via tipo de edificación). Esta
+  // función solo limpia la línea vieja si quedó de un render anterior.
   if (!map || !map._leyenda) return;
   const c = map._leyenda.getContainer(); if (!c) return;
-  let el = c.querySelector('.legend-hoteles');
-  if (map._hotelN == null) { if (el) el.remove(); return; }
-  const sinUbicar = Math.max(0, (map._hotelN || 0) - (map._hotelEnMapa || 0));
-  const html = '<span style="display:inline-block;width:14px;height:14px;line-height:14px;'
-      + 'text-align:center;font-size:10px;background:#fff;border:2px solid #7c3aed;border-radius:50%;'
-      + 'margin-right:5px;vertical-align:middle">🏨</span>Hoteles <b>(' + (map._hotelN || 0) + ')</b>'
-      + (map._hotelCerrados ? ' <span style="color:#9ca3af">· ' + map._hotelCerrados + ' cerr.</span>' : '')
-      + (sinUbicar ? ' <span style="color:#dc2626" title="Sin coordenada precisa: no se muestran como pin en el mapa">· ' + sinUbicar + ' sin ubicar</span>' : '');
-  if (!el) { el = document.createElement('div'); el.className = 'legend-hoteles';
-    el.style.cssText = 'margin-top:3px;border-top:1px solid rgba(148,163,184,.25);padding-top:3px';
-    c.appendChild(el); }
-  el.innerHTML = html;
+  const el = c.querySelector('.legend-hoteles');
+  if (el) el.remove();
 }
 
 async function runHoteles(sid, btn) {
@@ -1927,19 +1955,67 @@ function oldRelevMarker(g, paneName) {
   return m;
 }
 
-// Dibuja el baseline agrupado por ubicación. Devuelve {grupo, bounds, total, distintas}.
-async function renderRelevamientoAnterior(map, baselineId, paneName) {
+// Point-in-polygon (ray casting) sobre coordenadas GeoJSON. x=lng, y=lat.
+function _ptEnAnillo(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+function _ptEnPolygon(x, y, poly) {   // poly = [anillo_exterior, hueco1, ...]
+  if (!poly.length || !_ptEnAnillo(x, y, poly[0])) return false;
+  for (let k = 1; k < poly.length; k++) if (_ptEnAnillo(x, y, poly[k])) return false;  // hueco
+  return true;
+}
+// Parsea un GeoJSON (string u objeto: Feature/FeatureCollection/Polygon/MultiPolygon) a
+// una lista de polígonos para el test. Devuelve null si no es válido.
+function _zonaPolys(zoneStr) {
+  let gj; try { gj = typeof zoneStr === 'string' ? JSON.parse(zoneStr) : zoneStr; } catch(_) { return null; }
+  const out = [];
+  const rec = g => {
+    if (!g) return;
+    if (g.type === 'FeatureCollection') (g.features || []).forEach(f => rec(f.geometry));
+    else if (g.type === 'Feature') rec(g.geometry);
+    else if (g.type === 'Polygon') out.push(g.coordinates);
+    else if (g.type === 'MultiPolygon') (g.coordinates || []).forEach(p => out.push(p));
+  };
+  rec(gj);
+  return out.length ? out : null;
+}
+function puntoEnZona(lat, lng, polys) {
+  return !!polys && polys.some(p => _ptEnPolygon(lng, lat, p));
+}
+
+// Dibuja el baseline agrupado por ubicación. Cuenta cuántos puntos caen DENTRO de la zona
+// del nuevo relevamiento (`zoneStr`) para comparar cantidades viejo/nuevo en la misma zona.
+// Devuelve {grupo, bounds, total, distintas, enZona, enZonaDistintas}.
+async function renderRelevamientoAnterior(map, baselineId, paneName, zoneStr) {
   let d;
   try { d = await fetch(`/api/baselines/${baselineId}/puntos`).then(r => r.json()); }
   catch(_) { return null; }
   if (!d || !d.ok || !d.puntos || !d.puntos.length) return null;
   const grupos = agruparPorUbicacion(d.puntos);
+  const polys = _zonaPolys(zoneStr);
   const grupo = L.layerGroup();
   const pts = [];
-  grupos.forEach(g => { oldRelevMarker(g, paneName).addTo(grupo); pts.push([g.lat, g.lng]); });
+  let enZona = 0, enZonaDistintas = 0, enZonaUF = 0;
+  grupos.forEach(g => {
+    oldRelevMarker(g, paneName).addTo(grupo); pts.push([g.lat, g.lng]);
+    if (polys && puntoEnZona(g.lat, g.lng, polys)) {
+      enZona += g.items.length; enZonaDistintas += 1;
+      enZonaUF += g.items.reduce((s, p) => s + (p.uf_v || 0) + (p.uf_c || 0), 0);
+    }
+  });
   grupo.addTo(map);
-  return { grupo, bounds: pts.length ? L.latLngBounds(pts) : null,
-           total: d.puntos.length, distintas: grupos.length };
+  // Sin polígono de zona: caer al total (no se puede recortar).
+  if (!polys) {
+    enZona = d.puntos.length; enZonaDistintas = grupos.length;
+    enZonaUF = d.puntos.reduce((s, p) => s + (p.uf_v || 0) + (p.uf_c || 0), 0);
+  }
+  return { grupo, enZonaUF, bounds: pts.length ? L.latLngBounds(pts) : null,
+           total: d.puntos.length, distintas: grupos.length, enZona, enZonaDistintas };
 }
 
 async function loadParcelasMap(sid) {
@@ -1972,12 +2048,14 @@ async function loadParcelasMap(sid) {
   const tipoColor = {};
   const markers = [];
   const byPid = {};
+  let nuevoUF = 0;   // UF total (viv+com) del relevamiento nuevo, para comparar en la leyenda
 
   // Con una comparativa activa, el mapa se pinta por ESTADO (nueva/cambió/igual)
   // en vez de por tipología; "✕ Quitar del mapa" vuelve a la vista normal.
   const compEst = comparativaEstado[sid];
 
   for (const p of parcelas) {
+    nuevoUF += (p.uf_viv || 0) + (p.uf_com || 0);
     const uso = p.uso || 'sin clasificar';
     const cat = categoriaMapa(p);
     const catLeyenda = compEst
@@ -2074,13 +2152,18 @@ async function loadParcelasMap(sid) {
       const lbl = compEst ? (ESTADO_LABEL[key] || key) : key;
       return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
     }).join('');
-    // Relevamiento anterior (gris, cuadrado): comparación viejo/nuevo
+    // Relevamiento anterior vs nuevo DENTRO de la zona. La métrica comparable es la **UF**
+    // (unidades viv+com); el conteo de direcciones (anterior) vs parcelas (nuevo) no es
+    // comparable (un lote agrupa varias direcciones) → va abajo, en chico, como contexto.
     if (map._anteriorGrp) {
-      const nA = map._anteriorN || 0, dA = map._anteriorDistintas || 0;
-      const detalle = (dA && dA < nA) ? ' <span style="color:#9ca3af">en ' + dA + ' ubic.</span>' : '';
+      const nA = (map._anteriorEnZona != null ? map._anteriorEnZona : (map._anteriorN || 0));
+      const ufA = (map._anteriorEnZonaUF != null ? map._anteriorEnZonaUF : 0);
+      const nNuevo = markers.length;
       html += '<div style="margin-top:3px;border-top:1px solid rgba(148,163,184,.25);padding-top:3px">'
         + '<span style="display:inline-block;width:9px;height:9px;background:rgba(107,114,128,.85);border:1px solid #374151;margin-right:5px;vertical-align:middle"></span>'
-        + 'Relev. anterior <b>(' + nA + ')</b>' + detalle + '</div>';
+        + 'Relev. anterior <b>' + ufA + ' UF</b> · nuevo <b style="color:#0ea5e9">' + nuevoUF + ' UF</b>'
+        + '<br><span style="color:#9ca3af;font-size:.9em;padding-left:14px">'
+        + nA + ' dir → ' + nNuevo + ' parcelas · en esta zona</span></div>';
     }
     d.innerHTML = html;
     L.DomEvent.disableScrollPropagation(d);
@@ -2097,11 +2180,9 @@ async function loadParcelasMap(sid) {
 }
 
 function startMapPolling(sid) {
+  // Auto-refresh del mapa DESACTIVADO a pedido: el mapa no se re-pinta solo (peleaba el
+  // encuadre/zoom mientras se inspeccionaba). Para actualizar, usar el botón "🔄 Actualizar".
   stopMapPolling(sid);
-  mapPollTimers[sid] = setInterval(() => {
-    if (maps[sid]) loadParcelasMap(sid);
-    else stopMapPolling(sid);
-  }, 4000);
 }
 
 function stopMapPolling(sid) {

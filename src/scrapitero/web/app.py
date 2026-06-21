@@ -250,10 +250,20 @@ def _set_pipeline_step(survey_id: str, step: str, result: Optional[dict] = None)
 def _set_survey_status(survey_id: str, status: str) -> None:
     engine = get_engine()
     with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE surveys SET status=:s, finished_at=NOW() WHERE survey_id=:sid"),
-            {"s": status, "sid": survey_id},
-        )
+        if status == "running":
+            # Al arrancar: marcar inicio y LIMPIAR finished_at. Antes sellaba finished_at
+            # para CUALQUIER estado → un survey 'running' quedaba con finished_at (estado
+            # contradictorio), y si Hermes no lo terminaba quedaba "running" para siempre.
+            conn.execute(
+                text("UPDATE surveys SET status=:s, started_at=NOW(), finished_at=NULL "
+                     "WHERE survey_id=:sid"),
+                {"s": status, "sid": survey_id},
+            )
+        else:
+            conn.execute(
+                text("UPDATE surveys SET status=:s, finished_at=NOW() WHERE survey_id=:sid"),
+                {"s": status, "sid": survey_id},
+            )
 
 
 # ── Background workers ─────────────────────────────────────────────────────────
@@ -1468,21 +1478,87 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 {"error": "El CSV de operadora es solo para relevamientos en Brasil"},
                 status_code=400)
 
-        # Una fila por DIRECCIÓN COMPLETA única (no por parcela): varias parcelas
-        # con la misma calle+número+CEP+bairro colapsan en un solo registro.
-        rows = conn.execute(text("""
-            SELECT municipio, estado_provincia, barrio, calle,
-                   codigo_postal, numero, MAX(codigo_logradouro) AS codigo_logradouro
-            FROM parcelas
-            WHERE survey_id = :sid AND calle IS NOT NULL
-            GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, numero
-            ORDER BY calle,
-                     NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
-                       NULLS LAST
-        """), {"sid": survey_id}).fetchall()
+        # Si el survey tiene un baseline vinculado, exportamos con el MISMO formato del CSV
+        # que se importó (mismas columnas/orden) pero con los datos del relevamiento nuevo.
+        base = conn.execute(text("""
+            SELECT b.mapeo, b.header_csv, b.baseline_id::text
+            FROM baselines b WHERE b.baseline_id = (
+                SELECT baseline_id FROM surveys WHERE survey_id = CAST(:sid AS uuid))
+        """), {"sid": survey_id}).fetchone()
+
+        plantilla = None
+        if base:
+            mapeo_d = json.loads(base[0]) if base[0] else {}
+            header = json.loads(base[1]) if base[1] else None
+            if not header:   # baseline viejo sin header guardado → reconstruir (orden best-effort)
+                ex = conn.execute(text(
+                    "SELECT extras FROM baseline_direcciones WHERE baseline_id = CAST(:bid AS uuid) "
+                    "AND extras IS NOT NULL LIMIT 1"), {"bid": base[2]}).scalar()
+                extras_keys = list(json.loads(ex).keys()) if ex else []
+                mapped = [h for h in mapeo_d.values() if h]
+                header = mapped + [k for k in extras_keys if k not in mapped]
+            parc = conn.execute(text("""
+                SELECT calle, numero, complemento, barrio, municipio, estado_provincia,
+                       codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0)
+                FROM parcelas
+                WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
+                ORDER BY calle,
+                         NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
+                           NULLS LAST
+            """), {"sid": survey_id}).fetchall()
+            plantilla = (header, mapeo_d, parc)
+
+        rows = None
+        if not plantilla:
+            # Fallback (survey sin baseline): layout de base de logradouros de operadora.
+            # Una fila por DIRECCIÓN COMPLETA única (varias parcelas con la misma
+            # calle+número+CEP+bairro colapsan en un solo registro).
+            rows = conn.execute(text("""
+                SELECT municipio, estado_provincia, barrio, calle,
+                       codigo_postal, numero, MAX(codigo_logradouro) AS codigo_logradouro
+                FROM parcelas
+                WHERE survey_id = :sid AND calle IS NOT NULL
+                GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, numero
+                ORDER BY calle,
+                         NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
+                           NULLS LAST
+            """), {"sid": survey_id}).fetchall()
 
     fecha = meta[2].strftime("%Y-%m-%d") if meta[2] else ""
     filename = f"operadora_{meta[0]}_{fecha}.csv".replace(" ", "_")
+
+    if plantilla:
+        header, mapeo_d, parc = plantilla
+        inv = {h: f for f, h in mapeo_d.items() if h}   # header → campo
+        TIPO_VIV, TIPO_COM = "RESIDENCIAL", "COMERCIO EM GERAL"
+
+        def _gen_plantilla():
+            buf = io.StringIO()
+            buf.write("﻿")   # BOM para Excel
+            w = csv.writer(buf, delimiter=";")
+            w.writerow(header)
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+            for calle, numero, compl, barrio, muni, est, cep, uv, uc in parc:
+                full = " ".join(x for x in (calle, numero) if x)
+                if compl:
+                    full = f"{full} {compl}".strip()
+                # Una fila por UNIDAD: uf_vivienda → RESIDENCIAL, uf_comercio → COMERCIO.
+                # Sin UF (vacante) → 1 fila para no perder la dirección.
+                unidades = [TIPO_VIV] * int(uv) + [TIPO_COM] * int(uc)
+                if not unidades:
+                    unidades = [""]
+                for tipo in unidades:
+                    val = {"direccion": full, "calle": calle or "", "numero": numero or "",
+                           "barrio": barrio or "", "ciudad": muni or "",
+                           "estado": (est or "").upper(), "cep": cep or "", "uso": tipo}
+                    w.writerow([val.get(inv.get(col), "") for col in header])
+                yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+        return StreamingResponse(
+            _gen_plantilla(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     def _gen():
         buf = io.StringIO()
@@ -1679,6 +1755,8 @@ _BASELINE_CAMPOS = {
     "ciudad":      ["ciudad", "cidade", "localidad", "localidade", "municipio", "city"],
     "estado":      ["cod_uf", "cod uf", "coduf", "uf", "estado", "state", "sigla uf",
                     "sigla_uf", "cod estado", "cod_estado"],
+    "cep":         ["cep", "codigo postal", "código postal", "cod postal", "postal",
+                    "zip", "zipcode", "codigo_postal"],
     "status_contrato": ["status_contrato", "status contrato", "status do contrato", "contrato"],
     "status_node":     ["status_node", "status node", "status do node", "node"],
     "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
@@ -1843,6 +1921,10 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
         m = re.search(r"-?\d+", s.replace(".", "").replace(",", "."))
         return int(m.group(0)) if m else None
 
+    def cep_norm(s: str):
+        d = re.sub(r"\D", "", s or "")
+        return f"{d[:5]}-{d[5:8]}" if len(d) == 8 else (d or None)
+
     mapeadas = {h for h in mapeo_d.values() if h}
     registros = []
     sin_direccion = 0
@@ -1875,7 +1957,8 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
             "uso": (celda(fila, "uso").lower()[:30] or None),
             "barrio": (celda(fila, "barrio")[:200] or None),
             "ciudad": (celda(fila, "ciudad")[:200] or None),
-            "estado": (sigla_uf(celda(fila, "estado")) or None),  # COD_UF → sigla (51→MT)
+            "estado": (sigla_uf(celda(fila, "estado")) or None),  # COD_UF/nombre → sigla (51/"Mato Grosso"→MT)
+            "cep": cep_norm(celda(fila, "cep")),
             "uf_v": entero(celda(fila, "uf_vivienda")),
             "uf_c": entero(celda(fila, "uf_comercio")),
             "extras": json.dumps(extras, ensure_ascii=False)[:4000] if extras else None,
@@ -1911,23 +1994,26 @@ def _aplicar_ciudad_baseline(registros: list[dict], ciudad_form: str = "") -> st
 
 
 def _persistir_baseline(conn, region_id: str, nombre: str, fecha_val, archivo_nombre: str,
-                        mapeo_d: dict, registros: list[dict], ciudad: str = "") -> str:
-    """Inserta `baselines` + `baseline_direcciones` en la conexión dada. Devuelve baseline_id."""
+                        mapeo_d: dict, registros: list[dict], ciudad: str = "",
+                        header_csv: Optional[list] = None) -> str:
+    """Inserta `baselines` + `baseline_direcciones` en la conexión dada. Devuelve baseline_id.
+    `header_csv` = encabezado crudo del CSV (para re-exportar con el mismo formato)."""
     baseline_id = registros[0]["bid"]
     conn.execute(text("""
         INSERT INTO baselines (baseline_id, region_id, nombre, fecha_relevamiento,
-                               archivo_nombre, mapeo, n_registros, ciudad)
-        VALUES (:bid, :rid, :nombre, :fecha, :archivo, :mapeo, :n, :ciudad)
+                               archivo_nombre, mapeo, n_registros, ciudad, header_csv)
+        VALUES (:bid, :rid, :nombre, :fecha, :archivo, :mapeo, :n, :ciudad, :header)
     """), {"bid": baseline_id, "rid": region_id, "nombre": nombre.strip(),
            "fecha": fecha_val, "archivo": (archivo_nombre or "")[:255],
            "mapeo": json.dumps(mapeo_d, ensure_ascii=False), "n": len(registros),
-           "ciudad": (ciudad or "").strip()[:200] or None})
+           "ciudad": (ciudad or "").strip()[:200] or None,
+           "header": json.dumps(header_csv, ensure_ascii=False) if header_csv else None})
     conn.execute(text("""
         INSERT INTO baseline_direcciones
                (id, baseline_id, direccion_raw, calle, numero, calle_norm,
-                numero_norm, uso, barrio, ciudad, estado, uf_vivienda, uf_comercio, extras)
+                numero_norm, uso, barrio, ciudad, estado, cep, uf_vivienda, uf_comercio, extras)
         VALUES (:id, :bid, :raw, :calle, :numero, :calle_norm, :numero_norm,
-                :uso, :barrio, :ciudad, :estado, :uf_v, :uf_c, :extras)
+                :uso, :barrio, :ciudad, :estado, :cep, :uf_v, :uf_c, :extras)
     """), registros)
     return baseline_id
 
@@ -1995,7 +2081,7 @@ async def baseline_import(
     with engine.begin() as conn:
         baseline_id = _persistir_baseline(conn, region_id, nombre, fecha_val,
                                           archivo.filename or "", mapeo_d, registros,
-                                          ciudad_efectiva)
+                                          ciudad_efectiva, header_csv=headers)
 
     logger.info(f"Baseline «{nombre}» importado para {region_id}: "
                 f"{len(registros)} direcciones ({sin_direccion} filas sin dirección descartadas)")
@@ -2150,7 +2236,7 @@ async def actualizacion_preparar(
             """), {"rid": region_id, "name": nombre, "cc": region_cc})
             baseline_id = _persistir_baseline(conn, region_id, nombre, fecha_val,
                                               archivo.filename or "", mapeo_d, registros,
-                                              ciudad)
+                                              ciudad, header_csv=headers)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 

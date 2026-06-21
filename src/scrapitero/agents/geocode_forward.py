@@ -33,21 +33,41 @@ _UF_POR_CODIGO = {
 
 _SIGLAS_UF = set(_UF_POR_CODIGO.values())
 
+# Nombre completo del estado → sigla (normalizado: sin acentos, upper, espacios colapsados).
+# Muchos CSV traen "MATO GROSSO" / "São Paulo" en vez de la sigla; sin esto quedaba NULL.
+_NOMBRE_UF = {
+    "RONDONIA": "RO", "ACRE": "AC", "AMAZONAS": "AM", "RORAIMA": "RR", "PARA": "PA",
+    "AMAPA": "AP", "TOCANTINS": "TO", "MARANHAO": "MA", "PIAUI": "PI", "CEARA": "CE",
+    "RIO GRANDE DO NORTE": "RN", "PARAIBA": "PB", "PERNAMBUCO": "PE", "ALAGOAS": "AL",
+    "SERGIPE": "SE", "BAHIA": "BA", "MINAS GERAIS": "MG", "ESPIRITO SANTO": "ES",
+    "RIO DE JANEIRO": "RJ", "SAO PAULO": "SP", "PARANA": "PR", "SANTA CATARINA": "SC",
+    "RIO GRANDE DO SUL": "RS", "MATO GROSSO DO SUL": "MS", "MATO GROSSO": "MT",
+    "GOIAS": "GO", "DISTRITO FEDERAL": "DF",
+}
+
 
 def uf_de_municipio_codigo(cod: Optional[str]) -> str:
     """Sigla de UF a partir del código IBGE de município (sus 2 primeros dígitos)."""
     return _UF_POR_CODIGO.get((cod or "")[:2], "")
 
 
+def _sin_acentos(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
 def sigla_uf(valor: Optional[str]) -> str:
-    """Normaliza un COD_UF de un CSV a la sigla del estado BR. Acepta el **código IBGE
-    numérico** (`51`→`MT`, `35`→`SP`) o la **sigla** directa (`MT`). '' si no la reconoce."""
+    """Normaliza el estado de un CSV a la sigla del estado BR. Acepta el **código IBGE
+    numérico** (`51`→`MT`), la **sigla** directa (`MT`) o el **nombre completo**
+    (`Mato Grosso`/`MATO GROSSO`). '' si no la reconoce."""
     s = (valor or "").strip().upper()
     if not s:
         return ""
     if s.isdigit():
         return _UF_POR_CODIGO.get(s.zfill(2), "")
-    return s if s in _SIGLAS_UF else ""
+    if s in _SIGLAS_UF:
+        return s
+    return _NOMBRE_UF.get(" ".join(_sin_acentos(s).split()), "")
 
 
 def geocodebr_lote(items: list[dict], *, uf: Optional[str] = None,
@@ -93,10 +113,28 @@ def geocodebr_lote(items: list[dict], *, uf: Optional[str] = None,
         rows = [r for r in rows if r["estado"]]
     if not rows:
         return {}
-    try:
-        res = geocode_batch(rows)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"geocode_forward: geocodebr falló (sigo con Nominatim/Google): {e}")
+
+    # geocodebr 0.6.x a veces CRASHEA el batch entero por UNA fila problemática (Binder Error
+    # `empate`), incluso con estado válido. Para no perder el geocoding gratis de todas las
+    # demás, si el lote falla se parte en dos y se reintenta cada mitad; al llegar a 1 fila,
+    # si esa fila sigue crasheando se descarta (cae a Nominatim/Google) sin tumbar al resto.
+    def _batch_resiliente(rws: list) -> dict:
+        if not rws:
+            return {}
+        try:
+            return geocode_batch(rws)
+        except Exception as e:  # noqa: BLE001
+            if len(rws) == 1:
+                logger.warning(f"geocode_forward: geocodebr descartó 1 dirección que lo "
+                               f"crashea (id={rws[0].get('id')}): {str(e)[:120]}")
+                return {}
+            mid = len(rws) // 2
+            logger.info(f"geocode_forward: geocodebr crasheó en lote de {len(rws)} — "
+                        "reintento en 2 mitades")
+            return {**_batch_resiliente(rws[:mid]), **_batch_resiliente(rws[mid:])}
+
+    res = _batch_resiliente(rows)
+    if not res:
         return {}
 
     out: dict[str, tuple] = {}

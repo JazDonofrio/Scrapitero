@@ -39,6 +39,31 @@ En este modo, **Paso 1 es `zona_fetcher`** en lugar de crear el survey manualmen
 
 ---
 
+## MODO C — Survey EXISTENTE creado desde la web (⚠ el más común)
+
+**Activar SIEMPRE que la entrada ya traiga `region_id` + `survey_id`** (es lo que manda el
+webhook del botón ▶ Iniciar de la web: zonas dibujadas por GeoJSON, **clones**,
+actualizaciones, sub-zonas). La región y el survey **YA EXISTEN** y la región ya tiene su
+`zone_geojson` y su `municipio_codigo` — **NO crear survey, NO pedir coordenada, NO usar
+`zona_fetcher`**.
+
+En este modo **saltar directo al Paso 2** con el `region_id`+`survey_id` recibidos:
+
+- **Brasil (`country_code='BRA'`)** → correr **`vg-pipeline-runner`** directamente
+  (es VG/ábaco: corre SmartGIS→BCI→Parser→Agrupador→Shoppings→Categorías→Hoteles en una
+  llamada determinista). **Re-invocar con el MISMO input mientras devuelva `parcial:true`**
+  (no es error). Marca `completed` solo cuando termina todo.
+  ```bash
+  python3 -m scrapitero.rpc.vg_pipeline_runner <<< '{"region_id":"<REGION_ID>","survey_id":"<SURVEY_ID>"}'
+  ```
+- **Argentina u otro país** → seguir el loop del Paso 2 (coverage-reporter → agente según
+  la tabla) con el `region_id`+`survey_id` recibidos.
+
+> Si NO se hace esto, el survey queda en `running` para siempre (el webhook lo marcó
+> `running` pero nada corrió el pipeline). Es la causa de los relevamientos "colgados".
+
+---
+
 ## PASO 1A — Crear survey (Modo A: región predefinida)
 
 ```bash
