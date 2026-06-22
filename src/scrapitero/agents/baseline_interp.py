@@ -284,6 +284,22 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
     return out
 
 
+def _extraer_nombre_calle(texto: str) -> Optional[str]:
+    """Extrae el nombre de calle de la respuesta (a veces verbosa) de Gemini. Busca la frase
+    con tipo de vía COMPLETO (Rua/Avenida/Travessa…) — evita el input abreviado (AV/R/TV) que
+    el modelo repite — y toma la más larga. None si no hay o dice DESCONOCIDO."""
+    if not texto or "DESCONOCIDO" in texto.upper():
+        return None
+    # tipo de vía (cualquier caso) seguido de un nombre propio (mayúscula) → evita capturar
+    # "avenida es una de las principales…" y el input abreviado (AV/R/TV). Tomar el PRIMERO.
+    m = re.search(
+        r"(?:[Rr]ua|[Aa]venida|[Aa]v\.|[Tt]ravessa|[Aa]lameda|[Pp]ra[çc]a|[Rr]odovia|"
+        r"[Ee]strada|[Ll]argo|[Mm]arginal|[Bb]eco|[Vv]iela)\s+[A-ZÀ-Ý][^.,;\n]{0,55}", texto)
+    if not m:
+        return None
+    return m.group(0).strip(" .,;")[:200] or None
+
+
 def _gemini_canonico(engine, calle_norm: str, calle_raw: Optional[str],
                      ciudad: Optional[str], out) -> Optional[str]:
     """Nombre COMPLETO de la calle según Gemini (con búsqueda), cacheado por (calle_norm,
@@ -306,10 +322,8 @@ def _gemini_canonico(engine, calle_norm: str, calle_raw: Optional[str],
                   f"nombre. Respondé SOLO el nombre completo de la calle (con su tipo de vía), "
                   f"o 'DESCONOCIDO' si no estás seguro.")
         out.gemini_consultas += 1
-        txt = (_ask_gemini(key, "gemini-2.5-flash", prompt, 60) or "").strip().splitlines()
-        nombre = (txt[-1].strip() if txt else "")[:200]
-        if not nombre or "DESCONOCIDO" in nombre.upper():
-            nombre = None
+        raw = _ask_gemini(key, "gemini-2.5-flash", prompt, 60) or ""
+        nombre = _extraer_nombre_calle(raw)
     except Exception as e:  # noqa: BLE001 — 429/red: NO cachear, reintentar en otra corrida
         logger.warning(f"baseline_interp: Gemini falló para «{calle_norm}»: {str(e)[:120]}")
         return None
