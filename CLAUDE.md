@@ -371,8 +371,8 @@ sin calle se excluyen.
 **Comparativa con relevamiento anterior (📊):** cada relevamiento tiene en su detalle un
 selector **"Comparar con…"** que ofrece (a) los surveys anteriores de la misma región —
 incluidos los archivados — y (b) los **baselines importados** (el CSV del relevamiento
-anterior del cliente, subido con un paso de mapeo de columnas; Excel debe guardarse como
-CSV antes — no hay openpyxl). El resultado muestra KPIs de delta (UF viv/com antes→ahora,
+anterior del cliente, subido con **columnas de nombre fijo** —ver abajo—; Excel debe guardarse
+como CSV antes — no hay openpyxl). El resultado muestra KPIs de delta (UF viv/com antes→ahora,
 nuevas/cambiaron/desaparecidas, Δhabitantes estimado por hab/domicilio del censo), pinta
 el mapa por estado (verde=nueva, ámbar=cambió, gris=igual; desaparecidas en tabla) y
 exporta **CSV Comparativa**. Matching: entre surveys va por `cca_code` (exacto) con
@@ -385,18 +385,23 @@ recortados) exacta + fuzzy difflib (≥0.78, misma altura). Endpoints:
 
 **Crear como "actualización" (sobre el CSV anterior geocodificado):** el formulario "Nueva
 zona" tiene un toggle **⦿ Nueva zona / ◯ Actualización de un relevamiento anterior**. En
-modo *actualización* el operador sube el **CSV del relevamiento anterior** (sin coordenadas)
-y mapea sus columnas. El mapeo de la actualización es acotado a lo que importa para ubicar
-y comparar: **Dirección completa**, **Barrio**, **Ciudad**, **Estado/UF** y **CEP** (columnas
-del CSV, por fila — autodetectadas). El **CEP** es la señal de **máxima precisión** en Brasil
-(se le pasa a geocodebr y se agrega al texto de Nominatim/Mapbox/Google). El **Estado/UF**
-acepta sigla (`MT`), código IBGE (`51`) **o nombre completo** (`Mato Grosso`) vía `sigla_uf`. **La ciudad es obligatoria** (la fecha no se pide): sale de la
-columna mapeada por fila, o si el CSV no trae columna, de un **campo manual "Ciudad"** del
-wizard. Sin ciudad las direcciones caerían en cualquier parte del país (calle sola → un
-homónimo en otro estado); por eso `_aplicar_ciudad_baseline` (en `web/app.py`) **rellena
-cada fila** con la ciudad efectiva (manual o predominante de la columna) y **rechaza el
-import** si no hay ninguna. Esa misma ciudad efectiva detecta el país. El mismo campo manual
-y validación existen en el import de baseline para comparar (`POST …/baselines`). Al confirmar, el backend crea la región + persiste el baseline y
+modo *actualización* el operador sube el **CSV del relevamiento anterior** (sin coordenadas).
+**Ya NO hay mapeo manual de columnas:** el CSV debe traer las columnas con el **nombre exacto
+de la operadora** (case/acento-insensible), y el backend las resuelve solo (`_resolver_columnas`
++ `_BASELINE_COLUMNAS`/`_BASELINE_OBLIGATORIAS` en `web/app.py`). Si falta una **obligatoria**,
+el import se **rechaza** nombrándola (no crea región ni baseline). Contrato de columnas:
+- **Obligatorias:** `DSC_ENDERECO_COMPLETO` (dirección), `DSC_CIDADE` (ciudad), `COD_UF`
+  (estado/UF — acepta sigla `MT`, código IBGE `51` o nombre `Mato Grosso` vía `sigla_uf`),
+  `NUM_CEP` (CEP — señal de **máxima precisión** en Brasil, va a geocodebr + texto de
+  Nominatim/Mapbox/Google), `DSC_TIPO_IMOVEL` (tipo de inmueble → deriva UF viv/com).
+- **Opcionales:** `DSC_BAIRRO`, `DSC_STATUS_CONTRATO`, `COD_NODE`.
+
+La **ciudad sale siempre de `DSC_CIDADE`** (ya no hay campo manual): `_aplicar_ciudad_baseline`
+rellena las filas vacías con la predominante y rechaza si no hay ninguna. Esa ciudad detecta el
+país. El `mapeo_d` interno resuelto se sigue guardando en `baselines.mapeo` (lo usa la
+re-exportación del CSV Operadora). El **mismo contrato de columnas** rige el import de baseline
+para comparar (`POST …/baselines`). El wizard muestra el contrato y valida ✓/✗ por columna antes
+de habilitar el botón. Al confirmar, el backend crea la región + persiste el baseline y
 lanza `BaselineGeocoder` en background para **geocodificar cada dirección**
 (agregando la ciudad de su fila a cada consulta). **Mientras geocodifica, el wizard muestra
 un log en vivo con fecha/hora de cada paso** (panel "🕓 Detalle en vivo"): los logs del
@@ -415,11 +420,11 @@ como **marcadores blancos con borde violeta**: un marcador por ubicación (agrup
 coordenada). Punto con UNA dirección → cuadrado con su UF; punto con VARIAS direcciones
 (el geocoding gratuito colapsa números de la misma calle, o varias unidades de una dirección)
 → círculo con la **cantidad de direcciones**; al clickear, la(s) **dirección(es)
-completa(s)** (`direccion_raw`) con su UF. El mapeo del CSV anterior: **Dirección completa**,
-**Tipo de inmueble** (uso), **Ciudad** (por fila), y opcionalmente UF. **La UF se deriva del
-tipo de inmueble agregando por dirección** (`_agregar_por_direccion`): cada entrada
-residencial cuenta 1 vivienda, el resto (comercial/otros) 1 comercio — así una dirección con
-N unidades suma su UF (si la fila trae UF explícita, se usa esa). Endpoint de los puntos:
+completa(s)** (`direccion_raw`) con su UF. Las columnas del CSV anterior son fijas (ver el
+contrato arriba: `DSC_ENDERECO_COMPLETO`/`DSC_CIDADE`/`COD_UF`/`NUM_CEP`/`DSC_TIPO_IMOVEL`).
+**La UF se deriva del tipo de inmueble (`DSC_TIPO_IMOVEL`) agregando por dirección**
+(`_agregar_por_direccion`): cada entrada residencial cuenta 1 vivienda, el resto
+(comercial/otros) 1 comercio — así una dirección con N unidades suma su UF. Endpoint de los puntos:
 `GET /api/baselines/{id}/puntos`. El CSV anterior queda
 **auto-vinculado como baseline** de la región, así "Comparar con…" lo ofrece sin reimportar.
 El país se autodetecta geocodificando unas pocas direcciones (necesario para sesgar el

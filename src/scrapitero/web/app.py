@@ -1751,24 +1751,23 @@ async def export_csv_consolidado(region_id: str):
 
 _BASELINE_MAX_BYTES = 10 * 1024 * 1024     # 10 MB de CSV es muchísimo más que un relevamiento
 
-# Autodetección de mapeo: campo → palabras que puede traer el header (sin acentos, lower)
-_BASELINE_CAMPOS = {
-    "direccion":   ["direccion", "endereco", "domicilio", "address"],
-    "calle":       ["calle", "rua", "logradouro", "street"],
-    "numero":      ["numero", "nro", "altura", "num"],
-    "uso":         ["uso", "tipologia", "tipo", "categoria", "tipo de inmueble",
-                    "tipo inmueble", "inmueble", "imovel", "tipo de imovel"],
-    "barrio":      ["barrio", "bairro", "neighborhood", "neighbourhood"],
-    "ciudad":      ["ciudad", "cidade", "localidad", "localidade", "municipio", "city"],
-    "estado":      ["cod_uf", "cod uf", "coduf", "uf", "estado", "state", "sigla uf",
-                    "sigla_uf", "cod estado", "cod_estado"],
-    "cep":         ["cep", "codigo postal", "código postal", "cod postal", "postal",
-                    "zip", "zipcode", "codigo_postal"],
-    "status_contrato": ["status_contrato", "status contrato", "status do contrato", "contrato"],
-    "status_node":     ["status_node", "status node", "status do node", "node"],
-    "uf_vivienda": ["uf vivienda", "uf viv", "viviendas", "vivienda", "unidades vivienda"],
-    "uf_comercio": ["uf comercio", "uf com", "comercios", "comercio", "unidades comercio"],
+# Contrato de columnas fijas del CSV del relevamiento anterior (operadora). Ya NO hay
+# mapeo manual: el CSV debe traer estas columnas con su nombre exacto. campo_interno →
+# nombre EXACTO de columna. El match es case/acento-insensible (_norm_header), pero el
+# nombre tiene que estar. Ver _resolver_columnas / docs.
+_BASELINE_COLUMNAS = {
+    "direccion":       "DSC_ENDERECO_COMPLETO",   # obligatoria
+    "ciudad":          "DSC_CIDADE",              # obligatoria
+    "estado":          "COD_UF",                  # obligatoria (sigla/código/nombre de UF)
+    "cep":             "NUM_CEP",                 # obligatoria
+    "uso":             "DSC_TIPO_IMOVEL",         # obligatoria (tipo de inmueble → UF)
+    "barrio":          "DSC_BAIRRO",              # opcional
+    "status_contrato": "DSC_STATUS_CONTRATO",     # opcional
+    "status_node":     "COD_NODE",                # opcional
 }
+_BASELINE_OBLIGATORIAS = ["DSC_ENDERECO_COMPLETO", "DSC_CIDADE", "COD_UF",
+                          "NUM_CEP", "DSC_TIPO_IMOVEL"]
+_BASELINE_OPCIONALES = ["DSC_BAIRRO", "DSC_STATUS_CONTRATO", "COD_NODE"]
 
 
 def _norm_header(h: str) -> str:
@@ -1814,27 +1813,47 @@ def _leer_csv_baseline(data: bytes, filename: str) -> tuple[list[str], list[list
     return headers, datos, sep
 
 
-def _autodetectar_mapeo(headers: list[str]) -> dict:
-    """Sugiere {campo: header} buscando palabras clave en los headers normalizados."""
-    norm = {h: _norm_header(h) for h in headers if str(h).strip()}
+def _resolver_columnas(headers: list[str]) -> dict:
+    """Resuelve el `mapeo_d` interno {campo: header_real} buscando las columnas de nombre
+    fijo (`_BASELINE_COLUMNAS`) en los headers del CSV. Match case/acento-insensible.
+    Lanza ValueError si falta alguna columna OBLIGATORIA (con el nombre exacto esperado)."""
+    norm = {_norm_header(h): h for h in headers if str(h).strip()}
     mapeo: dict[str, str] = {}
-    for campo, claves in _BASELINE_CAMPOS.items():
-        for h, hn in norm.items():
-            if h in mapeo.values():
-                continue
-            if any(hn == k or hn.startswith(k) or k in hn for k in claves):
-                mapeo[campo] = h
-                break
-    # Si hay 'calle' explícita, la dirección completa es redundante (y viceversa)
-    if "calle" in mapeo and mapeo.get("direccion") == mapeo["calle"]:
-        del mapeo["direccion"]
+    for campo, columna in _BASELINE_COLUMNAS.items():
+        real = norm.get(_norm_header(columna))
+        if real:
+            mapeo[campo] = real
+    faltan = [c for c in _BASELINE_OBLIGATORIAS if _norm_header(c) not in norm]
+    if faltan:
+        raise ValueError(
+            "Al CSV le faltan columnas obligatorias: " + ", ".join(faltan) +
+            ". El relevamiento anterior debe traer estas columnas (nombre exacto): " +
+            ", ".join(_BASELINE_OBLIGATORIAS) + ".")
     return mapeo
+
+
+def _validar_columnas_csv(headers: list[str], datos: list, sep: str) -> dict:
+    """Payload de preview: valida que estén las columnas obligatorias (por nombre fijo).
+    Devuelve detectadas/faltantes para mostrar en la UI. Ya no hay mapeo manual."""
+    norm = {_norm_header(h) for h in headers if str(h).strip()}
+    presentes = lambda cols: [c for c in cols if _norm_header(c) in norm]
+    faltantes = [c for c in _BASELINE_OBLIGATORIAS if _norm_header(c) not in norm]
+    return {
+        "ok": not faltantes,
+        "obligatorias": _BASELINE_OBLIGATORIAS,
+        "opcionales": _BASELINE_OPCIONALES,
+        "detectadas": presentes(_BASELINE_OBLIGATORIAS + _BASELINE_OPCIONALES),
+        "faltantes": faltantes,
+        "separador": sep,
+        "total_filas": len(datos),
+        "error": ("Faltan columnas obligatorias: " + ", ".join(faltantes)) if faltantes else None,
+    }
 
 
 @app.post("/api/surveys/{survey_id}/baselines/preview")
 async def baseline_preview(survey_id: str, archivo: UploadFile = File(...)) -> JSONResponse:
-    """Paso 1 del import: lee headers + muestra, sugiere el mapeo de columnas.
-    No persiste nada (el archivo se vuelve a subir en el paso 2)."""
+    """Paso 1 del import: lee el CSV y valida que traiga las columnas obligatorias por
+    nombre fijo (sin mapeo). No persiste nada (el archivo se re-sube en el paso 2)."""
     row = _get_survey_row(survey_id)
     if not row:
         return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
@@ -1843,27 +1862,7 @@ async def baseline_preview(survey_id: str, archivo: UploadFile = File(...)) -> J
         headers, datos, sep = _leer_csv_baseline(data, archivo.filename or "")
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-    return JSONResponse({
-        "ok": True,
-        "headers": [h for h in headers if str(h).strip()],
-        "muestra": datos[:5],
-        "headers_completos": headers,     # con posiciones, para alinear la muestra
-        "mapeo_sugerido": _autodetectar_mapeo(headers),
-        "separador": sep,
-        "total_filas": len(datos),
-    })
-
-
-def _parse_mapeo(mapeo: str) -> dict:
-    """Valida el JSON {campo: header} del mapeo. Lanza ValueError si es inválido."""
-    try:
-        mapeo_d = json.loads(mapeo)
-        assert isinstance(mapeo_d, dict)
-    except Exception:
-        raise ValueError("Mapeo inválido (se espera JSON {campo: columna})")
-    if not (mapeo_d.get("direccion") or mapeo_d.get("calle")):
-        raise ValueError("El mapeo necesita al menos la columna de dirección (o la de calle)")
-    return mapeo_d
+    return JSONResponse(_validar_columnas_csv(headers, datos, sep))
 
 
 def _es_residencial(uso: str) -> bool:
@@ -2051,24 +2050,19 @@ async def baseline_import(
     archivo: UploadFile = File(...),
     nombre: str = Form(...),
     fecha: str = Form(""),               # fecha del relevamiento ORIGINAL (YYYY-MM-DD)
-    mapeo: str = Form(...),              # JSON {campo: header} confirmado por el usuario
-    ciudad: str = Form(""),              # ciudad manual (si el CSV no trae columna de ciudad)
 ) -> JSONResponse:
-    """Paso 2 del import: persiste el baseline con una fila normalizada por dirección."""
+    """Paso 2 del import: persiste el baseline con una fila normalizada por dirección.
+    Las columnas se resuelven por nombre fijo (sin mapeo manual)."""
     row = _get_survey_row(survey_id)
     if not row:
         return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
     region_id = row[0]
 
-    try:
-        mapeo_d = _parse_mapeo(mapeo)
-        fecha_val = _parse_fecha(fecha)
-    except ValueError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-
+    fecha_val = _parse_fecha(fecha)
     data = await archivo.read()
     try:
         headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+        mapeo_d = _resolver_columnas(headers)   # ValueError si falta alguna obligatoria
         registros, sin_direccion = _construir_registros_baseline(
             headers, datos, mapeo_d, str(uuid.uuid4()))
     except ValueError as e:
@@ -2076,11 +2070,11 @@ async def baseline_import(
 
     if not registros:
         return JSONResponse({"ok": False, "error":
-                             "Ninguna fila tiene dirección legible con el mapeo elegido — "
-                             "revisá qué columna es la dirección"}, status_code=400)
+                             "Ninguna fila tiene una dirección legible en DSC_ENDERECO_COMPLETO."},
+                            status_code=400)
 
     try:
-        ciudad_efectiva = _aplicar_ciudad_baseline(registros, ciudad)
+        ciudad_efectiva = _aplicar_ciudad_baseline(registros, "")
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -2122,21 +2116,14 @@ _geocoding_jobs: dict[str, dict] = {}
 
 @app.post("/api/actualizaciones/preview")
 async def actualizacion_preview(archivo: UploadFile = File(...)) -> JSONResponse:
-    """Paso 1 (sin survey): lee headers + muestra del CSV anterior, sugiere el mapeo."""
+    """Paso 1 (sin survey): lee el CSV anterior y valida las columnas obligatorias por
+    nombre fijo (sin mapeo manual)."""
     data = await archivo.read()
     try:
         headers, datos, sep = _leer_csv_baseline(data, archivo.filename or "")
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-    return JSONResponse({
-        "ok": True,
-        "headers": [h for h in headers if str(h).strip()],
-        "muestra": datos[:5],
-        "headers_completos": headers,
-        "mapeo_sugerido": _autodetectar_mapeo(headers),
-        "separador": sep,
-        "total_filas": len(datos),
-    })
+    return JSONResponse(_validar_columnas_csv(headers, datos, sep))
 
 
 def _detectar_pais_baseline(registros: list[dict], ciudad: str = "",
@@ -2192,21 +2179,16 @@ async def actualizacion_preparar(
     nombre: str = Form(...),
     country_code: str = Form("AUTO"),
     archivo: UploadFile = File(...),
-    mapeo: str = Form(...),
-    ciudad: str = Form(""),              # ciudad manual (si el CSV no trae columna de ciudad)
 ) -> JSONResponse:
     """Paso 2: crea la región + persiste el baseline y lanza el geocoding en background.
-    El polígono de la nueva zona se dibuja después (crear-survey). La ciudad sale de
-    la columna del CSV (mapeada por fila); no se pide en el formulario."""
-    try:
-        mapeo_d = _parse_mapeo(mapeo)
-    except ValueError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    El polígono de la nueva zona se dibuja después (crear-survey). Las columnas se
+    resuelven por nombre fijo (sin mapeo); la ciudad sale de la columna DSC_CIDADE."""
     fecha_val = None      # la fecha del relevamiento anterior no se usa
 
     data = await archivo.read()
     try:
         headers, datos, _sep = _leer_csv_baseline(data, archivo.filename or "")
+        mapeo_d = _resolver_columnas(headers)   # ValueError si falta alguna obligatoria
         # Agregamos por dirección: la UF se deriva del tipo de inmueble (residencial
         # → vivienda; resto → comercio), contando las entradas de cada dirección.
         registros, sin_direccion = _construir_registros_baseline(
@@ -2215,13 +2197,13 @@ async def actualizacion_preparar(
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     if not registros:
         return JSONResponse({"ok": False, "error":
-                             "Ninguna fila tiene dirección legible con el mapeo elegido — "
-                             "revisá qué columna es la dirección"}, status_code=400)
+                             "Ninguna fila tiene una dirección legible en DSC_ENDERECO_COMPLETO."},
+                            status_code=400)
 
-    # Ciudad efectiva (manual o predominante de la columna): rellena las filas sin ciudad
-    # y ancla la detección de país y el geocoding. Si no hay ninguna, se rechaza el import.
+    # Ciudad efectiva (de DSC_CIDADE): rellena las filas sin ciudad con la predominante y
+    # ancla la detección de país y el geocoding. Si no hay ninguna, se rechaza el import.
     try:
-        ciudad = _aplicar_ciudad_baseline(registros, ciudad)
+        ciudad = _aplicar_ciudad_baseline(registros, "")
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 

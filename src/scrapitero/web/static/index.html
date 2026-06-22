@@ -425,8 +425,9 @@
           <div class="form-grid">
             <div class="form-group" style="grid-column:1/-1">
               <label>CSV del relevamiento anterior</label>
+              <div class="comp-meta" id="actu-columnas-req" style="margin:.2rem 0 .5rem"></div>
               <input type="file" id="actu-file" accept=".csv,.txt" onchange="actuPreview()">
-              <p class="form-hint">Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). La <strong>ciudad</strong> se toma de la columna del CSV (la mapeás abajo) y se agrega a cada dirección al geocodificar.</p>
+              <p class="form-hint">Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). El CSV debe traer las columnas obligatorias con el nombre exacto de arriba (ya no se mapea a mano).</p>
             </div>
           </div>
           <div id="actu-mapeo"></div>
@@ -543,12 +544,26 @@ const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: nul
                     logEntries: [], logLastId: 0 };
 const ACTU_USO_COLOR = { residencial:'#3b82f6', comercial:'#f59e0b', mixto:'#a855f7', industrial:'#ef4444', vacante:'#9ca3af' };
 
+// Contrato de columnas del CSV del relevamiento anterior (sin mapeo manual): el CSV debe
+// traer estas columnas con el nombre exacto. Debe coincidir con app.py (_BASELINE_*).
+const BASELINE_COLS_OBL = ['DSC_ENDERECO_COMPLETO','DSC_CIDADE','COD_UF','NUM_CEP','DSC_TIPO_IMOVEL'];
+const BASELINE_COLS_OPC = ['DSC_BAIRRO','DSC_STATUS_CONTRATO','COD_NODE'];
+function baselineColsHintHtml() {
+  return `El CSV debe traer estas columnas (nombre exacto):<br>`
+    + `<b>Obligatorias:</b> ${BASELINE_COLS_OBL.map(c => `<code>${c}</code>`).join(', ')}<br>`
+    + `<b>Opcionales:</b> ${BASELINE_COLS_OPC.map(c => `<code>${c}</code>`).join(', ')}`;
+}
+
 function setModoCreacion(modo) {
   const actu = modo === 'actualizacion';
   document.querySelectorAll('.modo-nueva').forEach(el => el.style.display = actu ? 'none' : '');
   document.querySelectorAll('.modo-actualizacion').forEach(el => el.style.display = actu ? '' : 'none');
-  // Al volver a "nueva", limpiamos cualquier estado del wizard.
-  if (!actu) actuReset();
+  if (actu) {
+    const req = document.getElementById('actu-columnas-req');
+    if (req) req.innerHTML = baselineColsHintHtml();
+  } else {
+    actuReset();   // al volver a "nueva", limpiamos el estado del wizard
+  }
 }
 
 function actuReset() {
@@ -571,29 +586,29 @@ async function actuPreview() {
   const fd = new FormData(); fd.append('archivo', f);
   try {
     const p = await (await fetch('/api/actualizaciones/preview', {method:'POST', body:fd})).json();
-    if (!p.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
+    if (p.error && p.total_filas === undefined) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
     msg.textContent = '';
-    actuRenderMapeo(p);
+    actuRenderColumnas(p);
   } catch(err) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; }
 }
 
-function actuRenderMapeo(p) {
-  const sel = campo => {
-    const sug = p.mapeo_sugerido[campo] || '';
-    return `<select id="actu-m-${campo}"><option value="">— no está en el CSV —</option>`
-      + p.headers.map(h => `<option value="${escHtml(h)}"${h === sug ? ' selected' : ''}>${escHtml(h)}</option>`).join('')
-      + '</select>';
-  };
+// Muestra qué columnas obligatorias se detectaron (✓) y cuáles faltan (✗). Habilita el
+// botón de geocodificar solo si están todas. Ya no hay mapeo manual.
+function actuRenderColumnas(p) {
+  const det = new Set((p.detectadas || []).map(c => c.toUpperCase()));
+  const fila = c => det.has(c.toUpperCase())
+    ? `<div style="color:#15803d">✓ <code>${c}</code></div>`
+    : `<div style="color:#b91c1c">✗ <code>${c}</code> — falta</div>`;
+  const opc = (p.opcionales || BASELINE_COLS_OPC).map(c => det.has(c.toUpperCase())
+    ? `<code style="color:#15803d">✓ ${c}</code>` : `<code style="color:#9ca3af">${c}</code>`).join(' · ');
   document.getElementById('actu-mapeo').innerHTML = `
-    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas)} filas detectadas (separador «${p.separador}»). Confirmá el mapeo de columnas:</div>
-    <div class="comp-map-grid" style="margin-top:.3rem;grid-template-columns:1fr;max-width:440px">
-      ${ACTU_CAMPOS.map(([c, l]) => `<div><label>${l}</label>${sel(c)}</div>`).join('')}
-      <div><label>Ciudad (si el CSV no trae columna)</label>
-        <input id="actu-ciudad-manual" type="text" placeholder="Ej: Várzea Grande"
-               style="width:100%;padding:.3rem;box-sizing:border-box">
-        <div class="comp-meta" style="margin-top:.2rem">Obligatoria: sin ciudad el geocoding ubica las direcciones en cualquier parte del país.</div>
-      </div>
-    </div>`;
+    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas || 0)} filas detectadas (separador «${escHtml(p.separador || '')}»).</div>
+    <div style="margin-top:.3rem;font-size:.8rem"><b>Columnas obligatorias:</b>
+      ${(p.obligatorias || BASELINE_COLS_OBL).map(fila).join('')}</div>
+    <div class="comp-meta" style="margin-top:.3rem"><b>Opcionales:</b> ${opc}</div>
+    ${p.ok ? '' : `<div style="color:#b91c1c;margin-top:.3rem">⚠ ${escHtml(p.error || 'Faltan columnas obligatorias')}</div>`}`;
+  const btn = document.getElementById('actu-btn-geocode');
+  btn.disabled = !p.ok;
   document.getElementById('actu-paso2').style.display = '';
 }
 
@@ -603,9 +618,6 @@ async function actuPreparar() {
   const f = document.getElementById('actu-file').files[0];
   if (!nombre) { msg.style.color = '#b91c1c'; msg.textContent = 'Poné un nombre al relevamiento.'; return; }
   if (!f) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí el CSV anterior.'; return; }
-  const mapeo = {};
-  for (const [c] of ACTU_CAMPOS) { const el = document.getElementById('actu-m-' + c); if (el && el.value) mapeo[c] = el.value; }
-  if (!mapeo.direccion) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí la columna de dirección completa.'; return; }
 
   const btn = document.getElementById('actu-btn-geocode');
   btn.disabled = true; btn.textContent = '⟳ Preparando…';
@@ -614,8 +626,6 @@ async function actuPreparar() {
   fd.append('nombre', nombre);
   fd.append('country_code', document.getElementById('f-country').value);
   fd.append('archivo', f);
-  fd.append('mapeo', JSON.stringify(mapeo));
-  { const cm = document.getElementById('actu-ciudad-manual'); if (cm && cm.value.trim()) fd.append('ciudad', cm.value.trim()); }
   try {
     const d = await (await fetch('/api/actualizaciones/preparar', {method:'POST', body:fd})).json();
     if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = '📍 Geocodificar y graficar'; return; }
@@ -1177,33 +1187,8 @@ async function eliminarBaseline(sid) {
 }
 
 /* ── Import de baseline (CSV del relevamiento anterior) ────────── */
-const BL_CAMPOS = [
-  ['direccion', 'Dirección completa'],
-  ['calle', 'Calle (si viene separada)'],
-  ['numero', 'Número'],
-  ['uso', 'Uso / tipología'],
-  ['barrio', 'Barrio / Bairro'],
-  ['ciudad', 'Ciudad / Cidade'],
-  ['estado', 'Estado / UF (sigla, COD_UF o nombre)'],
-  ['cep', 'CEP / Código postal'],
-  ['uf_vivienda', 'UF Vivienda'],
-  ['uf_comercio', 'UF Comercio'],
-];
-
-// Mapeo de la ACTUALIZACIÓN: estas columnas definen la dirección completa con la que se
-// recuperan las coordenadas (endereço + bairro + cidade + UF). El COD_UF (estado de Brasil)
-// desambigua municípios homónimos al geocodificar. El "uso" (tipo de inmueble) SÍ se mapea:
-// sin él, todo cae a comercio por default (el backend deriva la UF de vivienda/comercio del uso).
-const ACTU_CAMPOS = [
-  ['direccion', 'Dirección / Endereço completo'],
-  ['uso', 'Tipo de inmueble / uso (residencial vs comercial)'],
-  ['barrio', 'Barrio / Bairro'],
-  ['ciudad', 'Ciudad / Cidade'],
-  ['estado', 'Estado / UF (sigla, COD_UF o nombre)'],
-  ['cep', 'CEP / Código postal'],
-  ['status_contrato', 'Status contrato'],
-  ['status_node', 'Status node'],
-];
+// Sin mapeo manual: el CSV debe traer las columnas con el nombre fijo de la operadora
+// (BASELINE_COLS_OBL / BASELINE_COLS_OPC). El backend las resuelve por nombre.
 
 function toggleImportBaseline(sid) {
   const el = document.getElementById('comp-import-' + sid);
@@ -1211,7 +1196,8 @@ function toggleImportBaseline(sid) {
   el.innerHTML = `
     <div class="comp-import">
       <b style="font-size:.78rem">⬆ Importar relevamiento anterior (CSV)</b>
-      <div class="dasi-sub" style="margin-top:.15rem">Subí el CSV que tiene el cliente. Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). Después confirmá qué columna es cada dato.</div>
+      <div class="dasi-sub" style="margin-top:.15rem">Subí el CSV que tiene el cliente. Si es Excel, primero guardalo como CSV (Archivo → Guardar como → CSV). El CSV debe traer las columnas con el nombre exacto (ya no se mapea a mano).</div>
+      <div class="comp-meta" style="margin:.3rem 0">${baselineColsHintHtml()}</div>
       <label>Archivo CSV</label>
       <input type="file" id="bl-file-${sid}" accept=".csv,.txt" onchange="baselinePreview('${sid}')">
       <div id="bl-mapeo-${sid}"></div>
@@ -1230,34 +1216,31 @@ async function baselinePreview(sid) {
   try {
     const res = await fetch(`/api/surveys/${sid}/baselines/preview`, {method: 'POST', body: fd});
     const p = await res.json();
-    if (!p.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
+    if (p.error && p.total_filas === undefined) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + p.error; return; }
     msg.textContent = '';
-    renderMapeoForm(sid, p, f.name);
+    renderColumnasForm(sid, p, f.name);
   } catch(err) {
     msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
   }
 }
 
-function renderMapeoForm(sid, p, fname) {
-  const selHtml = campo => {
-    const sug = p.mapeo_sugerido[campo] || '';
-    return `<select id="bl-m-${campo}-${sid}"><option value="">— no está en el CSV —</option>`
-      + p.headers.map(h => `<option value="${escHtml(h)}"${h === sug ? ' selected' : ''}>${escHtml(h)}</option>`).join('')
-      + '</select>';
-  };
+function renderColumnasForm(sid, p, fname) {
+  const det = new Set((p.detectadas || []).map(c => c.toUpperCase()));
+  const fila = c => det.has(c.toUpperCase())
+    ? `<div style="color:#15803d">✓ <code>${c}</code></div>`
+    : `<div style="color:#b91c1c">✗ <code>${c}</code> — falta</div>`;
   document.getElementById('bl-mapeo-' + sid).innerHTML = `
-    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas)} filas detectadas (separador «${p.separador}»). Confirmá el mapeo de columnas:</div>
-    <div class="comp-map-grid" style="margin-top:.3rem">
-      ${BL_CAMPOS.map(([c, l]) => `<div><label>${l}</label>${selHtml(c)}</div>`).join('')}
-    </div>
+    <div class="comp-meta" style="margin-top:.5rem">${fmt(p.total_filas || 0)} filas detectadas (separador «${escHtml(p.separador || '')}»).</div>
+    <div style="margin-top:.3rem;font-size:.8rem"><b>Columnas obligatorias:</b>
+      ${(p.obligatorias || BASELINE_COLS_OBL).map(fila).join('')}</div>
+    ${p.ok ? '' : `<div style="color:#b91c1c;margin-top:.3rem">⚠ ${escHtml(p.error || 'Faltan columnas obligatorias')}</div>`}
     <div class="comp-map-grid" style="margin-top:.45rem">
       <div><label>Nombre del baseline</label><input type="text" id="bl-nombre-${sid}" value="${escHtml((fname || '').replace(/\.[^.]+$/, ''))}"></div>
       <div><label>Fecha del relevamiento original</label><input type="date" id="bl-fecha-${sid}"></div>
-      <div><label>Ciudad (si el CSV no trae columna)</label><input type="text" id="bl-ciudad-${sid}" placeholder="Ej: Várzea Grande"></div>
     </div>
     <div style="text-align:right;margin-top:.55rem">
-      <button class="btn btn-sm btn-primary" style="font-size:.75rem"
-        onclick="importarBaseline('${sid}', this)">Importar ${fmt(p.total_filas)} filas</button>
+      <button class="btn btn-sm btn-primary" style="font-size:.75rem" ${p.ok ? '' : 'disabled'}
+        onclick="importarBaseline('${sid}', this)">Importar ${fmt(p.total_filas || 0)} filas</button>
     </div>`;
 }
 
@@ -1265,23 +1248,11 @@ async function importarBaseline(sid, btn) {
   const f = document.getElementById('bl-file-' + sid).files[0];
   const msg = document.getElementById('bl-msg-' + sid);
   if (!f) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí el archivo primero.'; return; }
-  const mapeo = {};
-  for (const [c] of BL_CAMPOS) {
-    const el = document.getElementById(`bl-m-${c}-${sid}`);
-    if (el && el.value) mapeo[c] = el.value;
-  }
-  if (!mapeo.direccion && !mapeo.calle) {
-    msg.style.color = '#b91c1c';
-    msg.textContent = 'Elegí al menos la columna de dirección (o la de calle).';
-    return;
-  }
   btn.disabled = true; btn.textContent = '⟳ Importando…';
   const fd = new FormData();
   fd.append('archivo', f);
   fd.append('nombre', (document.getElementById('bl-nombre-' + sid).value || '').trim() || 'Relevamiento anterior');
   fd.append('fecha', document.getElementById('bl-fecha-' + sid).value || '');
-  fd.append('mapeo', JSON.stringify(mapeo));
-  { const cm = document.getElementById('bl-ciudad-' + sid); if (cm && cm.value.trim()) fd.append('ciudad', cm.value.trim()); }
   try {
     const res = await fetch(`/api/surveys/${sid}/baselines`, {method: 'POST', body: fd});
     const data = await res.json();
