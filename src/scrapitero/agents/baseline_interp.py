@@ -39,17 +39,19 @@ _APROX = ("g:numero_aproximado", "g:logradouro", "g:cep", "nominatim")
 
 class BaselineInterpInput(BaseModel):
     baseline_id: str
-    usar_osm_fallback: bool = True   # calles sin ≥2 anclas → distribuir sobre geometría OSM (gratis)
+    usar_mapbox: bool = True          # fuente principal para los no-exactos (confiable, por número)
+    usar_osm_fallback: bool = True    # calles donde Mapbox apila/falla → geometría OSM (gratis)
+    mapbox_max_requests: int = 800    # tope de llamadas Mapbox por corrida
 
 
 class BaselineInterpOutput(BaseModel):
     ok: bool = False
     error: Optional[str] = None
     baseline_id: str = ""
-    interpoladas: int = 0
-    por_osm: int = 0
-    calles_sin_ancla: int = 0
-    sin_resolver: int = 0
+    por_mapbox: int = 0              # ubicadas por número con Mapbox (confiable)
+    por_osm: int = 0                # distribuidas sobre la línea OSM (Mapbox apiló/falló)
+    sin_resolver: int = 0          # quedan agrupadas (ninguna fuente las ubica)
+    mapbox_consultas: int = 0
 
 
 def _num(s) -> Optional[int]:
@@ -145,87 +147,104 @@ def _interp_pos(N: int, anchors: list, slope: tuple) -> tuple:
 
 @agent_run
 def run(input: BaselineInterpInput) -> BaselineInterpOutput:
+    """Ubica las direcciones NO-exactas del relevamiento anterior con la fuente más confiable:
+    **Mapbox por número** (interpola sobre la calle real). Las que Mapbox **apila** (devuelve
+    el centro de la calle para varios números → calles menores) o ubica fuera de la zona, caen
+    a **distribución sobre la línea de OSM**; lo que ninguna ubica queda agrupado (no se inventa).
+    Las exactas de geocodebr (`g:numero`) se respetan."""
+    import httpx
+    from collections import defaultdict, Counter
+    from scrapitero.agents.baseline_geocoder import (
+        _mapbox, _mapbox_token, _query, _HEADERS, _centroide_zona, _dist_km)
     out = BaselineInterpOutput(baseline_id=input.baseline_id)
     engine = get_engine()
     with engine.connect() as conn:
+        meta = conn.execute(text(
+            "SELECT b.ciudad, r.zone_geojson FROM baselines b "
+            "JOIN regions r ON r.region_id = b.region_id WHERE b.baseline_id = :b"),
+            {"b": input.baseline_id}).first()
         rows = conn.execute(text("""
-            SELECT id::text, calle_norm, numero, lat, lng, geocode_source, calle
+            SELECT id::text, calle_norm, numero, lat, lng, geocode_source, calle, barrio,
+                   ciudad, estado
             FROM baseline_direcciones
             WHERE baseline_id = :b AND lat IS NOT NULL AND calle_norm IS NOT NULL
         """), {"b": input.baseline_id}).fetchall()
 
-    # Agrupar por calle. Detectar coordenadas compartidas (apiladas).
-    from collections import defaultdict, Counter
+    ciudad_g = meta[0] if meta else None
+    centro = _centroide_zona(meta[1]) if meta else None
+    _GUARDA_KM = 120.0   # backstop anti "otro estado" (homónimo en otra ciudad)
+
+    def _en_zona(la, ln):
+        return centro is None or _dist_km(centro[0], centro[1], la, ln) <= _GUARDA_KM
+
     por_calle: dict = defaultdict(list)
-    coord_count: dict = defaultdict(Counter)
-    calle_raw: dict = {}
-    for rid, cn, num, lat, lng, src, calle in rows:
-        por_calle[cn].append((rid, num, lat, lng, src))
-        coord_count[cn][(round(lat, 6), round(lng, 6))] += 1
-        calle_raw.setdefault(cn, calle)
+    info: dict = {}   # rid → (num_int, calle_norm, calle_raw) para los no-exactos
+    for r in rows:
+        por_calle[r[1]].append(r)
+        if (r[5] or "") != "g:numero":   # exactas de geocodebr se respetan
+            info[r[0]] = (_num(r[2]), r[1], r[6])
 
-    updates: list = []           # (id, lat, lng)
-    sin_ancla_targets: list = []  # (id, num, calle_norm, calle) para fallback OSM
+    # 1) Mapbox por número (memo por número dentro de cada calle).
+    mapbox_on = input.usar_mapbox and bool(_mapbox_token())
+    mb: dict = {}   # rid → (lat, lng) ubicada por Mapbox dentro de la zona
+    if mapbox_on:
+        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
+            for cn, items in por_calle.items():
+                memo: dict = {}
+                for rid, _cn, num, la, ln, src, calle, barrio, ciu, est in items:
+                    if (src or "") == "g:numero":
+                        continue
+                    if out.mapbox_consultas >= input.mapbox_max_requests:
+                        break
+                    key = (num or "").strip()
+                    if key in memo:
+                        res = memo[key]
+                    else:
+                        q = _query(calle, num, barrio, ciu or ciudad_g, est)
+                        res = _mapbox(q, "br", client) if q else None
+                        out.mapbox_consultas += 1
+                        memo[key] = res
+                    if res and _en_zona(res[0], res[1]):
+                        mb[rid] = (res[0], res[1])
 
-    for cn, items in por_calle.items():
-        anchors_raw = {}
-        for rid, num, lat, lng, src in items:
-            n = _num(num)
-            if n is not None and (src or "").startswith(_EXACTAS):
-                # ancla = exacta y NO apilada (coordenada única en la calle)
-                if coord_count[cn][(round(lat, 6), round(lng, 6))] == 1:
-                    anchors_raw.setdefault(n, (lat, lng))   # 1ª por número
-        anchors = sorted((n, p[0], p[1]) for n, p in anchors_raw.items())
+    # 2) Descartar los Mapbox APILADOS (mismo punto para ≥3 números de la calle = centroide).
+    mb_por_calle: dict = defaultdict(list)
+    for rid, (la, ln) in mb.items():
+        mb_por_calle[info[rid][1]].append((rid, la, ln))
+    aceptados: dict = {}
+    for cn, lst in mb_por_calle.items():
+        cc = Counter((round(la, 6), round(ln, 6)) for _, la, ln in lst)
+        for rid, la, ln in lst:
+            if cc[(round(la, 6), round(ln, 6))] < 3:
+                aceptados[rid] = (la, ln)
 
-        # targets: aproximadas O apiladas (coordenada compartida)
-        targets = []
-        for rid, num, lat, lng, src in items:
-            n = _num(num)
-            apilada = coord_count[cn][(round(lat, 6), round(lng, 6))] > 1
-            if n is not None and ((src or "").startswith(_APROX) or apilada) \
-                    and not (src or "").startswith(_EXACTAS):
-                targets.append((rid, n))
-            elif n is not None and (src or "").startswith(_EXACTAS) and apilada:
-                # exacta pero apilada con otras → también reposicionar
-                targets.append((rid, n))
-
-        if not targets:
-            continue
-        if len(anchors) < 2:
-            out.calles_sin_ancla += 1
-            sin_ancla_targets += [(rid, n, cn, calle_raw.get(cn)) for rid, n in targets]
-            continue
-        slope = _ajuste_lineal(anchors)
-        for rid, n in targets:
-            lat, lng = _interp_pos(n, anchors, slope)
-            updates.append((rid, lat, lng))
-
-    if updates:
+    if aceptados:
         with engine.begin() as conn:
-            for rid, lat, lng in updates:
-                conn.execute(text("UPDATE baseline_direcciones SET lat=:lat, lng=:lng, "
-                                  "geocode_source='interp' WHERE id=:id"),
-                             {"lat": lat, "lng": lng, "id": rid})
-    out.interpoladas = len(updates)
+            for rid, (la, ln) in aceptados.items():
+                conn.execute(text("UPDATE baseline_direcciones SET lat=:la, lng=:ln, "
+                                  "geocode_source='mapbox' WHERE id=:id"),
+                             {"la": la, "ln": ln, "id": rid})
+    out.por_mapbox = len(aceptados)
 
-    # Fallback GRATIS para calles sin anclas: distribuir los números sobre la geometría
-    # de la calle en OSM (una sola consulta Overpass para todo el bbox del baseline).
-    out.sin_resolver = len(sin_ancla_targets)
-    if sin_ancla_targets and input.usar_osm_fallback:
-        osm_upd = _distribuir_osm(engine, input.baseline_id, sin_ancla_targets, rows)
+    # 3) Lo que Mapbox no ubicó (apiló/fuera de zona/sin token) → línea OSM.
+    leftover = [(rid, info[rid][0], info[rid][1], info[rid][2])
+                for rid in info if rid not in aceptados]
+    out.sin_resolver = len(leftover)
+    if leftover and input.usar_osm_fallback:
+        osm_upd = _distribuir_osm(engine, input.baseline_id, leftover, rows)
         out.por_osm = len(osm_upd)
-        out.sin_resolver = len(sin_ancla_targets) - out.por_osm
+        out.sin_resolver = len(leftover) - out.por_osm
         if osm_upd:
             with engine.begin() as conn:
-                for rid, lat, lng in osm_upd:
-                    conn.execute(text("UPDATE baseline_direcciones SET lat=:lat, lng=:lng, "
+                for rid, la, ln in osm_upd:
+                    conn.execute(text("UPDATE baseline_direcciones SET lat=:la, lng=:ln, "
                                       "geocode_source='osm_interp' WHERE id=:id"),
-                                 {"lat": lat, "lng": lng, "id": rid})
+                                 {"la": la, "ln": ln, "id": rid})
 
     out.ok = True
-    logger.info(f"baseline_interp {input.baseline_id}: interpoladas={out.interpoladas} "
-                f"osm={out.por_osm} calles_sin_ancla={out.calles_sin_ancla} "
-                f"sin_resolver={out.sin_resolver}")
+    logger.info(f"baseline_interp {input.baseline_id}: mapbox={out.por_mapbox} "
+                f"osm={out.por_osm} sin_resolver={out.sin_resolver} "
+                f"(consultas mapbox={out.mapbox_consultas})")
     return out
 
 
