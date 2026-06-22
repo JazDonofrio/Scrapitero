@@ -1905,11 +1905,15 @@ function oldRelevMarker(g, paneName) {
   const num = ufTot > 0 ? ufTot : (multi ? n : '');
   // status_contrato = CONECTADO → cliente vigente del cliente: marcador verde.
   const conectado = g.items.some(p => (p.status_contrato || '').trim().toUpperCase() === 'CONECTADO');
+  // 'aprox_ciudad' = ninguna fuente ubicó la calle → punto en el centro de la ciudad (no real).
+  const aproxCiudad = g.items.length > 0 && g.items.every(p => p.aprox_ciudad);
   const cls = 'old-uf-box' + (multi ? ' old-count-box' : (num === '' ? ' old-uf-empty' : ''))
     + (conectado ? ' old-conectado' : '');
   const size = (num === '') ? [12, 12] : (multi ? [22, 22] : [18, 16]);
+  const estiloAprox = aproxCiudad
+    ? 'border:2px dashed #d97706 !important;background:#fffbeb !important;color:#b45309 !important' : '';
   const opts = { icon: L.divIcon({
-    className: 'old-uf-marker', html: `<div class="${cls}">${num}</div>`,
+    className: 'old-uf-marker', html: `<div class="${cls}" style="${estiloAprox}">${aproxCiudad ? '≈' : num}</div>`,
     iconSize: size, iconAnchor: [size[0] / 2, size[1] / 2],
   }) };
   if (paneName) opts.pane = paneName;
@@ -1928,13 +1932,16 @@ function oldRelevMarker(g, paneName) {
   const clienteLine = conectado
     ? `<br><span style="color:#15803d;font-weight:700;font-size:.74rem">✓ Cliente vigente (conectado)</span>`
     : '';
+  const aproxLine = aproxCiudad
+    ? `<br><span style="color:#b45309;font-weight:700;font-size:.74rem">≈ Ubicación aproximada (centro de la ciudad — la calle no se pudo ubicar en ninguna fuente)</span>`
+    : '';
 
   let body;
   if (!multi) {
     const p = g.items[0];
     body = `<b>${escHtml(p.direccion || '(sin dirección)')}</b>`
       + `<br><span style="color:#9ca3af">Relevamiento anterior</span>`
-      + clienteLine
+      + clienteLine + aproxLine
       + `<br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${ufTot}</b>`
       + ` <span style="color:#9ca3af;font-size:.72rem">(viv ${ufV} / com ${ufC})</span>`
       + stLine(p);
@@ -1946,7 +1953,7 @@ function oldRelevMarker(g, paneName) {
         + stLine(p) + `</div>`;
     }).join('');
     body = `<b>${n} direcciones en este punto</b>`
-      + clienteLine
+      + clienteLine + aproxLine
       + `<br><span style="color:#9ca3af">Relevamiento anterior · UF total <b style="color:#6d28d9">${ufTot}</b> (viv ${ufV} / com ${ufC})</span>`
       + `<div style="max-height:170px;overflow:auto;margin-top:4px;font-size:.74rem;line-height:1.5">${lista}</div>`;
   }

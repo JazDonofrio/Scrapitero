@@ -41,6 +41,7 @@ class BaselineInterpInput(BaseModel):
     baseline_id: str
     usar_mapbox: bool = True          # fuente principal para los no-exactos (confiable, por número)
     usar_osm_fallback: bool = True    # calles donde Mapbox apila/falla → geometría OSM (gratis)
+    usar_gemini: bool = True          # canonizar nombres de calle no matcheados (cacheado)
     mapbox_max_requests: int = 800    # tope de llamadas Mapbox por corrida
 
 
@@ -50,8 +51,10 @@ class BaselineInterpOutput(BaseModel):
     baseline_id: str = ""
     por_mapbox: int = 0              # ubicadas por número con Mapbox (confiable)
     por_osm: int = 0                # distribuidas sobre la línea OSM (Mapbox apiló/falló)
-    sin_resolver: int = 0          # quedan agrupadas (ninguna fuente las ubica)
+    por_ciudad: int = 0            # no ubicables → centro de la ciudad, marcadas (aproximadas)
+    sin_resolver: int = 0          # sin coordenada (no había centro de zona)
     mapbox_consultas: int = 0
+    gemini_consultas: int = 0
 
 
 def _num(s) -> Optional[int]:
@@ -147,11 +150,13 @@ def _interp_pos(N: int, anchors: list, slope: tuple) -> tuple:
 
 @agent_run
 def run(input: BaselineInterpInput) -> BaselineInterpOutput:
-    """Ubica las direcciones NO-exactas del relevamiento anterior con la fuente más confiable:
-    **Mapbox por número** (interpola sobre la calle real). Las que Mapbox **apila** (devuelve
-    el centro de la calle para varios números → calles menores) o ubica fuera de la zona, caen
-    a **distribución sobre la línea de OSM**; lo que ninguna ubica queda agrupado (no se inventa).
-    Las exactas de geocodebr (`g:numero`) se respetan."""
+    """Ubica las direcciones NO-exactas del relevamiento anterior, en orden de confiabilidad:
+    1) **Mapbox por número** (solo `address`/`street`; descarta resultados a nivel ciudad);
+    2) **línea de OSM** para las que Mapbox apila/no ubica;
+    3) **Gemini** canoniza el nombre de calle no matcheado (ej. "R ORIEL B CAMPOS" →
+       "Rua Oriel Bezerra de Campos", cacheado por calle) y se reintenta Mapbox/OSM;
+    4) lo que ninguna ubica → **centro de la ciudad, marcado** `ciudad` (aproximado, no inventa
+       una posición de calle). Las exactas de geocodebr (`g:numero`) se respetan."""
     import httpx
     from collections import defaultdict, Counter
     from scrapitero.agents.baseline_geocoder import (
@@ -178,74 +183,143 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
         return centro is None or _dist_km(centro[0], centro[1], la, ln) <= _GUARDA_KM
 
     por_calle: dict = defaultdict(list)
-    info: dict = {}   # rid → (num_int, calle_norm, calle_raw) para los no-exactos
+    item_by_rid: dict = {}
+    info: dict = {}        # rid → (num_int, calle_norm) para los no-exactos
+    calle_raw: dict = {}   # calle_norm → calle cruda (para Gemini/OSM)
     for r in rows:
         por_calle[r[1]].append(r)
+        item_by_rid[r[0]] = r
         if (r[5] or "") != "g:numero":   # exactas de geocodebr se respetan
-            info[r[0]] = (_num(r[2]), r[1], r[6])
+            info[r[0]] = (_num(r[2]), r[1])
+            calle_raw.setdefault(r[1], r[6])
 
-    # 1) Mapbox por número (memo por número dentro de cada calle).
     mapbox_on = input.usar_mapbox and bool(_mapbox_token())
-    mb: dict = {}   # rid → (lat, lng) ubicada por Mapbox dentro de la zona
-    if mapbox_on:
-        with httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
+    client = httpx.Client(timeout=20, headers=_HEADERS, follow_redirects=True)
+    aceptados: dict = {}   # rid → (lat, lng, fuente)
+
+    def _mapbox_calle(items: list, calle_override: Optional[str] = None) -> dict:
+        """Ubica por número con Mapbox los targets de UNA calle. Descarta apilados (≥3 al
+        mismo punto = centroide) y fuera de zona. Devuelve rid→(lat,lng)."""
+        memo: dict = {}
+        mb: dict = {}
+        for rid, _cn, num, la, ln, src, calle, barrio, ciu, est in items:
+            if out.mapbox_consultas >= input.mapbox_max_requests:
+                break
+            name = calle_override or calle
+            key = (name, (num or "").strip())
+            if key in memo:
+                res = memo[key]
+            else:
+                q = _query(name, num, barrio, ciu or ciudad_g, est)
+                res = _mapbox(q, "br", client) if q else None
+                out.mapbox_consultas += 1
+                memo[key] = res
+            if res and _en_zona(res[0], res[1]):
+                mb[rid] = (res[0], res[1])
+        cc = Counter((round(a, 6), round(b, 6)) for a, b in mb.values())
+        return {rid: (a, b) for rid, (a, b) in mb.items()
+                if cc[(round(a, 6), round(b, 6))] < 3}
+
+    try:
+        # 1) Mapbox por número con el nombre original.
+        if mapbox_on:
             for cn, items in por_calle.items():
-                memo: dict = {}
-                for rid, _cn, num, la, ln, src, calle, barrio, ciu, est in items:
-                    if (src or "") == "g:numero":
-                        continue
-                    if out.mapbox_consultas >= input.mapbox_max_requests:
-                        break
-                    key = (num or "").strip()
-                    if key in memo:
-                        res = memo[key]
-                    else:
-                        q = _query(calle, num, barrio, ciu or ciudad_g, est)
-                        res = _mapbox(q, "br", client) if q else None
-                        out.mapbox_consultas += 1
-                        memo[key] = res
-                    if res and _en_zona(res[0], res[1]):
-                        mb[rid] = (res[0], res[1])
+                tg = [it for it in items if (it[5] or "") != "g:numero"]
+                if tg:
+                    for rid, p in _mapbox_calle(tg).items():
+                        aceptados[rid] = (p[0], p[1], "mapbox")
 
-    # 2) Descartar los Mapbox APILADOS (mismo punto para ≥3 números de la calle = centroide).
-    mb_por_calle: dict = defaultdict(list)
-    for rid, (la, ln) in mb.items():
-        mb_por_calle[info[rid][1]].append((rid, la, ln))
-    aceptados: dict = {}
-    for cn, lst in mb_por_calle.items():
-        cc = Counter((round(la, 6), round(ln, 6)) for _, la, ln in lst)
-        for rid, la, ln in lst:
-            if cc[(round(la, 6), round(ln, 6))] < 3:
-                aceptados[rid] = (la, ln)
+        # 2) Línea de OSM para lo que Mapbox no ubicó.
+        leftover = [(rid, info[rid][0], info[rid][1], calle_raw.get(info[rid][1]))
+                    for rid in info if rid not in aceptados]
+        if leftover and input.usar_osm_fallback:
+            for rid, la, ln in _distribuir_osm(engine, input.baseline_id, leftover, rows):
+                aceptados[rid] = (la, ln, "osm_interp")
 
-    if aceptados:
-        with engine.begin() as conn:
-            for rid, (la, ln) in aceptados.items():
-                conn.execute(text("UPDATE baseline_direcciones SET lat=:la, lng=:ln, "
-                                  "geocode_source='mapbox' WHERE id=:id"),
-                             {"la": la, "ln": ln, "id": rid})
-    out.por_mapbox = len(aceptados)
+        # 3) Gemini: canonizar el nombre de las calles aún sin ubicar y reintentar.
+        rem_calles: dict = defaultdict(list)
+        for rid in info:
+            if rid not in aceptados:
+                rem_calles[info[rid][1]].append(item_by_rid[rid])
+        if rem_calles and input.usar_gemini:
+            for cn, items in rem_calles.items():
+                canon = _gemini_canonico(engine, cn, calle_raw.get(cn), ciudad_g, out)
+                if not canon:
+                    continue
+                if mapbox_on:
+                    for rid, p in _mapbox_calle(items, calle_override=canon).items():
+                        aceptados[rid] = (p[0], p[1], "mapbox")
+                pend = [(it[0], _num(it[2]), cn, canon) for it in items if it[0] not in aceptados]
+                if pend and input.usar_osm_fallback:
+                    for rid, la, ln in _distribuir_osm(engine, input.baseline_id, pend, rows):
+                        aceptados[rid] = (la, ln, "osm_interp")
 
-    # 3) Lo que Mapbox no ubicó (apiló/fuera de zona/sin token) → línea OSM.
-    leftover = [(rid, info[rid][0], info[rid][1], info[rid][2])
-                for rid in info if rid not in aceptados]
-    out.sin_resolver = len(leftover)
-    if leftover and input.usar_osm_fallback:
-        osm_upd = _distribuir_osm(engine, input.baseline_id, leftover, rows)
-        out.por_osm = len(osm_upd)
-        out.sin_resolver = len(leftover) - out.por_osm
-        if osm_upd:
-            with engine.begin() as conn:
-                for rid, la, ln in osm_upd:
-                    conn.execute(text("UPDATE baseline_direcciones SET lat=:la, lng=:ln, "
-                                      "geocode_source='osm_interp' WHERE id=:id"),
-                                 {"la": la, "ln": ln, "id": rid})
+        # 4) Sin ubicar → centro de la ciudad, MARCADO (aproximado), sin inventar la cuadra.
+        # No pisar un placement previo bueno (osm_interp/interp) si este run no lo re-ubicó
+        # (p.ej. Overpass flakeó): solo mandamos al centro lo que está claramente mal/sin ubicar.
+        if centro:
+            for rid in info:
+                if rid in aceptados:
+                    continue
+                if (item_by_rid[rid][5] or "") in ("osm_interp", "interp"):
+                    continue   # conservar placement previo bueno
+                aceptados[rid] = (centro[0], centro[1], "ciudad")
+    finally:
+        client.close()
 
+    with engine.begin() as conn:
+        for rid, (la, ln, fuente) in aceptados.items():
+            conn.execute(text("UPDATE baseline_direcciones SET lat=:la, lng=:ln, "
+                              "geocode_source=:f WHERE id=:id"),
+                         {"la": la, "ln": ln, "f": fuente, "id": rid})
+
+    out.por_mapbox = sum(1 for v in aceptados.values() if v[2] == "mapbox")
+    out.por_osm = sum(1 for v in aceptados.values() if v[2] == "osm_interp")
+    out.por_ciudad = sum(1 for v in aceptados.values() if v[2] == "ciudad")
+    out.sin_resolver = len(info) - len(aceptados)
     out.ok = True
     logger.info(f"baseline_interp {input.baseline_id}: mapbox={out.por_mapbox} "
-                f"osm={out.por_osm} sin_resolver={out.sin_resolver} "
-                f"(consultas mapbox={out.mapbox_consultas})")
+                f"osm={out.por_osm} ciudad={out.por_ciudad} sin_resolver={out.sin_resolver} "
+                f"(mapbox={out.mapbox_consultas} gemini={out.gemini_consultas})")
     return out
+
+
+def _gemini_canonico(engine, calle_norm: str, calle_raw: Optional[str],
+                     ciudad: Optional[str], out) -> Optional[str]:
+    """Nombre COMPLETO de la calle según Gemini (con búsqueda), cacheado por (calle_norm,
+    ciudad) en `calle_canonica`. Devuelve el nombre o None (no resuelto/sin key/rate-limit)."""
+    ciu = (ciudad or "").strip()[:120]
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT nombre_canonico FROM calle_canonica WHERE calle_norm=:c AND ciudad=:u"),
+            {"c": calle_norm, "u": ciu}).first()
+    if row is not None:                      # cacheado (incluye None = ya se sabe que no resuelve)
+        return row[0]
+    try:
+        from scrapitero.agents.hotel_habitaciones_llm import _ask_gemini, _api_key
+        key = _api_key()
+        if not key:
+            return None
+        prompt = (f"¿Cuál es el nombre COMPLETO y correcto de la calle abreviada "
+                  f"'{calle_raw or calle_norm}' en {ciudad or 'Brasil'}, Brasil? "
+                  f"Abreviaturas: R=Rua, AV=Avenida, TV=Travessa; una inicial suelta es un "
+                  f"nombre. Respondé SOLO el nombre completo de la calle (con su tipo de vía), "
+                  f"o 'DESCONOCIDO' si no estás seguro.")
+        out.gemini_consultas += 1
+        txt = (_ask_gemini(key, "gemini-2.5-flash", prompt, 60) or "").strip().splitlines()
+        nombre = (txt[-1].strip() if txt else "")[:200]
+        if not nombre or "DESCONOCIDO" in nombre.upper():
+            nombre = None
+    except Exception as e:  # noqa: BLE001 — 429/red: NO cachear, reintentar en otra corrida
+        logger.warning(f"baseline_interp: Gemini falló para «{calle_norm}»: {str(e)[:120]}")
+        return None
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO calle_canonica (calle_norm, ciudad, nombre_canonico) "
+            "VALUES (:c, :u, :n) ON CONFLICT (calle_norm, ciudad) DO UPDATE "
+            "SET nombre_canonico = EXCLUDED.nombre_canonico"),
+            {"c": calle_norm, "u": ciu, "n": nombre})
+    return nombre
 
 
 def _distribuir_osm(engine, baseline_id: str, sin_ancla_targets: list, rows: list) -> list:

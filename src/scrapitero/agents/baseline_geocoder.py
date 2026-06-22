@@ -215,12 +215,17 @@ def _mapbox(query: str, iso2: Optional[str], client: httpx.Client):
                     lat, lng = coords.get("latitude"), coords.get("longitude")
                 else:  # geometry.coordinates = [lng, lat]
                     lng, lat = (coords + [None, None])[:2]
+                # Solo aceptamos resultados a nivel DIRECCIÓN o CALLE. Si Mapbox no encontró
+                # la calle cae a 'place'/'locality'/'region' (la CIUDAD) → NO es una ubicación
+                # real de la dirección (aterrizaría en el centro de la ciudad) → descartar.
+                ftype = props.get("feature_type", "")
+                if ftype not in ("address", "street"):
+                    return None
                 if lat is not None and lng is not None:
                     # match_code.confidence (exact/high/medium/low) → conf; si no, por tipo.
                     mc = (props.get("match_code") or {}).get("confidence")
                     conf = {"exact": 0.95, "high": 0.85, "medium": 0.6, "low": 0.4}.get(
-                        mc, {"address": 0.9, "street": 0.6, "place": 0.4}.get(
-                            props.get("feature_type", ""), 0.5))
+                        mc, {"address": 0.9, "street": 0.6}.get(ftype, 0.5))
                     return float(lat), float(lng), conf
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         pass

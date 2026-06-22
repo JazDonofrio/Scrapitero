@@ -2300,7 +2300,8 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw, extras
+            SELECT lat, lng, calle, numero, uso, uf_vivienda, uf_comercio, direccion_raw, extras,
+                   geocode_source
             FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NOT NULL
         """), {"bid": baseline_id}).fetchall()
@@ -2310,6 +2311,8 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
         "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
         "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
         "uf_total": int((r[5] or 0) + (r[6] or 0)),
+        # 'ciudad' = no se pudo ubicar en la calle → centro de la ciudad (aproximado).
+        "aprox_ciudad": (r[9] == "ciudad"),
         **_status_de_extras(r[8]),
     } for r in rows]
     return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})
