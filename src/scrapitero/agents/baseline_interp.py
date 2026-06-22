@@ -170,7 +170,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
             {"b": input.baseline_id}).first()
         rows = conn.execute(text("""
             SELECT id::text, calle_norm, numero, lat, lng, geocode_source, calle, barrio,
-                   ciudad, estado
+                   ciudad, estado, cep
             FROM baseline_direcciones
             WHERE baseline_id = :b AND lat IS NOT NULL AND calle_norm IS NOT NULL
         """), {"b": input.baseline_id}).fetchall()
@@ -202,7 +202,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
         mismo punto = centroide) y fuera de zona. Devuelve rid→(lat,lng)."""
         memo: dict = {}
         mb: dict = {}
-        for rid, _cn, num, la, ln, src, calle, barrio, ciu, est in items:
+        for rid, _cn, num, la, ln, src, calle, barrio, ciu, est, cep in items:
             if out.mapbox_consultas >= input.mapbox_max_requests:
                 break
             name = calle_override or calle
@@ -210,7 +210,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
             if key in memo:
                 res = memo[key]
             else:
-                q = _query(name, num, barrio, ciu or ciudad_g, est)
+                q = _query(name, num, barrio, ciu or ciudad_g, est, cep)
                 res = _mapbox(q, "br", client) if q else None
                 out.mapbox_consultas += 1
                 memo[key] = res
