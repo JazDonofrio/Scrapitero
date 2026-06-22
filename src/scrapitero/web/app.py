@@ -135,11 +135,13 @@ _activity: deque = deque(maxlen=500)
 _activity_seq: int = 0
 _activity_lock = threading.Lock()
 
-# Thread-local: cada thread de pipeline setea su survey_id aquí
-_thread_survey_id = threading.local()
-# Historial por survey (se llena mientras corre el pipeline)
-_activity_by_survey: dict[str, deque] = {}
-_activity_by_survey_lock = threading.Lock()
+# Thread-local: cada thread de trabajo (pipeline, geocoding de un baseline, etc.)
+# setea aquí el id del "job" — survey_id o baseline_id — para que sus logs se
+# archiven en un buffer propio y la UI los muestre con fecha/hora.
+_thread_job_id = threading.local()
+# Historial por job (se llena mientras corre el pipeline / geocoding)
+_activity_by_job: dict[str, deque] = {}
+_activity_by_job_lock = threading.Lock()
 
 
 def _activity_sink(message) -> None:
@@ -157,12 +159,21 @@ def _activity_sink(message) -> None:
         }
         _activity.append(entry)
 
-    sid = getattr(_thread_survey_id, "value", None)
-    if sid:
-        with _activity_by_survey_lock:
-            if sid not in _activity_by_survey:
-                _activity_by_survey[sid] = deque(maxlen=100)
-            _activity_by_survey[sid].append(entry)
+    jid = getattr(_thread_job_id, "value", None)
+    if jid:
+        with _activity_by_job_lock:
+            if jid not in _activity_by_job:
+                _activity_by_job[jid] = deque(maxlen=600)
+            _activity_by_job[jid].append(entry)
+
+
+def _job_activity(job_id: str, since: int) -> dict:
+    """Entradas de log del job (survey o baseline) posteriores a `since`."""
+    with _activity_by_job_lock:
+        entries = list(_activity_by_job.get(job_id, []))
+    new = [e for e in entries if e["id"] > since]
+    last_id = entries[-1]["id"] if entries else 0
+    return {"entries": new, "last_id": last_id}
 
 
 # Registrar el sink al importar
@@ -764,11 +775,7 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
 @app.get("/api/surveys/{survey_id}/activity")
 async def survey_activity(survey_id: str, since: int = Query(0)) -> dict:
     """Devuelve entradas de log del pipeline de este survey. 'since' es el último id visto."""
-    with _activity_by_survey_lock:
-        entries = list(_activity_by_survey.get(survey_id, []))
-    new = [e for e in entries if e["id"] > since]
-    last_id = entries[-1]["id"] if entries else 0
-    return {"entries": new, "last_id": last_id}
+    return _job_activity(survey_id, since)
 
 
 @app.post("/api/surveys/{survey_id}/dasimetrico")
@@ -787,7 +794,7 @@ async def run_dasimetrico(survey_id: str) -> JSONResponse:
     from scrapitero.agents.dasymetric_population import run as run_dasi
 
     def _job() -> dict:
-        _thread_survey_id.value = survey_id
+        _thread_job_id.value = survey_id
         return run_dasi(DasymetricInput(region_id=region_id, survey_id=survey_id)).model_dump()
 
     data = await asyncio.to_thread(_job)
@@ -813,7 +820,7 @@ async def run_hoteles(survey_id: str, google: bool = True) -> JSONResponse:
     fuentes = ["cadastur", "receita", "osm"] + (["google"] if google else [])
 
     def _job() -> dict:
-        _thread_survey_id.value = survey_id
+        _thread_job_id.value = survey_id
         return run_hot(HotelFetcherInput(region_id=region_id, survey_id=survey_id,
                                          fuentes=fuentes)).model_dump()
 
@@ -834,7 +841,7 @@ async def run_habitaciones_llm(survey_id: str) -> JSONResponse:
     from scrapitero.agents.hotel_habitaciones_llm import run as run_llm
 
     def _job() -> dict:
-        _thread_survey_id.value = survey_id
+        _thread_job_id.value = survey_id
         return run_llm(HotelHabLLMInput(region_id=region_id, survey_id=survey_id)).model_dump()
 
     data = await asyncio.to_thread(_job)
@@ -2163,6 +2170,9 @@ def _lanzar_geocoding(baseline_id: str) -> None:
     _geocoding_jobs[baseline_id] = {"estado": "running", "error": None}
 
     def _job() -> None:
+        # Taggear los logs del geocoder con el baseline_id → el wizard los muestra
+        # con fecha/hora (paso 0 geocodebr, progreso cada 50, interpolación, final).
+        _thread_job_id.value = baseline_id
         try:
             out = run_geo(BaselineGeocoderInput(baseline_id=baseline_id))
             if out.ok:
@@ -2245,6 +2255,12 @@ async def actualizacion_preparar(
                 f"({len(registros)} direcciones, geocoding lanzado)")
     return JSONResponse({"ok": True, "region_id": region_id, "baseline_id": baseline_id,
                          "total": len(registros), "sin_direccion": sin_direccion})
+
+
+@app.get("/api/baselines/{baseline_id}/activity")
+async def baseline_activity(baseline_id: str, since: int = Query(0)) -> dict:
+    """Log en vivo del geocoding de este baseline (con fecha/hora). 'since' = último id visto."""
+    return _job_activity(baseline_id, since)
 
 
 @app.get("/api/baselines/{baseline_id}/geocoding")

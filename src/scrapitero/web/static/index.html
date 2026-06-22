@@ -325,7 +325,7 @@
       font-family: 'SF Mono', 'Fira Mono', 'Cascadia Code', monospace;
       font-size: .71rem;
       line-height: 1.55;
-      height: 158px;   /* ~10 líneas */
+      height: 240px;   /* historial completo, scrolleable */
       overflow-y: auto;
       color: #94a3b8;
       scroll-behavior: smooth;
@@ -434,6 +434,10 @@
             <button type="button" class="btn btn-primary" id="actu-btn-geocode" onclick="actuPreparar()">📍 Geocodificar y graficar</button>
           </div>
           <div id="actu-progreso" style="display:none;margin-top:.7rem"></div>
+          <div id="actu-log-wrap" style="display:none;margin-top:.6rem">
+            <div class="form-hint" style="margin-bottom:.3rem">🕓 Detalle en vivo (fecha/hora de cada paso del geocoding)</div>
+            <div class="actlog-lines" id="actu-log"></div>
+          </div>
           <div id="actu-mapa-wrap" style="display:none;margin-top:.7rem">
             <p class="form-hint">Dibujá el polígono de la <strong>nueva zona</strong> usando la herramienta de polígono (arriba a la derecha del mapa), sobre los puntos del relevamiento anterior.</p>
             <div id="actu-mapa" style="height:420px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
@@ -535,7 +539,8 @@ async function submitForm(e) {
 }
 
 /* ── Actualización: crear sobre el CSV anterior geocodificado ───── */
-const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: null, pollTimer: null };
+const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: null, pollTimer: null,
+                    logEntries: [], logLastId: 0 };
 const ACTU_USO_COLOR = { residencial:'#3b82f6', comercial:'#f59e0b', mixto:'#a855f7', industrial:'#ef4444', vacante:'#9ca3af' };
 
 function setModoCreacion(modo) {
@@ -550,8 +555,9 @@ function actuReset() {
   if (actuState.pollTimer) { clearTimeout(actuState.pollTimer); actuState.pollTimer = null; }
   if (actuState.map) { actuState.map.remove(); actuState.map = null; }
   actuState.baselineId = actuState.regionId = actuState.drawnLayer = null;
+  actuState.logEntries = []; actuState.logLastId = 0;
   ['actu-mapeo'].forEach(id => document.getElementById(id).innerHTML = '');
-  ['actu-paso2','actu-progreso','actu-mapa-wrap'].forEach(id => document.getElementById(id).style.display = 'none');
+  ['actu-paso2','actu-progreso','actu-log-wrap','actu-mapa-wrap'].forEach(id => document.getElementById(id).style.display = 'none');
   document.getElementById('actu-msg').textContent = '';
 }
 
@@ -617,6 +623,9 @@ async function actuPreparar() {
     msg.textContent = '';
     document.getElementById('actu-paso2').style.display = 'none';
     document.getElementById('actu-progreso').style.display = '';
+    actuState.logEntries = []; actuState.logLastId = 0;
+    document.getElementById('actu-log-wrap').style.display = '';
+    renderAlogInto(document.getElementById('actu-log'), actuState.logEntries);
     actuPollGeocoding();
   } catch(err) {
     msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message;
@@ -624,16 +633,32 @@ async function actuPreparar() {
   }
 }
 
+/* Trae las nuevas líneas de log del geocoding (con fecha/hora) y las muestra. */
+async function actuFetchLog() {
+  if (!actuState.baselineId) return;
+  try {
+    const r = await fetch(`/api/baselines/${actuState.baselineId}/activity?since=${actuState.logLastId}`);
+    const d = await r.json();
+    if (d.entries && d.entries.length) {
+      actuState.logEntries.push(...d.entries);
+      actuState.logLastId = d.last_id;
+      renderAlogInto(document.getElementById('actu-log'), actuState.logEntries);
+    }
+  } catch(_) {}
+}
+
 async function actuPollGeocoding() {
   const prog = document.getElementById('actu-progreso');
+  await actuFetchLog();
   try {
     const d = await (await fetch(`/api/baselines/${actuState.baselineId}/geocoding`)).json();
     if (!d.ok) { prog.innerHTML = `<span style="color:#b91c1c">⚠ ${d.error}</span>`; return; }
-    if (d.error) { prog.innerHTML = `<span style="color:#b91c1c">⚠ Geocoding falló: ${escHtml(d.error)}</span>`; return; }
+    if (d.error) { await actuFetchLog(); prog.innerHTML = `<span style="color:#b91c1c">⚠ Geocoding falló: ${escHtml(d.error)}</span>`; return; }
     const pct = d.total ? Math.round(100 * d.geocodificadas / d.total) : 0;
     prog.innerHTML = `<div class="dasi-sub">📍 Geocodificando «${escHtml(d.nombre || '')}»… ${fmt(d.geocodificadas)}/${fmt(d.total)} (${pct}%)</div>
       <div style="height:6px;background:#1f2937;border-radius:4px;margin-top:.3rem;overflow:hidden"><div style="height:100%;width:${pct}%;background:#3b82f6"></div></div>`;
     if (d.listo) {
+      await actuFetchLog();   // vaciar las últimas líneas del log
       const pts = d.puntos || [];
       const distintas = agruparPorUbicacion(pts).length;
       const compartidos = pts.length - distintas;
@@ -2358,6 +2383,32 @@ function stepSummary(result) {
   return (result.ok || result.status === 'completed') ? 'ok' : '';
 }
 
+/* HTML de una línea de log (compartido por el panel del survey y el wizard de
+   importación). e = {id, ts, lvl, msg}. id<0 ⇒ sintética (desde notes). */
+function alogLineHtml(e) {
+  const live = e.id >= 0;
+  const cls = e.lvl === 'ERROR' ? 'alog-err' : e.lvl === 'WARNING' ? 'alog-warn'
+            : e.lvl === 'RUN' ? 'alog-run' : live ? 'alog-info' : 'alog-synth';
+  const ts = e.lvl === 'RUN'
+    ? '<span class="spinner" style="display:inline-block">⟳</span>'
+    : escHtml(e.ts);
+  return `<div class="alog-line ${cls}"><span class="alog-ts">${ts}</span><span class="alog-msg">${escHtml(e.msg)}</span></div>`;
+}
+
+/* Renderiza el historial COMPLETO de entradas en `el` (scrolleable). Mantiene el
+   scroll pegado al fondo si el usuario ya estaba abajo (no interrumpe la lectura
+   si subió a mirar algo). */
+function renderAlogInto(el, entries) {
+  if (!el) return;
+  if (!entries || entries.length === 0) {
+    el.innerHTML = '<span class="alog-empty">Sin actividad registrada todavía.</span>';
+    return;
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  el.innerHTML = entries.slice(-400).map(alogLineHtml).join('');
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
 function renderActlog(sid) {
   const el = document.getElementById('actlog-' + sid);
   if (!el) return;
@@ -2366,17 +2417,7 @@ function renderActlog(sid) {
     el.innerHTML = '<span class="alog-empty">Sin actividad registrada para este relevamiento.</span>';
     return;
   }
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-  el.innerHTML = st.entries.slice(-12).map(e => {
-    const live = e.id >= 0;
-    const cls = e.lvl === 'ERROR' ? 'alog-err' : e.lvl === 'WARNING' ? 'alog-warn'
-              : e.lvl === 'RUN' ? 'alog-run' : live ? 'alog-info' : 'alog-synth';
-    const ts = e.lvl === 'RUN'
-      ? '<span class="spinner" style="display:inline-block">⟳</span>'
-      : escHtml(e.ts);
-    return `<div class="alog-line ${cls}"><span class="alog-ts">${ts}</span><span class="alog-msg">${escHtml(e.msg)}</span></div>`;
-  }).join('');
-  if (atBottom) el.scrollTop = el.scrollHeight;
+  renderAlogInto(el, st.entries);
 }
 
 function syntheticActlog(sid) {

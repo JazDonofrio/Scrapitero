@@ -398,7 +398,12 @@ cada fila** con la ciudad efectiva (manual o predominante de la columna) y **rec
 import** si no hay ninguna. Esa misma ciudad efectiva detecta el país. El mismo campo manual
 y validación existen en el import de baseline para comparar (`POST …/baselines`). Al confirmar, el backend crea la región + persiste el baseline y
 lanza `BaselineGeocoder` en background para **geocodificar cada dirección**
-(agregando la ciudad de su fila a cada consulta); cuando termina, el wizard **grafica los puntos en un mapa** — el relevamiento anterior se
+(agregando la ciudad de su fila a cada consulta). **Mientras geocodifica, el wizard muestra
+un log en vivo con fecha/hora de cada paso** (panel "🕓 Detalle en vivo"): los logs del
+geocoder se taggean al `baseline_id` (thread-local `_thread_job_id`) y el front los pollea
+en `GET /api/baselines/{id}/activity?since=` además de la barra de progreso — así el operador
+ve qué fuente está usando (geocodebr paso 0, progreso cada 50, interpolación, "listo"), si
+quedó trabado o el detalle textual de un error. Cuando termina, el wizard **grafica los puntos en un mapa** — el relevamiento anterior se
 dibuja como **cuadrados grises con la cantidad de UF en número** — y el operador **dibuja
 in-app** (Leaflet-Geoman) el polígono de la **nueva zona** (sector) sobre ellos, mientras
 sigue viendo todo el relevamiento viejo. Ese polígono queda como `regions.zone_geojson` (la
