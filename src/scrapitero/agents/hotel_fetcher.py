@@ -413,10 +413,35 @@ def _fetch_google(region_id: str, survey_id: Optional[str]) -> list[dict]:
     return hoteles
 
 
-def _geocode(query: str, client: httpx.Client) -> Optional[tuple]:
-    # Nominatim (gratis) → Mapbox (pago barato, si hay MAPBOX_TOKEN) → Google (pago caro).
-    return (_nominatim(query, "br", client) or _mapbox(query, "br", client)
-            or _google(query, "br", client))
+def _norm_q(q: str) -> str:
+    """Normaliza la query para la clave de caché (sin acentos, lower, espacios colapsados)."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", q or "") if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s.lower()).strip()
+
+
+def _geocode_cached(query: str, client: httpx.Client, conn, iso2: str = "br") -> Optional[tuple]:
+    """Geocodifica `query` con caché en `geocode_cache` y **Mapbox como primaria**.
+    Devuelve (lat, lng, source, cache_hit) o None. geocodebr ya corrió antes (gratis/lote);
+    acá va lo que quedó sin coords. Mapbox (preciso/rápido) → Nominatim (gratis) → Google."""
+    clave = f"{iso2}|hotel|{_norm_q(query)}"
+    row = conn.execute(text(
+        "SELECT lat, lng, geocode_source FROM geocode_cache WHERE clave = :k"),
+        {"k": clave}).fetchone()
+    if row:
+        return (float(row[0]), float(row[1]), row[2] or "cache", True)
+    for src, fn in (("mapbox", _mapbox), ("nominatim", _nominatim), ("google", _google)):
+        hit = fn(query, iso2, client)
+        if hit:
+            lat, lng = float(hit[0]), float(hit[1])
+            conf = hit[2] if len(hit) > 2 else None
+            conn.execute(text("""
+                INSERT INTO geocode_cache (clave, query, lat, lng, geocode_source, geocode_confidence)
+                VALUES (:k, :q, :lat, :lng, :src, :conf)
+                ON CONFLICT (clave) DO NOTHING
+            """), {"k": clave, "q": query, "lat": lat, "lng": lng, "src": src, "conf": conf})
+            conn.commit()
+            return (lat, lng, src, False)
+    return None
 
 
 @agent_run
@@ -536,22 +561,31 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                     n_gb += 1
             if n_gb:
                 logger.info(f"HotelFetcher: geocodebr ubicó {n_gb}/{len(sin_coords)} sin-coords "
-                            f"(gratis); el resto va a Nominatim/Google")
+                            f"(gratis); el resto va a Mapbox/Nominatim/Google (con caché)")
                 _tg(f"📍 geocodebr (gratis): {n_gb}/{len(sin_coords)} hoteles ubicados; "
-                    f"el resto va a Nominatim/Google.")
+                    f"el resto va a Mapbox/Nominatim/Google (con caché).")
 
         ubicados = []
-        for h in crudos:
-            if h["lat"] is None or h["lng"] is None:
-                q = ", ".join(x for x in (h.get("direccion"),
-                                          f"{mun_nombre} - {uf}" if mun_nombre else None, "Brasil") if x)
-                hit = _geocode(q, client) if q else None
-                if not hit:
-                    continue
-                h["lat"], h["lng"] = hit[0], hit[1]
-                time.sleep(max(input.delay_ms, 0) / 1000.0)
-            if zona_poly.contains(Point(h["lng"], h["lat"])):
-                ubicados.append(h)
+        geo_stats = {"cache": 0, "mapbox": 0, "nominatim": 0, "google": 0}
+        with engine.connect() as gconn:
+            for h in crudos:
+                if h["lat"] is None or h["lng"] is None:
+                    q = ", ".join(x for x in (h.get("direccion"),
+                                              f"{mun_nombre} - {uf}" if mun_nombre else None, "Brasil") if x)
+                    hit = _geocode_cached(q, client, gconn) if q else None
+                    if not hit:
+                        continue
+                    h["lat"], h["lng"] = hit[0], hit[1]
+                    cache_hit = hit[3]
+                    geo_stats["cache" if cache_hit else hit[2]] = \
+                        geo_stats.get("cache" if cache_hit else hit[2], 0) + 1
+                    if not cache_hit:        # solo throttle cuando SÍ pegamos a una API
+                        time.sleep(max(input.delay_ms, 0) / 1000.0)
+                if zona_poly.contains(Point(h["lng"], h["lat"])):
+                    ubicados.append(h)
+        if sum(geo_stats.values()):
+            logger.info("HotelFetcher geocoding: " + ", ".join(
+                f"{k}={v}" for k, v in geo_stats.items() if v))
 
     # Dedupe entre fuentes: por CNPJ cuando ambos lo tienen; si no (Google no trae CNPJ),
     # por nombre similar + proximidad espacial (≤ merge_dist_m) para no contar 2 veces el
