@@ -54,6 +54,10 @@ data/postgres/
 # === PDFs descargados (datos, no código) ===
 pdf_downloads/
 
+# === Dumps de datos descargados (no código) ===
+cadastur_dump/
+receita_dump/
+
 # === Paquetes pre-compilados para Hermes container ===
 .hermes-packages/
 

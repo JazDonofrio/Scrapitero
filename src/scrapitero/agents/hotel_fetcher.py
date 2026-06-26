@@ -177,9 +177,54 @@ def _col(headers_norm: dict, *claves: str) -> Optional[int]:
     return None
 
 
+def _cadastur_desde_local(mun_nombre: str, uf: str) -> list[dict]:
+    """Hoteles de Cadastur desde la tabla local `cadastur_hospedagem` (la carga
+    CadasturLocalFetcher consolidando todos los trimestres). [] si no hay para esa ciudad o
+    si la tabla aún no existe. Mismo dict-shape que el camino del portal."""
+    mun_norm = _norm(mun_nombre)
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            filas = conn.execute(text("""
+                SELECT nome_fantasia, razao_social, cnpj, tipo_hospedagem, uh, leitos,
+                       situacao, logradouro, numero, bairro, municipio
+                FROM cadastur_hospedagem
+                WHERE (:uf = '' OR upper(uf) = upper(:uf))
+            """), {"uf": uf or ""}).fetchall()
+    except Exception:  # la tabla aún no existe → sin local
+        return []
+    hoteles = []
+    for f in filas:
+        if _norm(f[10] or "") != mun_norm:   # filtro de município sin depender de unaccent
+            continue
+        sit = f[6] or ""
+        hoteles.append({
+            "nombre": f[0] or f[1] or None,
+            "cnpj": (re.sub(r"\D", "", f[2] or "")[:20] or None),
+            "tipo": (f[3] or None),
+            "direccion": " ".join(x for x in (f[7] or "", f[8] or "", f[9] or "") if x) or None,
+            "logradouro": f[7] or None, "numero": f[8] or None, "bairro": f[9] or None,
+            "lat": None, "lng": None,
+            "uh": f[4], "leitos": f[5],
+            "estrellas": None, "situacion": (sit[:40] or None),
+            "cerrado": bool(sit) and any(k in _norm(sit) for k in
+                                         ("inativo", "cancelado", "baixado", "encerrad")),
+            "business_status": None,
+            "hab_fuente": "cadastur" if f[4] else None,
+            "fuente": "cadastur",
+        })
+    return hoteles
+
+
 def _fetch_cadastur(mun_nombre: str, uf: str, client: httpx.Client) -> list[dict]:
-    """Hoteles de Cadastur del município (sin coordenadas; se geocodifican luego).
-    Lanza RuntimeError si el portal no responde / no hay recurso."""
+    """Hoteles de Cadastur del município. **Tabla local primero** (cadastur_hospedagem,
+    consolidada por CadasturLocalFetcher); si está vacía para esa ciudad, cae al portal CKAN.
+    Sin coordenadas (se geocodifican luego). Lanza RuntimeError si el portal no responde."""
+    locales = _cadastur_desde_local(mun_nombre, uf)
+    if locales:
+        logger.info(f"Cadastur: {len(locales)} hoteles de {mun_nombre} desde la tabla local "
+                    f"(cadastur_hospedagem) — sin tocar el portal")
+        return locales
     url = _resolver_csv_url(client)
     if not url:
         raise RuntimeError("portal CKAN sin responder o sin recurso CSV (¿caído?)")
@@ -199,8 +244,10 @@ def _fetch_cadastur(mun_nombre: str, uf: str, client: httpx.Client) -> list[dict
     hn = {_norm(h): i for i, h in enumerate(headers)}
     c = {k: _col(hn, *v) for k, v in {
         "nombre": ("nome fantasia", "nome", "razao"), "cnpj": ("cnpj",),
-        "mun": ("municipio",), "uf": ("uf", "estado"),
-        "uh": ("unidades habitacionais", "uh", "quantidade unidades"),
+        # el CSV cadasturpj llama "Localidade" al município (sin esto, el filtro no se aplica
+        # y devuelve toda la UF)
+        "mun": ("municipio", "localidade"), "uf": ("uf", "estado"),
+        "uh": ("unidade habitacionais", "unidades habitacionais", "uh", "quantidade unidades"),
         "leitos": ("leitos",), "tipo": ("atividade", "tipo", "categoria"),
         "sit": ("situacao", "situa"), "logr": ("logradouro", "endereco"),
         "num": ("numero",), "bairro": ("bairro",),
