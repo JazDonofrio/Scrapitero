@@ -154,10 +154,20 @@ def _resolver_csv_url(client: httpx.Client) -> Optional[str]:
     if r.status_code != 200:
         return None
     resources = ((r.json().get("result") or {}).get("resources") or [])
-    csvs = [x for x in resources if "csv" in (x.get("format") or "").lower()]
-    csvs.sort(key=lambda x: x.get("last_modified") or x.get("created") or "", reverse=True)
-    elegidos = csvs or resources
-    return elegidos[0].get("url") if elegidos else None
+
+    def _url(x) -> str:
+        return (x.get("url") or "")
+
+    # El portal etiqueta como format="CSV" recursos que en realidad son .xls/.xlsx
+    # (binarios) — csv.reader los lee como basura. Quedarse SOLO con .csv reales.
+    reales = [x for x in resources if _url(x).lower().endswith(".csv")]
+    # De esos, preferir el registro Cadastur PJ (`...cadasturpj.csv`): es el que trae
+    # UH / Total de Leitos / Atividade (las habitaciones, el valor de Cadastur). Los
+    # otros .csv "meio-de-hospedagem" son listados tipo Receita, SIN habitaciones.
+    ricos = [x for x in reales if "cadasturpj" in _url(x).lower()]
+    pool = ricos or reales
+    pool.sort(key=lambda x: x.get("last_modified") or x.get("created") or "", reverse=True)
+    return _url(pool[0]) if pool else None
 
 
 def _col(headers_norm: dict, *claves: str) -> Optional[int]:
