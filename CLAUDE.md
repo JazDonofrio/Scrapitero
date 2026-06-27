@@ -428,8 +428,11 @@ rango (autodetectado)"**. En el segundo, `GET /api/baselines/{id}/calles`
 **tope extendido** (+20%, mín +50) para captar obra nueva. El operador edita esa tabla
 (rangos, excluir/agregar calles) y confirma → `POST …/crear-survey-calles` construye un
 **polígono de descarga** (`_poligono_de_calles`: **una** consulta Overpass de todas las vías
-del bbox de los puntos, matcheadas por núcleo de nombre con `baseline_interp._core_calle`,
-buffereadas ~55 m) que queda como `regions.zone_geojson`, y guarda la lista en
+del bbox de los puntos, matcheadas por núcleo de nombre con `baseline_interp._core_calle`, y
+construido como un **corredor angosto sobre el eje** de cada calle — ±`ancho_calle_m`/2,
+default 30 m, caras planas/paralelas al eje — porque SmartGIS baja por **intersección**, así
+un corredor fino agarra las parcelas que dan al frente de las dos veredas sin arrastrar las de
+fondo/calles vecinas) que queda como `regions.zone_geojson`, y guarda la lista en
 **`surveys.scope_calles`** (JSONB, migración 040). El relevamiento baja por ese polígono y,
 **ya con las direcciones (BCI)**, el agente **`ScopeCallesFilter`** (rpc `scope_calles_filter`,
 paso del `VGPipelineRunner` tras BCIParser) **borra las parcelas cuya calle no esté en el scope

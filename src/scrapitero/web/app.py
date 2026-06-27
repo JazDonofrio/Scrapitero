@@ -2478,8 +2478,9 @@ def _detectar_calles_baseline(baseline_id: str, cuadras: bool = True) -> list[di
     return out
 
 
-def _buffer_grados(geoms: list, metros: float, lat: float):
+def _buffer_grados(geoms: list, metros: float, lat: float, cap_style: int = 1):
     """Une y buffea geometrías (lat/lng) por ~`metros`, en grados (corrige por latitud).
+    `cap_style`=2 (flat) para corredores de calle (paralelas al eje, sin puntas redondas).
     Devuelve una geometría shapely. El polígono es de DESCARGA (generoso) → el filtro
     estricto por dirección hace la precisión, así que la aproximación en grados alcanza."""
     import math
@@ -2487,19 +2488,23 @@ def _buffer_grados(geoms: list, metros: float, lat: float):
     deg = metros / 111000.0
     u = unary_union(geoms)
     # buffer isotrópico en grados; la distorsión lng a lat ~-15° es chica (cos≈0.96)
-    return u.buffer(deg / max(math.cos(math.radians(lat)), 0.3)).buffer(0)
+    return u.buffer(deg / max(math.cos(math.radians(lat)), 0.3), cap_style=cap_style).buffer(0)
 
 
-def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float = 55.0) -> Optional[dict]:
-    """Construye el polígono de DESCARGA: geometría OSM de cada calle (recortada al bbox de
-    los puntos del baseline + margen) buffereada, + buffer de los puntos como respaldo.
-    Devuelve un GeoJSON (Polygon/MultiPolygon) o None si no hay nada."""
+def _poligono_de_calles(calles: list[dict], puntos: list[tuple], ancho_m: float = 30.0) -> Optional[dict]:
+    """Construye el polígono de DESCARGA como un **corredor angosto sobre el eje de cada
+    calle** (geometría OSM): paralelas al eje a ±`ancho_m`/2 (default 30 m → 15 m por lado),
+    con caras planas. SmartGIS baja por **intersección**, así que un corredor fino agarra las
+    parcelas que dan al frente de las dos veredas sin arrastrar las de fondo/calles vecinas.
+    Respaldo para calles que OSM no devuelve: blobs finos en los puntos del baseline.
+    Devuelve un GeoJSON (Polygon/MultiPolygon) o None."""
     from shapely.geometry import LineString, Point, mapping
     from scrapitero.agents.baseline_interp import _core_calle
     from scrapitero.agents.osm_building_fetcher import _fetch_overpass
 
     if not puntos:
         return None
+    half = ancho_m / 2.0
     lats = [p[0] for p in puntos]; lngs = [p[1] for p in puntos]
     s, n, w, e = min(lats), max(lats), min(lngs), max(lngs)
     mlat = (s + n) / 2.0
@@ -2507,7 +2512,7 @@ def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float
     bbox = (s - mrg, w - mrg, n + mrg, e + mrg)   # Overpass: (south,west,north,east)
 
     import difflib
-    geoms = [Point(ln, la) for la, ln in puntos]   # respaldo: los puntos del anterior
+    lineas = []
     cores = [cc for cc in (_core_calle(c.get("calle") or c.get("calle_norm") or "")
                            for c in calles) if cc]
 
@@ -2520,7 +2525,7 @@ def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float
          f'({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});out geom;')
     try:
         data = _fetch_overpass(q)
-    except Exception as exc:  # noqa: BLE001 — best-effort: si OSM falla, polígono = buffer de puntos
+    except Exception as exc:  # noqa: BLE001 — best-effort: si OSM falla, polígono = blobs de puntos
         logger.warning(f"scope-calles: Overpass falló ({exc}); polígono solo con puntos del baseline")
         data = {"elements": []}
     for el in (data.get("elements") or []):
@@ -2531,10 +2536,18 @@ def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float
             continue
         pts = [(g["lon"], g["lat"]) for g in el["geometry"] if "lat" in g and "lon" in g]
         if len(pts) >= 2:
-            geoms.append(LineString(pts))
-    if not geoms:
+            lineas.append(LineString(pts))
+
+    partes = []
+    if lineas:
+        # corredor con caras PLANAS (paralelas al eje, sin burbujas en las puntas)
+        partes.append(_buffer_grados(lineas, half, mlat, cap_style=2))
+    # respaldo: blobs finos en los puntos del baseline (cubren calles que OSM no devolvió)
+    partes.append(_buffer_grados([Point(ln, la) for la, ln in puntos], half, mlat))
+    from shapely.ops import unary_union
+    poly = unary_union(partes).buffer(0)
+    if poly.is_empty:
         return None
-    poly = _buffer_grados(geoms, buffer_m, mlat)
     # shapely `mapping` devuelve TUPLAS anidadas; json-roundtrip → listas (lo que esperan
     # `_bbox_from_geojson` y los fetchers al parsear el GeoJSON).
     return json.loads(json.dumps(mapping(poly)))
@@ -2557,6 +2570,7 @@ async def baseline_calles(baseline_id: str) -> JSONResponse:
 async def actualizacion_crear_survey_calles(
     baseline_id: str,
     calles: str = Form(...),     # JSON: lista editada [{calle, calle_norm, num_min, num_max}]
+    ancho_calle_m: float = Form(30.0),   # ancho del corredor sobre el eje de calle (m)
 ) -> JSONResponse:
     """Crea el survey en modo CALLE+RANGO: construye el polígono de descarga (geometría OSM
     de las calles + puntos del baseline) → zone_geojson, y guarda `scope_calles` (filtro
@@ -2594,16 +2608,22 @@ async def actualizacion_crear_survey_calles(
         if not base:
             return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
         region_id, nombre = base[0], base[1]
-        puntos = [(float(r[0]), float(r[1])) for r in conn.execute(text("""
-            SELECT lat, lng FROM baseline_direcciones
+        filas_pt = conn.execute(text("""
+            SELECT lat, lng, calle FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NOT NULL
-        """), {"bid": baseline_id}).fetchall()]
+        """), {"bid": baseline_id}).fetchall()
+    # Respaldo: solo los puntos de las calles del scope (no las excluidas → no agrandan la zona).
+    scope_norms = {c["calle_norm"] for c in scope}
+    puntos = [(float(r[0]), float(r[1])) for r in filas_pt
+              if normalizar_calle(r[2] or "") in scope_norms]
+    if not puntos:   # ninguna coincidencia → usar todos (defensivo)
+        puntos = [(float(r[0]), float(r[1])) for r in filas_pt]
     if not puntos:
         return JSONResponse({"ok": False, "error":
                              "El relevamiento anterior no tiene direcciones geocodificadas"},
                             status_code=400)
 
-    geojson = await asyncio.to_thread(_poligono_de_calles, scope, puntos)
+    geojson = await asyncio.to_thread(_poligono_de_calles, scope, puntos, ancho_calle_m)
     if not geojson:
         return JSONResponse({"ok": False, "error":
                              "No se pudo construir la zona de las calles (OSM no respondió y "
