@@ -149,8 +149,8 @@ _COMPLEMENTO_RE = re.compile(
 # normalizada en el primero de estos (solo desde el 3er token, para no romper nombres
 # cortos legítimos como "RUA L").
 _CORTE_CALLE = {"mat", "matricula", "esq", "esquina", "q", "qd", "qda", "quadra",
-                "l", "lt", "lote", "area", "casa", "apto", "apt", "bloco", "bl",
-                "sala", "loja", "km", "fundos", "desmembrada", "remembrada"}
+                "l", "lt", "lot", "lote", "loteamento", "area", "casa", "apto", "apt",
+                "bloco", "bl", "sala", "loja", "km", "fundos", "desmembrada", "remembrada"}
 _SN_FINAL_RE = re.compile(r"[\s,]+s/?n\.?$", re.IGNORECASE)
 
 
