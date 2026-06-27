@@ -43,6 +43,10 @@ class BaselineInterpInput(BaseModel):
     usar_osm_fallback: bool = True    # calles donde Mapbox apila/falla → geometría OSM (gratis)
     usar_gemini: bool = True          # canonizar nombres de calle no matcheados (cacheado)
     mapbox_max_requests: int = 800    # tope de llamadas Mapbox por corrida
+    # Guarda de consistencia por calle: las direcciones de UNA misma calle tienen que quedar
+    # juntas. Una que cae a más de `desvio_calle_m` del núcleo (mediana) de su calle es un
+    # geocode al homónimo equivocado (ej. otra "São Bento") → se reposiciona sobre la calle real.
+    desvio_calle_m: float = 700.0
 
 
 class BaselineInterpOutput(BaseModel):
@@ -53,6 +57,7 @@ class BaselineInterpOutput(BaseModel):
     por_osm: int = 0                # distribuidas sobre la línea OSM (Mapbox apiló/falló)
     por_ciudad: int = 0            # no ubicables → centro de la ciudad, marcadas (aproximadas)
     sin_resolver: int = 0          # sin coordenada (no había centro de zona)
+    reposicionadas_calle: int = 0  # outliers lejos del núcleo de su calle, reposicionados
     mapbox_consultas: int = 0
     gemini_consultas: int = 0
 
@@ -91,6 +96,29 @@ def _hav_m(a, b, c, d) -> float:
     dp, dl = math.radians(c - a), math.radians(d - b)
     x = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * R * math.asin(math.sqrt(x))
+
+
+def _mediana(vals: list) -> float:
+    s = sorted(vals)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _outliers_por_calle(por_calle: dict, pos: dict, info: dict, desvio_m: float) -> dict:
+    """rid → (núcleo_lat, núcleo_lng) de las direcciones (no-exactas) que cayeron a más de
+    `desvio_m` de la MEDIANA de su propia calle (geocode al homónimo equivocado). Solo en
+    calles con ≥3 direcciones — con menos no hay núcleo confiable."""
+    out: dict = {}
+    for items in por_calle.values():
+        ps = [(it[0], pos[it[0]]) for it in items if it[0] in pos]
+        if len(ps) < 3:
+            continue
+        mlat = _mediana([p[1][0] for p in ps])
+        mlng = _mediana([p[1][1] for p in ps])
+        for rid, (la, ln) in ps:
+            if rid in info and _hav_m(la, ln, mlat, mlng) > desvio_m:
+                out[rid] = (mlat, mlng)
+    return out
 
 
 def _puntos_sobre_linea(poly: list, k: int) -> list:
@@ -254,6 +282,35 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                     for rid, la, ln in _distribuir_osm(engine, input.baseline_id, pend, rows):
                         aceptados[rid] = (la, ln, "osm_interp")
 
+        # 3.5) Consistencia por calle: TODAS las direcciones de una calle deben quedar juntas.
+        # La que cayó lejos del núcleo (mediana) de SU calle es un geocode al homónimo
+        # equivocado (ej. otra "São Bento") → reposicionar sobre la calle real (OSM) y, si OSM
+        # no la ubica cerca del núcleo, snap al núcleo (mejor que el homónimo a km de distancia).
+        def _pos(rid):
+            if rid in aceptados:
+                return (aceptados[rid][0], aceptados[rid][1])
+            it = item_by_rid[rid]
+            return (float(it[3]), float(it[4])) if it[3] is not None else None
+        pos = {rid: p for rid in item_by_rid if (p := _pos(rid))}
+        outliers = _outliers_por_calle(por_calle, pos, info, input.desvio_calle_m)
+        if outliers:
+            logger.info(f"baseline_interp: {len(outliers)} direcciones lejos del núcleo de su "
+                        f"calle (homónimo) → reposicionar")
+            colocados: set = set()
+            tgt = [(rid, info[rid][0], info[rid][1], calle_raw.get(info[rid][1]))
+                   for rid in outliers if rid in info]
+            if input.usar_osm_fallback and tgt:
+                for rid, la, ln in _distribuir_osm(engine, input.baseline_id, tgt, rows):
+                    nuc = outliers[rid]
+                    # aceptar el OSM SOLO si cae cerca del núcleo (evita re-caer en el homónimo)
+                    if _hav_m(la, ln, nuc[0], nuc[1]) <= input.desvio_calle_m:
+                        aceptados[rid] = (la, ln, "osm_interp")
+                        colocados.add(rid)
+            for rid, (mlat, mlng) in outliers.items():
+                if rid not in colocados:
+                    aceptados[rid] = (mlat, mlng, "interp")   # snap al núcleo de la calle
+            out.reposicionadas_calle = len(outliers)
+
         # 4) Sin ubicar → centro de la ciudad, MARCADO (aproximado), sin inventar la cuadra.
         # No pisar un placement previo bueno (osm_interp/interp) si este run no lo re-ubicó
         # (p.ej. Overpass flakeó): solo mandamos al centro lo que está claramente mal/sin ubicar.
@@ -280,6 +337,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
     out.ok = True
     logger.info(f"baseline_interp {input.baseline_id}: mapbox={out.por_mapbox} "
                 f"osm={out.por_osm} ciudad={out.por_ciudad} sin_resolver={out.sin_resolver} "
+                f"reposicionadas_calle={out.reposicionadas_calle} "
                 f"(mapbox={out.mapbox_consultas} gemini={out.gemini_consultas})")
     return out
 
