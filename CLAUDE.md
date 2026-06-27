@@ -301,9 +301,13 @@ HotelFetcher manda un **🆘 aviso por Telegram con un link** a la página `/asi
 del número (queda `habitaciones_fuente='manual'`, persiste por CNPJ a re-cortes). Los que la IA no
 encuentra (nombres basura de Google, etc.) caen acá. El popup del hotel muestra dirección completa.
 
-**Botón 🏨 Hoteles:** tilde **"Google (pago)"** para correr con/sin la fuente paga; la leyenda
-del mapa muestra el conteo de hoteles (y cuántos quedaron "sin ubicar"). HotelFetcher tiene un
-**buffer de borde** (40 m) para no perder hoteles pegados al límite del polígono.
+**Botón 🏨 Hoteles:** tilde **"Google (pago)"** para correr con/sin la fuente paga. En la
+leyenda del mapa, las líneas de hotel de la taxonomía del cliente (HOTEL/MOTEL/FLAT/PENSÃO)
+muestran, además del conteo de parcelas, el **total de habitaciones** de esos hoteles
+(abiertos, con dato) — `loadHoteles` suma por tipo (`hotelTipoLabel`, espejo de
+`_hotel_tipo_label`) y lo guarda en `map._hotelHabByTipo`, que lee el render de la leyenda.
+HotelFetcher tiene un **buffer de borde** (40 m) para no perder hoteles pegados al límite del
+polígono.
 
 **CSV del relevamiento:** export único **⬇ CSV** (todas las parcelas del survey; se quitó el
 "CSV Consolidado" y el botón "🔁 Sub-zona"). Columnas extra: **`DSC_NOME_DO_IMOVEL`**

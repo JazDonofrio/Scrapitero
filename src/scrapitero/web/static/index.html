@@ -1582,6 +1582,16 @@ const surveyHoteles = {};   // sid → {parcela_id → [hotel]}
 
 const hotelLayers = {};   // sid → L.layerGroup con los pines 🏨
 
+// Espejo de _hotel_tipo_label (web/app.py): mapea el tipo del hotel a la etiqueta de la
+// taxonomía del cliente, para sumar las habitaciones por la misma línea de la leyenda.
+function hotelTipoLabel(t) {
+  t = (t || '').toLowerCase();
+  if (t.includes('motel')) return 'MOTEL';
+  if (t.includes('apart') || t.includes('flat')) return 'FLAT';
+  if (t.includes('pens')) return 'PENSÃO';
+  return 'HOTEL';
+}
+
 async function loadHoteles(sid) {
   try {
     const d = await fetch(`/api/surveys/${sid}/hoteles`).then(r => r.json());
@@ -1589,6 +1599,14 @@ async function loadHoteles(sid) {
     const m = {};
     (d.hoteles || []).forEach(h => { if (h.parcela_id) (m[h.parcela_id] = m[h.parcela_id] || []).push(h); });
     surveyHoteles[sid] = m;
+    // Habitaciones por tipo de hotel (abiertos, con dato) → para la leyenda del mapa.
+    const habByTipo = {};
+    (d.hoteles || []).forEach(h => {
+      if (h.cerrado || h.habitaciones == null) return;
+      const lbl = hotelTipoLabel(h.tipo);
+      habByTipo[lbl] = (habByTipo[lbl] || 0) + h.habitaciones;
+    });
+    if (maps[sid]) maps[sid]._hotelHabByTipo = habByTipo;
     loadAsistencia(sid);   // pedidos de asistencia humana (hoteles sin habitaciones) + link
     const msg = document.getElementById('hot-msg-' + sid);
     if (msg && d.total) msg.textContent = `${d.abiertos} hotel(es) · ${fmt(d.habitaciones_total)} hab.${d.cerrados ? ` · ${d.cerrados} cerrado(s)` : ''}`;
@@ -2150,10 +2168,15 @@ async function loadParcelasMap(sid) {
   const ley = L.control({position: 'bottomleft'});
   ley.onAdd = function() {
     const d = L.DomUtil.create('div', 'map-legend');
+    const habTipo = (!compEst && map._hotelHabByTipo) ? map._hotelHabByTipo : {};
     let html = catEntries.map(([key, n]) => {
       const c = compEst ? (ESTADO_COLOR[key] || '#e2e8f0') : (tipoColor[key] || CAT_DEFAULT);
       const lbl = compEst ? (ESTADO_LABEL[key] || key) : key;
-      return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b></div>';
+      // Para las líneas de hotel (HOTEL/MOTEL/FLAT/PENSÃO): además del conteo de parcelas,
+      // el total de habitaciones de esos hoteles.
+      const hab = habTipo[key] || 0;
+      const habStr = hab ? ' · <b>' + fmt(hab) + ' hab</b>' : '';
+      return '<div><span class="map-legend-dot" style="background:' + c + '"></span>' + escHtml(lbl) + ' <b>(' + n + ')</b>' + habStr + '</div>';
     }).join('');
     // Relevamiento anterior vs nuevo DENTRO de la zona. La métrica comparable es la **UF**
     // (unidades viv+com); el conteo de direcciones (anterior) vs parcelas (nuevo) no es
