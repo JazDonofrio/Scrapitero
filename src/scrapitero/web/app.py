@@ -2535,7 +2535,9 @@ def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float
     if not geoms:
         return None
     poly = _buffer_grados(geoms, buffer_m, mlat)
-    return mapping(poly)
+    # shapely `mapping` devuelve TUPLAS anidadas; json-roundtrip → listas (lo que esperan
+    # `_bbox_from_geojson` y los fetchers al parsear el GeoJSON).
+    return json.loads(json.dumps(mapping(poly)))
 
 
 @app.get("/api/baselines/{baseline_id}/calles")
