@@ -2034,6 +2034,13 @@ def _status_de_extras(extras_json) -> dict:
             "status_node": e.get("status_node") or None}
 
 
+def _direccion_norm(calle, numero) -> str:
+    """Dirección normalizada (calle canónica + número) con la normalización ACTUAL — sirve
+    para mostrarla junto a la original en el popup del punto."""
+    from scrapitero.agents.direccion_norm import normalizar_calle, normalizar_numero
+    return " ".join(x for x in (normalizar_calle(calle), normalizar_numero(numero)) if x).strip()
+
+
 def _parse_fecha(fecha: str):
     """'YYYY-MM-DD' → date, o None si vacío. Lanza ValueError si tiene formato inválido."""
     if not fecha.strip():
@@ -2277,6 +2284,7 @@ async def actualizacion_geocoding_status(baseline_id: str) -> JSONResponse:
         puntos = [{
             "lat": float(r[0]), "lng": float(r[1]),
             "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
+            "direccion_norm": _direccion_norm(r[2], r[3]),
             "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
             **_status_de_extras(r[8]),
         } for r in rows]
@@ -2307,6 +2315,7 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
         "lat": float(r[0]), "lng": float(r[1]),
         # Dirección COMPLETA tal cual vino del CSV (cae a calle+numero si no hay raw).
         "direccion": (r[7] or " ".join(x for x in (r[2] or "", r[3] or "") if x)).strip(),
+        "direccion_norm": _direccion_norm(r[2], r[3]),
         "uso": r[4], "uf_v": int(r[5] or 0), "uf_c": int(r[6] or 0),
         "uf_total": int((r[5] or 0) + (r[6] or 0)),
         # 'ciudad' = no se pudo ubicar en la calle → centro de la ciudad (aproximado).

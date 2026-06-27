@@ -2032,10 +2032,15 @@ function oldRelevMarker(g, paneName) {
     ? `<br><span style="color:#b45309;font-weight:700;font-size:.74rem">≈ Ubicación aproximada (centro de la ciudad — la calle no se pudo ubicar en ninguna fuente)</span>`
     : '';
 
+  // Dirección normalizada (canónica, la que se usa para matchear) bajo la original.
+  const normLine = p => p.direccion_norm
+    ? `<br><span style="color:#94a3b8;font-size:.72rem" title="Dirección normalizada (forma canónica que se usa para matchear)">📐 ${escHtml(p.direccion_norm)}</span>` : '';
+
   let body;
   if (!multi) {
     const p = g.items[0];
     body = `<b>${escHtml(p.direccion || '(sin dirección)')}</b>`
+      + normLine(p)
       + `<br><span style="color:#9ca3af">Relevamiento anterior</span>`
       + clienteLine + aproxLine
       + `<br><span style="text-transform:capitalize">${escHtml(p.uso || 'sin uso')}</span> · UF: <b>${ufTot}</b>`
@@ -2046,7 +2051,7 @@ function oldRelevMarker(g, paneName) {
       const uf = (p.uf_v || 0) + (p.uf_c || 0);
       return `<div style="padding:1px 0;border-top:1px solid rgba(148,163,184,.18)">`
         + `${escHtml(p.direccion || '(sin dirección)')} <span style="color:#9ca3af">· UF ${uf}</span>`
-        + stLine(p) + `</div>`;
+        + normLine(p) + stLine(p) + `</div>`;
     }).join('');
     body = `<b>${n} direcciones en este punto</b>`
       + clienteLine + aproxLine
