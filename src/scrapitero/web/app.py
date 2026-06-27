@@ -2391,10 +2391,62 @@ async def actualizacion_crear_survey(
 
 # ── Actualización por CALLE + RANGO DE ALTURAS (autodetectado) ──────────────────
 
-def _detectar_calles_baseline(baseline_id: str, extender: bool = True) -> list[dict]:
+# Expansión de abreviaturas para MOSTRAR el nombre lindo (no para matchear: eso lo hace
+# normalizar_calle). Tipo de vía + títulos honoríficos, ES/PT.
+_VIA_DISPLAY = {
+    "av": "Avenida", "avda": "Avenida", "aven": "Avenida", "r": "Rua", "rua": "Rua",
+    "tv": "Travessa", "trav": "Travessa", "al": "Alameda", "est": "Estrada",
+    "rod": "Rodovia", "pc": "Praça", "pca": "Praça", "pje": "Passagem", "diag": "Diagonal",
+    "bv": "Bulevar", "cno": "Caminho", "via": "Via", "largo": "Largo", "beco": "Beco",
+    "viela": "Viela", "ladeira": "Ladeira", "marginal": "Marginal", "c": "Calle",
+}
+_TIT_DISPLAY = {
+    "gov": "Governador", "gob": "Governador", "mal": "Marechal", "cel": "Coronel",
+    "cnel": "Coronel", "dr": "Doutor", "dra": "Doutora", "prof": "Professor",
+    "profa": "Professora", "eng": "Engenheiro", "ing": "Engenheiro", "gral": "General",
+    "gen": "General", "brig": "Brigadeiro", "cap": "Capitão", "tte": "Tenente",
+    "ten": "Tenente", "sgt": "Sargento", "alm": "Almirante", "cmte": "Comandante",
+    "pte": "Presidente", "pres": "Presidente", "sen": "Senador", "dep": "Deputado",
+    "dip": "Deputado", "pref": "Prefeito", "ver": "Vereador", "min": "Ministro",
+    "mons": "Monsenhor", "pe": "Padre", "frei": "Frei",
+    "s": "São", "sao": "São", "san": "São", "sta": "Santa", "sto": "Santo",
+}
+_PREP_DISPLAY = {"de", "do", "da", "dos", "das", "e", "del", "la", "las", "los", "y"}
+
+
+def _calle_display(calle: Optional[str]) -> str:
+    """Nombre de calle lindo para mostrar: saca la basura '(LOT …)', expande el tipo de vía
+    y los títulos (AV→Avenida, GOV→Governador, MAL→Marechal…) y Title-Case."""
+    s = re.sub(r"\(.*?\)", " ", calle or "")                 # quitar (...)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return (calle or "").strip()
+    out = []
+    for i, tok in enumerate(s.split()):
+        low = re.sub(r"[^\wçãõáéíóúâêôàü]", "", tok.lower())
+        if i == 0 and low in _VIA_DISPLAY:
+            out.append(_VIA_DISPLAY[low])
+        elif low in _TIT_DISPLAY:
+            out.append(_TIT_DISPLAY[low])
+        elif low in _PREP_DISPLAY:
+            out.append(low)
+        else:
+            out.append(tok.capitalize())
+    return " ".join(out)
+
+
+def _cuadra(num_min: int, num_max: int) -> tuple[int, int]:
+    """Redondea el rango a CUADRAS COMPLETAS de 100 alturas (inicio de cuadra del mínimo →
+    fin de cuadra del máximo). Cuadras: 1–100, 101–200, 201–300, …"""
+    lo = ((max(num_min, 1) - 1) // 100) * 100 + 1
+    hi = ((max(num_max, num_min, 1) + 99) // 100) * 100
+    return lo, hi
+
+
+def _detectar_calles_baseline(baseline_id: str, cuadras: bool = True) -> list[dict]:
     """Autodetecta las calles + rango de numeración del relevamiento anterior.
     Agrupa `baseline_direcciones` por calle normalizada y saca min/max del número.
-    `extender`=True amplía el tope para captar obra nueva en la misma cuadra."""
+    `cuadras`=True redondea el rango a cuadras completas de 100 alturas."""
     from scrapitero.agents.direccion_norm import normalizar_calle, normalizar_numero
     engine = get_engine()
     with engine.connect() as conn:
@@ -2407,7 +2459,7 @@ def _detectar_calles_baseline(baseline_id: str, extender: bool = True) -> list[d
         cn = normalizar_calle(calle)
         if not cn:
             continue
-        g = grupos.setdefault(cn, {"calle": calle, "calle_norm": cn, "n": 0,
+        g = grupos.setdefault(cn, {"calle": _calle_display(calle), "calle_norm": cn, "n": 0,
                                    "num_min": None, "num_max": None})
         g["n"] += 1
         m = re.search(r"\d+", normalizar_numero(numero) or "")
@@ -2419,10 +2471,8 @@ def _detectar_calles_baseline(baseline_id: str, extender: bool = True) -> list[d
     for g in grupos.values():
         if g["num_min"] is None:
             g["num_min"], g["num_max"] = 0, 0
-        if extender and g["num_max"]:
-            # tope ampliado: +20% (mín. +50), redondeado a 10
-            top = max(int(g["num_max"] * 1.2), g["num_max"] + 50)
-            g["num_max"] = int(round(top / 10.0) * 10)
+        elif cuadras:
+            g["num_min"], g["num_max"] = _cuadra(g["num_min"], g["num_max"])
         out.append(g)
     out.sort(key=lambda g: g["n"], reverse=True)
     return out
@@ -2515,11 +2565,12 @@ async def actualizacion_crear_survey_calles(
         assert isinstance(lista, list) and lista
     except Exception:
         return JSONResponse({"ok": False, "error": "Lista de calles inválida"}, status_code=400)
-    # normalizar/validar cada entrada
+    # normalizar/validar cada entrada. calle_norm se RECALCULA del nombre (que puede venir
+    # editado/lindo) → matchea igual; el rango se snapea a CUADRAS COMPLETAS de 100.
     scope = []
     for c in lista:
         cl = (c.get("calle") or "").strip()
-        cn = (c.get("calle_norm") or normalizar_calle(cl)).strip()
+        cn = normalizar_calle(cl)
         if not cn:
             continue
         try:
@@ -2528,6 +2579,7 @@ async def actualizacion_crear_survey_calles(
             mn, mx = 0, 0
         if mx and mx < mn:
             mn, mx = mx, mn
+        mn, mx = _cuadra(mn or 1, mx or mn or 1)
         scope.append({"calle": cl or cn, "calle_norm": cn, "num_min": mn, "num_max": mx})
     if not scope:
         return JSONResponse({"ok": False, "error": "Ninguna calle válida"}, status_code=400)
