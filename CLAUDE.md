@@ -418,7 +418,25 @@ dibuja como **cuadrados grises con la cantidad de UF en número** — y el opera
 in-app** (Leaflet-Geoman) el polígono de la **nueva zona** (sector) sobre ellos, mientras
 sigue viendo todo el relevamiento viejo. Ese polígono queda como `regions.zone_geojson` (la
 nueva zona a relevar) y se crea el survey en `stopped`, listo para ▶ Iniciar — se comporta
-como cualquier relevamiento normal. **Comparación viejo/nuevo sobre el mapa:** el survey
+como cualquier relevamiento normal.
+
+**Definir la zona por CALLE + RANGO DE ALTURAS (modo alternativo a dibujar):** tras
+geocodificar, el wizard ofrece dos modos: "⬚ Dibujar zona" (el de arriba) y **"🛣️ Por calle +
+rango (autodetectado)"**. En el segundo, `GET /api/baselines/{id}/calles`
+(`_detectar_calles_baseline`) agrupa el relevamiento anterior por calle normalizada
+(`agents/direccion_norm.normalizar_calle`) y saca el **rango de numeración** (min/max), con el
+**tope extendido** (+20%, mín +50) para captar obra nueva. El operador edita esa tabla
+(rangos, excluir/agregar calles) y confirma → `POST …/crear-survey-calles` construye un
+**polígono de descarga** (`_poligono_de_calles`: **una** consulta Overpass de todas las vías
+del bbox de los puntos, matcheadas por núcleo de nombre con `baseline_interp._core_calle`,
+buffereadas ~55 m) que queda como `regions.zone_geojson`, y guarda la lista en
+**`surveys.scope_calles`** (JSONB, migración 040). El relevamiento baja por ese polígono y,
+**ya con las direcciones (BCI)**, el agente **`ScopeCallesFilter`** (rpc `scope_calles_filter`,
+paso del `VGPipelineRunner` tras BCIParser) **borra las parcelas cuya calle no esté en el scope
+o cuyo número quede fuera del rango** (conserva las de calle NULL). Así el alcance es **estricto
+por calle+altura, no por polígono dibujado**. Ver memoria [[project_scope_calles]].
+
+**Comparación viejo/nuevo sobre el mapa:** el survey
 queda vinculado al baseline (`surveys.baseline_id`, migración 024); el **mapa del survey
 grafica el relevamiento anterior por debajo** de las parcelas nuevas (pane z-index 350 < 400)
 como **marcadores blancos con borde violeta**: un marcador por ubicación (agrupado por

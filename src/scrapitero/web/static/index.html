@@ -439,12 +439,26 @@
             <div class="form-hint" style="margin-bottom:.3rem">🕓 Detalle en vivo (fecha/hora de cada paso del geocoding)</div>
             <div class="actlog-lines" id="actu-log"></div>
           </div>
+          <div id="actu-modo-wrap" style="display:none;margin-top:.7rem">
+            <div class="form-hint" style="margin-bottom:.4rem">¿Cómo definís la zona del relevamiento nuevo?</div>
+            <label style="margin-right:1rem"><input type="radio" name="actu-modo" value="dibujar" checked onchange="actuSetModoZona('dibujar')"> ⬚ Dibujar zona en el mapa</label>
+            <label><input type="radio" name="actu-modo" value="calles" onchange="actuSetModoZona('calles')"> 🛣️ Por calle + rango de alturas (autodetectado)</label>
+          </div>
           <div id="actu-mapa-wrap" style="display:none;margin-top:.7rem">
             <p class="form-hint">Dibujá el polígono de la <strong>nueva zona</strong> usando la herramienta de polígono (arriba a la derecha del mapa), sobre los puntos del relevamiento anterior.</p>
             <div id="actu-mapa" style="height:420px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
             <div style="text-align:right;margin-top:.6rem">
               <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
               <button type="button" class="btn btn-primary" id="actu-btn-crear" onclick="actuCrearSurvey()" disabled>Crear actualización</button>
+            </div>
+          </div>
+          <div id="actu-calles-wrap" style="display:none;margin-top:.7rem">
+            <p class="form-hint">Calles + rango de alturas detectados del relevamiento anterior (el tope viene <strong>extendido</strong> para captar obra nueva). Editá rangos, destildá calles o agregá una. El relevamiento cubrirá <strong>exactamente</strong> esas calles dentro de esos números.</p>
+            <div id="actu-calles-tabla" style="max-height:300px;overflow:auto;border:1px solid #1f2937;border-radius:8px;padding:.4rem"></div>
+            <div style="text-align:right;margin-top:.6rem">
+              <button type="button" class="btn btn-outline" onclick="actuAgregarCalle()">＋ Agregar calle</button>
+              <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
+              <button type="button" class="btn btn-primary" id="actu-btn-crear-calles" onclick="actuCrearSurveyCalles(this)">Crear relevamiento</button>
             </div>
           </div>
           <div id="actu-msg" style="margin-top:.5rem;font-size:.8rem"></div>
@@ -571,8 +585,10 @@ function actuReset() {
   if (actuState.map) { actuState.map.remove(); actuState.map = null; }
   actuState.baselineId = actuState.regionId = actuState.drawnLayer = null;
   actuState.logEntries = []; actuState.logLastId = 0;
+  actuState.calles = []; actuState.callesCargadas = false; actuState.puntos = [];
   ['actu-mapeo'].forEach(id => document.getElementById(id).innerHTML = '');
-  ['actu-paso2','actu-progreso','actu-log-wrap','actu-mapa-wrap'].forEach(id => document.getElementById(id).style.display = 'none');
+  ['actu-paso2','actu-progreso','actu-log-wrap','actu-modo-wrap','actu-mapa-wrap','actu-calles-wrap']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
   document.getElementById('actu-msg').textContent = '';
 }
 
@@ -677,7 +693,10 @@ async function actuPollGeocoding() {
           • ${fmt(d.total)} importadas · <b>${fmt(d.geocodificadas)} ubicadas</b>${d.reusadas ? ` (${fmt(d.reusadas)} del caché)` : ''}${d.fallidas ? ` · <span style="color:#f59e0b">${fmt(d.fallidas)} sin ubicar</span>` : ''}<br>
           • ${fmt(distintas)} ubicaciones distintas en el mapa${compartidos > 0 ? ` — ${fmt(compartidos)} direcciones comparten coordenada (repetidas por unidad o geocoding a nivel calle); se abren en abanico para verlas todas` : ''}.
         </div>`;
+      actuState.puntos = pts;
+      document.getElementById('actu-modo-wrap').style.display = '';
       actuRenderMapa(d.puntos || []);
+      actuSetModoZona('dibujar');
       return;
     }
   } catch(err) {
@@ -685,6 +704,69 @@ async function actuPollGeocoding() {
     return;
   }
   actuState.pollTimer = setTimeout(actuPollGeocoding, 2000);
+}
+
+// Alterna entre "dibujar polígono" y "por calle + rango".
+function actuSetModoZona(modo) {
+  const mapa = document.getElementById('actu-mapa-wrap');
+  const calles = document.getElementById('actu-calles-wrap');
+  if (modo === 'calles') {
+    mapa.style.display = 'none'; calles.style.display = '';
+    if (!actuState.callesCargadas) actuLoadCalles();
+  } else {
+    calles.style.display = 'none'; mapa.style.display = '';
+    if (actuState.map) setTimeout(() => actuState.map.invalidateSize(), 60);
+  }
+}
+
+async function actuLoadCalles() {
+  const cont = document.getElementById('actu-calles-tabla');
+  cont.innerHTML = '<span class="alog-empty">Detectando calles…</span>';
+  try {
+    const d = await (await fetch(`/api/baselines/${actuState.baselineId}/calles`)).json();
+    if (!d.ok) { cont.innerHTML = `<span style="color:#b91c1c">⚠ ${escHtml(d.error || 'error')}</span>`; return; }
+    actuState.calles = d.calles || [];
+    actuState.callesCargadas = true;
+    actuRenderCallesTabla();
+  } catch(err) { cont.innerHTML = `<span style="color:#b91c1c">Error de red: ${escHtml(err.message)}</span>`; }
+}
+
+function actuRenderCallesTabla() {
+  const cont = document.getElementById('actu-calles-tabla');
+  if (!actuState.calles.length) { cont.innerHTML = '<span class="alog-empty">No se detectaron calles.</span>'; return; }
+  const filas = actuState.calles.map((c, i) => `
+    <div style="display:flex;align-items:center;gap:.4rem;padding:.15rem 0;font-size:.8rem">
+      <input type="checkbox" ${c.incluir === false ? '' : 'checked'} onchange="actuState.calles[${i}].incluir=this.checked">
+      <input type="text" value="${escHtml(c.calle || '')}" style="flex:1;min-width:140px" onchange="actuState.calles[${i}].calle=this.value">
+      <input type="number" value="${c.num_min ?? 0}" style="width:70px" title="desde" onchange="actuState.calles[${i}].num_min=+this.value">
+      <span>–</span>
+      <input type="number" value="${c.num_max ?? 0}" style="width:70px" title="hasta" onchange="actuState.calles[${i}].num_max=+this.value">
+      <span style="color:#9ca3af;font-size:.72rem">${c.n || ''} dir</span>
+    </div>`).join('');
+  cont.innerHTML = filas;
+}
+
+function actuAgregarCalle() {
+  actuState.calles = actuState.calles || [];
+  actuState.calles.push({ calle: '', num_min: 0, num_max: 0, n: 0, incluir: true });
+  actuRenderCallesTabla();
+}
+
+async function actuCrearSurveyCalles(btn) {
+  const seleccion = (actuState.calles || []).filter(c => c.incluir !== false && (c.calle || '').trim());
+  const msg = document.getElementById('actu-msg');
+  if (!seleccion.length) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí al menos una calle.'; return; }
+  btn.disabled = true; btn.textContent = '⟳ Construyendo zona (OSM, ~1 min)…';
+  msg.style.color = '#6b7280'; msg.textContent = 'Detectando la geometría de las calles en OSM y creando el relevamiento…';
+  const fd = new FormData();
+  fd.append('calles', JSON.stringify(seleccion.map(c => ({
+    calle: c.calle, calle_norm: c.calle_norm, num_min: c.num_min, num_max: c.num_max }))));
+  try {
+    const d = await (await fetch(`/api/baselines/${actuState.baselineId}/crear-survey-calles`, { method: 'POST', body: fd })).json();
+    if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = 'Crear relevamiento'; return; }
+    msg.style.color = '#166534'; msg.textContent = `✓ Relevamiento creado sobre ${d.calles} calles. Iniciálo desde la lista.`;
+    setTimeout(() => { toggleForm(); loadSurveys(); }, 1200);
+  } catch(err) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; btn.disabled = false; btn.textContent = 'Crear relevamiento'; }
 }
 
 function actuRenderMapa(puntos) {

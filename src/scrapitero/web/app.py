@@ -2389,6 +2389,211 @@ async def actualizacion_crear_survey(
     return JSONResponse({"ok": True, "survey_id": survey_id, "region_id": region_id})
 
 
+# ── Actualización por CALLE + RANGO DE ALTURAS (autodetectado) ──────────────────
+
+def _detectar_calles_baseline(baseline_id: str, extender: bool = True) -> list[dict]:
+    """Autodetecta las calles + rango de numeración del relevamiento anterior.
+    Agrupa `baseline_direcciones` por calle normalizada y saca min/max del número.
+    `extender`=True amplía el tope para captar obra nueva en la misma cuadra."""
+    from scrapitero.agents.direccion_norm import normalizar_calle, normalizar_numero
+    engine = get_engine()
+    with engine.connect() as conn:
+        filas = conn.execute(text("""
+            SELECT calle, numero FROM baseline_direcciones
+            WHERE baseline_id = :bid AND calle IS NOT NULL AND calle <> ''
+        """), {"bid": baseline_id}).fetchall()
+    grupos: dict[str, dict] = {}
+    for calle, numero in filas:
+        cn = normalizar_calle(calle)
+        if not cn:
+            continue
+        g = grupos.setdefault(cn, {"calle": calle, "calle_norm": cn, "n": 0,
+                                   "num_min": None, "num_max": None})
+        g["n"] += 1
+        m = re.search(r"\d+", normalizar_numero(numero) or "")
+        if m:
+            v = int(m.group(0))
+            g["num_min"] = v if g["num_min"] is None else min(g["num_min"], v)
+            g["num_max"] = v if g["num_max"] is None else max(g["num_max"], v)
+    out = []
+    for g in grupos.values():
+        if g["num_min"] is None:
+            g["num_min"], g["num_max"] = 0, 0
+        if extender and g["num_max"]:
+            # tope ampliado: +20% (mín. +50), redondeado a 10
+            top = max(int(g["num_max"] * 1.2), g["num_max"] + 50)
+            g["num_max"] = int(round(top / 10.0) * 10)
+        out.append(g)
+    out.sort(key=lambda g: g["n"], reverse=True)
+    return out
+
+
+def _buffer_grados(geoms: list, metros: float, lat: float):
+    """Une y buffea geometrías (lat/lng) por ~`metros`, en grados (corrige por latitud).
+    Devuelve una geometría shapely. El polígono es de DESCARGA (generoso) → el filtro
+    estricto por dirección hace la precisión, así que la aproximación en grados alcanza."""
+    import math
+    from shapely.ops import unary_union
+    deg = metros / 111000.0
+    u = unary_union(geoms)
+    # buffer isotrópico en grados; la distorsión lng a lat ~-15° es chica (cos≈0.96)
+    return u.buffer(deg / max(math.cos(math.radians(lat)), 0.3)).buffer(0)
+
+
+def _poligono_de_calles(calles: list[dict], puntos: list[tuple], buffer_m: float = 55.0) -> Optional[dict]:
+    """Construye el polígono de DESCARGA: geometría OSM de cada calle (recortada al bbox de
+    los puntos del baseline + margen) buffereada, + buffer de los puntos como respaldo.
+    Devuelve un GeoJSON (Polygon/MultiPolygon) o None si no hay nada."""
+    from shapely.geometry import LineString, Point, mapping
+    from scrapitero.agents.baseline_interp import _core_calle
+    from scrapitero.agents.osm_building_fetcher import _fetch_overpass
+
+    if not puntos:
+        return None
+    lats = [p[0] for p in puntos]; lngs = [p[1] for p in puntos]
+    s, n, w, e = min(lats), max(lats), min(lngs), max(lngs)
+    mlat = (s + n) / 2.0
+    mrg = 0.012  # ~1.3 km de margen para captar el extremo de las calles (obra nueva)
+    bbox = (s - mrg, w - mrg, n + mrg, e + mrg)   # Overpass: (south,west,north,east)
+
+    import difflib
+    geoms = [Point(ln, la) for la, ln in puntos]   # respaldo: los puntos del anterior
+    cores = [cc for cc in (_core_calle(c.get("calle") or c.get("calle_norm") or "")
+                           for c in calles) if cc]
+
+    def _matchea(nm: str) -> bool:
+        return any(difflib.SequenceMatcher(None, nm, core).ratio() >= 0.82
+                   or core in nm or nm in core for core in cores)
+
+    # UNA sola consulta: todas las vías con nombre del bbox; matcheo local por núcleo.
+    q = (f'[out:json][timeout:90];way[highway][name]'
+         f'({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});out geom;')
+    try:
+        data = _fetch_overpass(q)
+    except Exception as exc:  # noqa: BLE001 — best-effort: si OSM falla, polígono = buffer de puntos
+        logger.warning(f"scope-calles: Overpass falló ({exc}); polígono solo con puntos del baseline")
+        data = {"elements": []}
+    for el in (data.get("elements") or []):
+        if el.get("type") != "way" or not el.get("geometry"):
+            continue
+        nm = _core_calle(el.get("tags", {}).get("name", ""))
+        if not nm or not _matchea(nm):
+            continue
+        pts = [(g["lon"], g["lat"]) for g in el["geometry"] if "lat" in g and "lon" in g]
+        if len(pts) >= 2:
+            geoms.append(LineString(pts))
+    if not geoms:
+        return None
+    poly = _buffer_grados(geoms, buffer_m, mlat)
+    return mapping(poly)
+
+
+@app.get("/api/baselines/{baseline_id}/calles")
+async def baseline_calles(baseline_id: str) -> JSONResponse:
+    """Calles + rango de alturas autodetectados del relevamiento anterior (tabla editable)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        ok = conn.execute(text("SELECT 1 FROM baselines WHERE baseline_id = :b"),
+                          {"b": baseline_id}).scalar()
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
+    calles = await asyncio.to_thread(_detectar_calles_baseline, baseline_id, True)
+    return JSONResponse({"ok": True, "calles": calles, "total": len(calles)})
+
+
+@app.post("/api/baselines/{baseline_id}/crear-survey-calles")
+async def actualizacion_crear_survey_calles(
+    baseline_id: str,
+    calles: str = Form(...),     # JSON: lista editada [{calle, calle_norm, num_min, num_max}]
+) -> JSONResponse:
+    """Crea el survey en modo CALLE+RANGO: construye el polígono de descarga (geometría OSM
+    de las calles + puntos del baseline) → zone_geojson, y guarda `scope_calles` (filtro
+    estricto que aplica ScopeCallesFilter tras el BCI)."""
+    from scrapitero.agents.direccion_norm import normalizar_calle
+    try:
+        lista = json.loads(calles)
+        assert isinstance(lista, list) and lista
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Lista de calles inválida"}, status_code=400)
+    # normalizar/validar cada entrada
+    scope = []
+    for c in lista:
+        cl = (c.get("calle") or "").strip()
+        cn = (c.get("calle_norm") or normalizar_calle(cl)).strip()
+        if not cn:
+            continue
+        try:
+            mn = int(c.get("num_min") or 0); mx = int(c.get("num_max") or 0)
+        except (TypeError, ValueError):
+            mn, mx = 0, 0
+        if mx and mx < mn:
+            mn, mx = mx, mn
+        scope.append({"calle": cl or cn, "calle_norm": cn, "num_min": mn, "num_max": mx})
+    if not scope:
+        return JSONResponse({"ok": False, "error": "Ninguna calle válida"}, status_code=400)
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        base = conn.execute(text(
+            "SELECT region_id, nombre FROM baselines WHERE baseline_id = :bid"),
+            {"bid": baseline_id}).fetchone()
+        if not base:
+            return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
+        region_id, nombre = base[0], base[1]
+        puntos = [(float(r[0]), float(r[1])) for r in conn.execute(text("""
+            SELECT lat, lng FROM baseline_direcciones
+            WHERE baseline_id = :bid AND lat IS NOT NULL
+        """), {"bid": baseline_id}).fetchall()]
+    if not puntos:
+        return JSONResponse({"ok": False, "error":
+                             "El relevamiento anterior no tiene direcciones geocodificadas"},
+                            status_code=400)
+
+    geojson = await asyncio.to_thread(_poligono_de_calles, scope, puntos)
+    if not geojson:
+        return JSONResponse({"ok": False, "error":
+                             "No se pudo construir la zona de las calles (OSM no respondió y "
+                             "no hay puntos suficientes)"}, status_code=422)
+    geojson_str = json.dumps({"type": "Feature", "geometry": geojson, "properties": {}})
+    try:
+        bbox = _bbox_from_geojson(geojson)
+    except Exception as ex:
+        return JSONResponse({"ok": False, "error": f"polígono inválido: {ex}"}, status_code=500)
+
+    cc_lat = (bbox["south"] + bbox["north"]) / 2.0
+    cc_lng = (bbox["west"] + bbox["east"]) / 2.0
+    from scrapitero.agents import geo
+    with engine.connect() as conn:
+        cc_actual = conn.execute(text(
+            "SELECT country_code FROM regions WHERE region_id = :rid"), {"rid": region_id}).scalar()
+    country_code = cc_actual or await asyncio.to_thread(geo.detect_country, cc_lat, cc_lng)
+    municipio = await asyncio.to_thread(geo.detect_municipio_br, cc_lat, cc_lng) \
+        if country_code == "BRA" else None
+
+    survey_id = str(uuid.uuid4())
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE regions SET zone_geojson = :gj, bbox_wkt = :bbox,
+                    country_code = COALESCE(country_code, :cc),
+                    municipio_codigo = COALESCE(municipio_codigo, :mun)
+                WHERE region_id = :rid
+            """), {"gj": geojson_str, "bbox": _bbox_to_wkt(bbox), "cc": country_code,
+                   "mun": municipio, "rid": region_id})
+            conn.execute(text("""
+                INSERT INTO surveys (survey_id, region_id, status, baseline_id, scope_calles)
+                VALUES (:sid, :rid, 'stopped', :bid, CAST(:scope AS jsonb))
+            """), {"sid": survey_id, "rid": region_id, "bid": baseline_id,
+                   "scope": json.dumps(scope)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    logger.info(f"Actualización «{nombre}» (modo calle+rango): survey {survey_id} creado sobre "
+                f"{region_id} con {len(scope)} calles")
+    return JSONResponse({"ok": True, "survey_id": survey_id, "region_id": region_id,
+                         "calles": len(scope)})
+
+
 @app.get("/api/surveys/{survey_id}/comparativa/opciones")
 async def comparativa_opciones(survey_id: str) -> JSONResponse:
     """Términos disponibles para 'Comparar con…': surveys anteriores de la misma

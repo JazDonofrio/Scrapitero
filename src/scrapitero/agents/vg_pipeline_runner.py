@@ -31,6 +31,7 @@ from scrapitero.agents import (
     hotel_fetcher,
     hotel_habitaciones_llm,
     parcela_categoria,
+    scope_calles_filter,
     shopping_fetcher,
     smartgis_fetcher,
     varzea_bci_fetcher,
@@ -150,6 +151,11 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
          lambda s: bci_parser.BCIParserInput(
              region_id=input.region_id, survey_id=input.survey_id),
          None, False),
+        # Modo "actualización por calle+rango": ya con las direcciones (BCI), acotar el survey
+        # a las calles/rangos del scope (no-op si el survey no tiene scope_calles). Best-effort.
+        ("scope_calles_filter", scope_calles_filter.run,
+         lambda s: scope_calles_filter.ScopeCallesInput(survey_id=input.survey_id),
+         None, True),
         ("establecimiento_agrupador", establecimiento_agrupador.run,
          lambda s: establecimiento_agrupador.AgrupadorInput(
              region_id=input.region_id, survey_id=input.survey_id),
