@@ -108,9 +108,25 @@ def _dist_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * 6371000.0 * asin(sqrt(a))
 
 
+# Palabras genéricas/de ruido que NO distinguen un hotel de otro (PT/ES): se ignoran al
+# comparar nombres para que el núcleo distintivo matchee (ej. "HOTEL SLAVIERO SLIM" vs
+# "Slaviero Slim Aeroporto" → ambos núcleo {slaviero, slim}).
+_GENERICOS_HOTEL = {
+    "hotel", "hoteis", "hotels", "motel", "pousada", "pousadas", "flat", "apart", "aparthotel",
+    "pensao", "resort", "hostel", "albergue", "inn", "suites", "suite", "hospedagem",
+    "ltda", "me", "epp", "eireli", "da", "de", "do", "dos", "das", "e",
+}
+
+
+def _tokens_sig(n: str) -> set:
+    """Tokens distintivos del nombre (sin palabras genéricas ni de 1 letra)."""
+    return {t for t in n.split() if t not in _GENERICOS_HOTEL and len(t) > 1}
+
+
 def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
-    """¿Son el mismo nombre de hotel? Igual normalizado, o uno contenido en el otro por
-    tokens (p.ej. 'fly hotel' ⊆ 'fly hotel mt'), o ratio difflib ≥ 0.82."""
+    """¿Son el mismo nombre de hotel? Igual normalizado; uno contenido en el otro por tokens;
+    o, **ignorando palabras genéricas** (hotel/pousada/…), el núcleo distintivo de uno está
+    contenido en el del otro o comparten ≥2 tokens distintivos; o ratio difflib ≥ 0.82."""
     import difflib
     na, nb = _norm(a), _norm(b)
     if not na or not nb:
@@ -119,6 +135,9 @@ def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
         return True
     ta, tb = set(na.split()), set(nb.split())
     if ta and tb and (ta <= tb or tb <= ta):
+        return True
+    sa, sb = _tokens_sig(na), _tokens_sig(nb)
+    if sa and sb and (sa <= sb or sb <= sa or len(sa & sb) >= 2):
         return True
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
 
