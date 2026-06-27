@@ -178,7 +178,10 @@ def _registro(headers: list[str], fila: list[str]) -> Optional[dict]:
         # dirección: logradouro propio > endereço comercial > endereço (Receita)
         "logr": _pick(col("logradouro"), col("endereco completo comercial"),
                       col("endereco completo", "endereco")),
-        "num": col("numero",),
+        # Cadastur NO tiene columna de número de calle (las "Número de…" son CNPJ /
+        # certificado). El número, si existe, va dentro del logradouro → se extrae en el
+        # dedupe con separar_numero. Acá numero=None siempre.
+        "num": None,
         "bairro": col("bairro",),
         "compl": col("complemento",),
         "cep": col("cep",),
@@ -187,6 +190,9 @@ def _registro(headers: list[str], fila: list[str]) -> Optional[dict]:
     cnpj = re.sub(r"\D", "", cell(ci["cnpj"]))[:20]
     if not cnpj:
         return None
+    # El "Endereço Completo" del xlsx es un blob ("Rua X 50 ... CEP: 78110900 MT"): cortamos
+    # en "CEP:" para quedarnos con la calle (el CSV cadasturpj ya trae el logradouro limpio).
+    logr = re.split(r"\s*-?\s*CEP[:\s]", cell(ci["logr"]), maxsplit=1)[0].strip()
     return {
         "cnpj": cnpj,
         "razao_social": cell(ci["razao"]) or None,
@@ -197,7 +203,7 @@ def _registro(headers: list[str], fila: list[str]) -> Optional[dict]:
         "uh": _entero(cell(ci["uh"])),
         "leitos": _entero(cell(ci["leitos"])),
         "situacao": cell(ci["sit"])[:60] or None,
-        "logradouro": cell(ci["logr"]) or None,
+        "logradouro": logr or None,
         "numero": cell(ci["num"])[:30] or None,
         "bairro": cell(ci["bairro"])[:160] or None,
         "complemento": cell(ci["compl"]) or None,

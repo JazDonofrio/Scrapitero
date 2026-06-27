@@ -142,11 +142,33 @@ def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
 
 
+def _clave_dir(h: dict) -> Optional[str]:
+    """Clave de dirección normalizada (calle|número) para identificar el MISMO hotel por
+    **igual dirección** entre fuentes, sin importar la distancia del geocoding. None si no
+    hay número (no se deduplica por calle sola, evita fusionar hoteles distintos de la calle)."""
+    from scrapitero.agents.direccion_norm import clave_direccion, separar_numero
+    logr, num = (h.get("logradouro") or "").strip(), (h.get("numero") or "").strip()
+    if logr and num:
+        calle, numero = logr, num
+    else:
+        # parsear calle+número de la dirección completa (separar_numero descarta el
+        # complemento/ciudad que sigue al número → no contamina la calle)
+        calle, numero = separar_numero(h.get("direccion") or logr)
+    k = clave_direccion(calle, numero)
+    return k if (k and k.rsplit("|", 1)[-1]) else None
+
+
 def _mismo_hotel(a: dict, b: dict, max_dist_m: float) -> bool:
-    """Dos registros = el mismo hotel. Mismo CNPJ (cuando ambos lo tienen) ⇒ sí. Si no
-    (Google no trae CNPJ), nombre similar + a menos de `max_dist_m` metros."""
+    """Dos registros = el mismo hotel:
+      1. mismo CNPJ (cuando ambos lo tienen);
+      2. **igual dirección** (calle+número normalizados) — el criterio principal cross-fuente,
+         independiente de las coordenadas (cada fuente geocodifica distinto);
+      3. fallback sin lo anterior: nombre similar + a menos de `max_dist_m` metros."""
     if a.get("cnpj") and b.get("cnpj"):
         return a["cnpj"] == b["cnpj"]
+    ka, kb = _clave_dir(a), _clave_dir(b)
+    if ka and kb and ka == kb:        # igual dirección ⇒ mismo hotel (sea cual sea la distancia)
+        return True
     if a.get("lat") is None or b.get("lat") is None:
         return False
     return (_nombre_similar(a.get("nombre"), b.get("nombre"))
@@ -612,20 +634,27 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
     _FUENTE_PRIO = {"cadastur": 3, "receita": 2, "osm": 1, "google": 0}
 
     def _merge_into(g: dict, h: dict) -> None:
-        if not g["uh"] and h["uh"]:
-            g["hab_fuente"] = h.get("hab_fuente")
-        g["uh"] = g["uh"] or h["uh"]
-        g["leitos"] = g["leitos"] or h["leitos"]
+        h_mejor = _FUENTE_PRIO.get(h["fuente"], 0) > _FUENTE_PRIO.get(g["fuente"], 0)
+        # Habitaciones: manda la fuente MÁS confiable (Cadastur UH real > estimación IA de
+        # Google). Si la más confiable no tiene dato, se completa con la otra.
+        if h["uh"] and (h_mejor or not g["uh"]):
+            g["uh"], g["hab_fuente"] = h["uh"], h.get("hab_fuente")
+            g["leitos"] = h["leitos"] or g["leitos"]
+        else:
+            g["leitos"] = g["leitos"] or h["leitos"]
         g["estrellas"] = g["estrellas"] or h["estrellas"]
         g["cnpj"] = g["cnpj"] or h["cnpj"]
-        g["situacion"] = g["situacion"] or h["situacion"]
         g["business_status"] = g.get("business_status") or h.get("business_status")
         g["cerrado"] = g["cerrado"] or h["cerrado"]
-        g["direccion"] = g.get("direccion") or h.get("direccion")
         g["telefono"] = g.get("telefono") or h.get("telefono")
-        # la fuente de mayor prioridad manda (Cadastur tiene UHs; Receita situação oficial)
-        if _FUENTE_PRIO.get(h["fuente"], 0) > _FUENTE_PRIO.get(g["fuente"], 0):
-            g["fuente"] = h["fuente"]
+        if h_mejor:
+            # identidad de la fuente más confiable (Cadastur > Receita > OSM > Google)
+            for k in ("nombre", "direccion", "tipo", "situacion", "fuente"):
+                if h.get(k):
+                    g[k] = h[k]
+        else:
+            g["direccion"] = g.get("direccion") or h.get("direccion")
+            g["situacion"] = g["situacion"] or h["situacion"]
 
     grupos: list[dict] = []
     by_cnpj: dict = {}
