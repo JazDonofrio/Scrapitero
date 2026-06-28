@@ -67,6 +67,10 @@ TITULOS = {
     "monsenhor": "mons", "monsenor": "mons", "mons": "mons",
     "padre": "pe", "pe": "pe", "frei": "frei", "fray": "frei",
     "santo": "san", "santa": "sta", "san": "san", "sta": "sta", "sao": "san",
+    # "S" sola antes de un nombre = São (R S BENTO = Rua São Bento). Lo mismo que hace
+    # _calle_display al mostrar el nombre lindo → así el scope (del nombre lindo) matchea
+    # con la dirección cruda. Solo se aplica al token siguiente al tipo de vía.
+    "s": "san",
 }
 
 # Preposiciones/artículos que se ELIMINAN en cualquier posición.

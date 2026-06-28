@@ -2555,6 +2555,13 @@ def _poligono_de_calles(calles: list[dict], pts_por_calle: dict, ancho_m: float 
         seg = None
         if core:
             ls = [way for wc, way in osm_ways if _match(wc, core)]
+            # descartar HOMÓNIMOS de OSM (otra calle con el mismo nombre, lejos): quedarse solo
+            # con las vías cercanas a los puntos de ESTA calle. Sin esto, una "São Bento" a 8 km
+            # podía ganar por ser la más larga y dejar la calle real afuera del corredor.
+            if ls and pts:
+                from shapely.geometry import MultiPoint
+                mp = MultiPoint([(ln, la) for la, ln, _ in pts])
+                ls = [way for way in ls if way.distance(mp) <= 0.0035]   # ~390 m
             if ls:
                 merged = linemerge(ls) if len(ls) > 1 else ls[0]
                 # si quedó MultiLineString (tramos sueltos), usar el más largo
@@ -2573,9 +2580,12 @@ def _poligono_de_calles(calles: list[dict], pts_por_calle: dict, ancho_m: float 
                 elif anc:   # una sola dirección: ± media cuadra (~50 m) sobre la línea
                     a = anc[0][1]; w = 50.0 / 111000.0
                     seg = substring(line, max(0.0, a - w), min(line.length, a + w))
+        # El segmento OSM (cuadra completa) cuando se pudo recortar...
         if seg is not None and not seg.is_empty:
             partes.append(_buffer_grados([seg], half, mlat, cap_style=2))
-        else:   # sin OSM para esta calle → blobs en sus puntos
+        # ...y SIEMPRE los blobs de los puntos de la calle: garantiza que NINGUNA dirección
+        # quede afuera aunque el clip OSM falle o agarre un homónimo (degradación elegante).
+        if pts:
             partes.append(_buffer_grados([Point(ln, la) for la, ln, _ in pts], half, mlat))
 
     partes = [p for p in partes if p and not p.is_empty]
