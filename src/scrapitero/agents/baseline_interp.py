@@ -52,6 +52,11 @@ class BaselineInterpInput(BaseModel):
     # Encadenado del clustering: direcciones de la misma calle a ≤ esto = mismo bloque (mantiene
     # la calle/avenida continua como UN cluster aunque el muestreo sea ralo).
     link_calle_m: float = 1000.0
+    # Cross-check contra geocodebr/CNEFE: si Mapbox ubicó una calle ENTERA a más de esto del
+    # punto que le da CNEFE (fuente catastral oficial), y el punto de CNEFE es más coherente con
+    # el grueso del relevamiento (más cerca del centroide), Mapbox la puso en el lugar equivocado
+    # → toda la calle se reubica al punto de CNEFE (correcto, aunque apile los números).
+    xcheck_geocodebr_m: float = 700.0
 
 
 class BaselineInterpOutput(BaseModel):
@@ -306,6 +311,51 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                 if tg:
                     for rid, p in _mapbox_calle(tg).items():
                         aceptados[rid] = (p[0], p[1], "mapbox")
+
+        # 1.5) Cross-check contra geocodebr/CNEFE: Mapbox a veces ubica una calle ENTERA en el
+        # lugar equivocado (homónimo / barrio errado) — coherente consigo misma, así que la guarda
+        # por-calle (3.5) no la agarra. CNEFE (catastral oficial) es la verdad de terreno para la
+        # UBICACIÓN de la calle (aunque solo dé un punto aproximado, sin secuencia por número). Si
+        # el núcleo Mapbox de una calle quedó lejos del punto CNEFE y CNEFE es más coherente con el
+        # grueso del relevamiento (más cerca del centroide), reubicamos TODA la calle al punto CNEFE.
+        if aceptados:
+            try:
+                from scrapitero.agents.geocode_forward import geocodebr_lote
+                lats0 = [float(r[3]) for r in rows]; lngs0 = [float(r[4]) for r in rows]
+                cen = (sum(lats0) / len(lats0), sum(lngs0) / len(lngs0))
+                reps, por_cn_rids = [], {}
+                for cn, items in por_calle.items():
+                    acc = [item_by_rid[i[0]] for i in items
+                           if i[0] in aceptados and aceptados[i[0]][2] == "mapbox"]
+                    if not acc:
+                        continue
+                    por_cn_rids[cn] = [i[0] for i in items if (i[5] or "") != "g:numero"]
+                    md = sorted(acc, key=lambda r: _num(r[2]) or 0)[len(acc) // 2]  # fila mediana
+                    reps.append({"id": cn, "logradouro": md[6] or "", "numero": md[2] or "",
+                                 "municipio": (md[8] or ciudad_g or ""), "estado": md[9] or "",
+                                 "bairro": md[7] or "", "cep": md[10] or ""})
+                gb = geocodebr_lote(reps, max_desvio_m=1500.0) if reps else {}
+                relocadas = 0
+                for cn, t in gb.items():
+                    gla, gln = t[0], t[1]
+                    pts = [aceptados[r] for r in por_cn_rids[cn] if r in aceptados]
+                    nla = sum(a[0] for a in pts) / len(pts); nln = sum(a[1] for a in pts) / len(pts)
+                    # Distancia de CNEFE al punto MÁS CERCANO de la calle (no al centroide): una
+                    # avenida larga bien repartida tiene su centroide lejos de cualquier punto único,
+                    # pero CNEFE cae SOBRE la avenida (min chico) → no se toca. Solo cuando hasta el
+                    # punto más cercano está lejos, toda la calle está en el lugar equivocado.
+                    if min(_hav_m(a[0], a[1], gla, gln) for a in pts) <= input.xcheck_geocodebr_m:
+                        continue                                     # CNEFE cae sobre la calle → ok
+                    if _hav_m(gla, gln, *cen) >= _hav_m(nla, nln, *cen):
+                        continue                                     # CNEFE no es más central → no tocar
+                    for rid in por_cn_rids[cn]:                      # reubicar TODA la calle a CNEFE
+                        aceptados[rid] = (gla, gln, "g:numero_aproximado")
+                    relocadas += 1
+                if relocadas:
+                    logger.info(f"baseline_interp: {relocadas} calle(s) reubicadas a geocodebr/CNEFE "
+                                f"(Mapbox las había puesto lejos del relevamiento)")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"baseline_interp: cross-check geocodebr falló: {str(e)[:120]}")
 
         # 2) Línea de OSM para lo que Mapbox no ubicó.
         leftover = [(rid, info[rid][0], info[rid][1], calle_raw.get(info[rid][1]))
