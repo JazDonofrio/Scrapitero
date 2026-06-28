@@ -343,7 +343,13 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
             it = item_by_rid[rid]
             return (float(it[3]), float(it[4])) if it[3] is not None else None
         pos = {rid: p for rid in item_by_rid if (p := _pos(rid))}
-        repos = _inconsistencias_por_calle(por_calle, pos, info, input.soft_calle_m,
+        # Reagrupar por `normalizar_calle` RECALCULADO del nombre crudo (la columna calle_norm
+        # guardada puede ser stale: se computó al importar, antes de mejoras como cortar el LOT).
+        from scrapitero.agents.direccion_norm import normalizar_calle as _ncalle
+        por_calle_g: dict = defaultdict(list)
+        for it in item_by_rid.values():
+            por_calle_g[_ncalle(it[6])].append(it)
+        repos = _inconsistencias_por_calle(por_calle_g, pos, info, input.soft_calle_m,
                                            input.hard_calle_m, input.link_calle_m)
         for rid, (la, ln) in repos.items():
             aceptados[rid] = (la, ln, "interp")
