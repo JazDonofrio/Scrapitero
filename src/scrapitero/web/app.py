@@ -13,7 +13,7 @@ import re
 import threading
 import urllib.request
 import uuid
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -2500,65 +2500,90 @@ def _buffer_grados(geoms: list, metros: float, lat: float, cap_style: int = 1):
     return u.buffer(deg / max(math.cos(math.radians(lat)), 0.3), cap_style=cap_style).buffer(0)
 
 
-def _poligono_de_calles(calles: list[dict], puntos: list[tuple], ancho_m: float = 30.0) -> Optional[dict]:
-    """Construye el polígono de DESCARGA como un **corredor angosto sobre el eje de cada
-    calle** (geometría OSM): paralelas al eje a ±`ancho_m`/2 (default 30 m → 15 m por lado),
-    con caras planas. SmartGIS baja por **intersección**, así que un corredor fino agarra las
-    parcelas que dan al frente de las dos veredas sin arrastrar las de fondo/calles vecinas.
-    Respaldo para calles que OSM no devuelve: blobs finos en los puntos del baseline.
+def _poligono_de_calles(calles: list[dict], pts_por_calle: dict, ancho_m: float = 30.0) -> Optional[dict]:
+    """Construye el polígono de DESCARGA: por CADA calle del scope, recorta su geometría OSM
+    al **rango de números del scope** (cuadras completas) y la buffea ±`ancho_m`/2 (default
+    30 m → 15 m por lado, caras planas). Así cada cuadra se dibuja como un **segmento completo**
+    (aunque haya una sola dirección: se usa el modelo número→posición sobre la polilínea para
+    ubicar las dos puntas de la cuadra). SmartGIS baja por **intersección** → el corredor fino
+    agarra las parcelas que dan al frente de las dos veredas. Respaldo si OSM no devuelve la
+    calle: blobs en los puntos del baseline. `pts_por_calle`: {calle_norm: [(lat,lng,num)]}.
     Devuelve un GeoJSON (Polygon/MultiPolygon) o None."""
     from shapely.geometry import LineString, Point, mapping
+    from shapely.ops import unary_union, linemerge, substring
     from scrapitero.agents.baseline_interp import _core_calle
     from scrapitero.agents.osm_building_fetcher import _fetch_overpass
+    import difflib
 
-    if not puntos:
+    allpts = [(la, ln) for v in pts_por_calle.values() for (la, ln, _n) in v]
+    if not allpts:
         return None
     half = ancho_m / 2.0
-    lats = [p[0] for p in puntos]; lngs = [p[1] for p in puntos]
-    s, n, w, e = min(lats), max(lats), min(lngs), max(lngs)
-    mlat = (s + n) / 2.0
-    mrg = 0.012  # ~1.3 km de margen para captar el extremo de las calles (obra nueva)
-    bbox = (s - mrg, w - mrg, n + mrg, e + mrg)   # Overpass: (south,west,north,east)
+    lats = [p[0] for p in allpts]; lngs = [p[1] for p in allpts]
+    mlat = (sum(lats) / len(lats))
+    mrg = 0.012  # margen Overpass (captar el extremo de las calles)
+    bbox = (min(lats) - mrg, min(lngs) - mrg, max(lats) + mrg, max(lngs) + mrg)
 
-    import difflib
-    lineas = []
-    cores = [cc for cc in (_core_calle(c.get("calle") or c.get("calle_norm") or "")
-                           for c in calles) if cc]
-
-    def _matchea(nm: str) -> bool:
-        return any(difflib.SequenceMatcher(None, nm, core).ratio() >= 0.82
-                   or core in nm or nm in core for core in cores)
-
-    # UNA sola consulta: todas las vías con nombre del bbox; matcheo local por núcleo.
+    # UNA sola consulta: todas las vías con nombre del bbox.
     q = (f'[out:json][timeout:90];way[highway][name]'
          f'({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});out geom;')
     try:
         data = _fetch_overpass(q)
-    except Exception as exc:  # noqa: BLE001 — best-effort: si OSM falla, polígono = blobs de puntos
+    except Exception as exc:  # noqa: BLE001 — best-effort
         logger.warning(f"scope-calles: Overpass falló ({exc}); polígono solo con puntos del baseline")
         data = {"elements": []}
+    osm_ways = []   # (core, LineString)
     for el in (data.get("elements") or []):
         if el.get("type") != "way" or not el.get("geometry"):
             continue
         nm = _core_calle(el.get("tags", {}).get("name", ""))
-        if not nm or not _matchea(nm):
-            continue
-        pts = [(g["lon"], g["lat"]) for g in el["geometry"] if "lat" in g and "lon" in g]
-        if len(pts) >= 2:
-            lineas.append(LineString(pts))
+        ln = [(g["lon"], g["lat"]) for g in el["geometry"] if "lat" in g and "lon" in g]
+        if nm and len(ln) >= 2:
+            osm_ways.append((nm, LineString(ln)))
+
+    def _match(nm, core):
+        return (difflib.SequenceMatcher(None, nm, core).ratio() >= 0.82
+                or core in nm or nm in core)
 
     partes = []
-    if lineas:
-        # corredor con caras PLANAS (paralelas al eje, sin burbujas en las puntas)
-        partes.append(_buffer_grados(lineas, half, mlat, cap_style=2))
-    # respaldo: blobs finos en los puntos del baseline (cubren calles que OSM no devolvió)
-    partes.append(_buffer_grados([Point(ln, la) for la, ln in puntos], half, mlat))
-    from shapely.ops import unary_union
+    for c in calles:
+        cn = c.get("calle_norm") or ""
+        core = _core_calle(c.get("calle") or cn)
+        pts = pts_por_calle.get(cn, [])
+        nmin = c.get("num_min") or 0
+        nmax = c.get("num_max") or 0
+        seg = None
+        if core:
+            ls = [way for wc, way in osm_ways if _match(wc, core)]
+            if ls:
+                merged = linemerge(ls) if len(ls) > 1 else ls[0]
+                # si quedó MultiLineString (tramos sueltos), usar el más largo
+                line = max(merged.geoms, key=lambda g: g.length) if merged.geom_type == "MultiLineString" else merged
+                # anclas número→posición-sobre-la-línea (proyección)
+                anc = sorted(((n, line.project(Point(ln, la))) for la, ln, n in pts if n is not None),
+                             key=lambda t: t[0])
+                if len(anc) >= 2 and anc[0][0] != anc[-1][0]:
+                    (n0, a0), (n1, a1) = anc[0], anc[-1]
+                    def _arc(N):
+                        a = a0 + (N - n0) * (a1 - a0) / (n1 - n0)
+                        return max(0.0, min(line.length, a))
+                    lo, hi = sorted((_arc(nmin), _arc(nmax)))
+                    if hi - lo > 1e-9:
+                        seg = substring(line, lo, hi)
+                elif anc:   # una sola dirección: ± media cuadra (~50 m) sobre la línea
+                    a = anc[0][1]; w = 50.0 / 111000.0
+                    seg = substring(line, max(0.0, a - w), min(line.length, a + w))
+        if seg is not None and not seg.is_empty:
+            partes.append(_buffer_grados([seg], half, mlat, cap_style=2))
+        else:   # sin OSM para esta calle → blobs en sus puntos
+            partes.append(_buffer_grados([Point(ln, la) for la, ln, _ in pts], half, mlat))
+
+    partes = [p for p in partes if p and not p.is_empty]
+    if not partes:
+        return None
     poly = unary_union(partes).buffer(0)
     if poly.is_empty:
         return None
-    # shapely `mapping` devuelve TUPLAS anidadas; json-roundtrip → listas (lo que esperan
-    # `_bbox_from_geojson` y los fetchers al parsear el GeoJSON).
     return json.loads(json.dumps(mapping(poly)))
 
 
@@ -2618,21 +2643,24 @@ async def actualizacion_crear_survey_calles(
             return JSONResponse({"ok": False, "error": "Baseline no encontrado"}, status_code=404)
         region_id, nombre = base[0], base[1]
         filas_pt = conn.execute(text("""
-            SELECT lat, lng, calle FROM baseline_direcciones
+            SELECT lat, lng, calle, numero FROM baseline_direcciones
             WHERE baseline_id = :bid AND lat IS NOT NULL
         """), {"bid": baseline_id}).fetchall()
-    # Respaldo: solo los puntos de las calles del scope (no las excluidas → no agrandan la zona).
+    # Puntos por calle del scope (con número, para recortar la cuadra). Las calles excluidas
+    # no entran → no agrandan la zona.
+    from scrapitero.agents.baseline_interp import _num as _numero
     scope_norms = {c["calle_norm"] for c in scope}
-    puntos = [(float(r[0]), float(r[1])) for r in filas_pt
-              if normalizar_calle(r[2] or "") in scope_norms]
-    if not puntos:   # ninguna coincidencia → usar todos (defensivo)
-        puntos = [(float(r[0]), float(r[1])) for r in filas_pt]
-    if not puntos:
+    pts_por_calle: dict = defaultdict(list)
+    for r in filas_pt:
+        cn = normalizar_calle(r[2] or "")
+        if cn in scope_norms:
+            pts_por_calle[cn].append((float(r[0]), float(r[1]), _numero(r[3])))
+    if not pts_por_calle:
         return JSONResponse({"ok": False, "error":
                              "El relevamiento anterior no tiene direcciones geocodificadas"},
                             status_code=400)
 
-    geojson = await asyncio.to_thread(_poligono_de_calles, scope, puntos, ancho_calle_m)
+    geojson = await asyncio.to_thread(_poligono_de_calles, scope, pts_por_calle, ancho_calle_m)
     if not geojson:
         return JSONResponse({"ok": False, "error":
                              "No se pudo construir la zona de las calles (OSM no respondió y "
