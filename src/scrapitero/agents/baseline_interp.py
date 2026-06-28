@@ -43,14 +43,14 @@ class BaselineInterpInput(BaseModel):
     usar_osm_fallback: bool = True    # calles donde Mapbox apila/falla → geometría OSM (gratis)
     usar_gemini: bool = True          # canonizar nombres de calle no matcheados (cacheado)
     mapbox_max_requests: int = 800    # tope de llamadas Mapbox por corrida
-    # Guarda de consistencia por CEP: las direcciones de un mismo CEP están en la misma cuadra.
-    # Un cluster separado a más de `desvio_calle_m` del principal de su CEP es un geocode al
-    # homónimo equivocado (ej. otra "São Bento" a 8 km) → se reposiciona sobre el CEP real. El
-    # umbral es alto a propósito (3 km): un CEP no abarca eso, pero una avenida larga sí se
-    # extiende 1-2 km legítimamente → así NO se tocan los tramos lejanos de avenidas reales.
-    desvio_calle_m: float = 3000.0
-    # Encadenado del clustering: direcciones del mismo CEP a ≤ esto = mismo bloque (mantiene la
-    # cuadra/avenida continua como UN cluster aunque el muestreo sea ralo).
+    # Guarda de consistencia por calle: una dirección lejos del núcleo de su calle es un error
+    # SOLO si su número cae DENTRO del rango ya poblado (debería estar entre sus vecinas) o está
+    # absurdamente lejos (>`hard_calle_m`). Los números FUERA del rango (arranque/fin de una
+    # avenida larga) NO se tocan. Las marcadas se reponen en su posición POR NÚMERO (interp).
+    soft_calle_m: float = 500.0    # umbral de "lejos del núcleo" (gatilla la evaluación)
+    hard_calle_m: float = 4000.0   # distancia absurda → error aunque el número esté fuera de rango
+    # Encadenado del clustering: direcciones de la misma calle a ≤ esto = mismo bloque (mantiene
+    # la calle/avenida continua como UN cluster aunque el muestreo sea ralo).
     link_calle_m: float = 1000.0
 
 
@@ -103,12 +103,6 @@ def _hav_m(a, b, c, d) -> float:
     return 2 * R * math.asin(math.sqrt(x))
 
 
-def _mediana(vals: list) -> float:
-    s = sorted(vals)
-    n = len(s)
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
-
-
 def _clusters(items: list, link_m: float) -> list:
     """Single-linkage clustering: items=[(rid,(lat,lng))]. Devuelve [[rid,…],…] — componentes
     donde cada punto está a ≤`link_m` de otro del mismo cluster. Así una calle continua
@@ -135,32 +129,45 @@ def _clusters(items: list, link_m: float) -> list:
     return list(comp.values())
 
 
-def _outliers_por_grupo(grupos: dict, pos: dict, info: dict, desvio_m: float,
-                        link_m: float) -> dict:
-    """rid → (núcleo_lat, núcleo_lng) de las direcciones que cayeron en un cluster SEPARADO
-    y lejano del principal de su grupo (homónimo equivocado). El grupo es el **CEP** (ubicación
-    única) o, si no hay, el nombre de calle. Por clustering, NO marca los extremos de una calle
-    larga continua — solo grupos partidos en componentes lejanas (>`desvio_m`)."""
+def _inconsistencias_por_calle(por_calle: dict, pos: dict, info: dict,
+                               soft_m: float, hard_m: float, link_m: float) -> dict:
+    """rid → (lat, lng) PREDICHA por número, para las direcciones de cada calle que están lejos
+    del núcleo Y cuyo número cae dentro del rango ya poblado (deberían estar entre sus vecinas)
+    o a distancia absurda (>hard_m). Reusa el modelo número→posición del núcleo (`_ajuste_lineal`
+    + `_interp_pos`) → las repone en su posición POR NÚMERO. Los números FUERA del rango (arranque
+    /fin de avenida) NO se marcan: son extensiones legítimas, no errores."""
     out: dict = {}
-    for rids in grupos.values():
-        ps = [(rid, pos[rid]) for rid in rids if rid in pos]
-        if len(ps) < 3:
+    for items in por_calle.values():
+        ps = [(it[0], pos[it[0]]) for it in items if it[0] in pos]
+        if len(ps) < 4:
             continue
         cls = _clusters(ps, link_m)
-        if len(cls) < 2:
-            continue                       # calle conectada en un solo bloque → nada que hacer
-        cls.sort(key=len, reverse=True)    # el cluster más grande = núcleo (la mayoría manda)
-        nps = [pos[r] for r in cls[0]]
-        mlat = _mediana([p[0] for p in nps])
-        mlng = _mediana([p[1] for p in nps])
-        for cl in cls[1:]:
-            cm0 = _mediana([pos[r][0] for r in cl])
-            cm1 = _mediana([pos[r][1] for r in cl])
-            if _hav_m(cm0, cm1, mlat, mlng) <= desvio_m:
-                continue                   # cluster separado pero cercano (mismo barrio) → ok
-            for rid in cl:
-                if rid in info:
-                    out[rid] = (mlat, mlng)
+        cls.sort(key=len, reverse=True)
+        main = set(cls[0])                          # núcleo = cluster más grande
+        mainpos = [pos[r] for r in cls[0]]
+        anc: dict = {}                              # número → (num, lat, lng) del núcleo
+        for it in items:
+            if it[0] in main:
+                nn = _num(it[2])
+                if nn is not None:
+                    anc[nn] = (nn, pos[it[0]][0], pos[it[0]][1])
+        anchors = sorted(anc.values())
+        if len(anchors) < 2:
+            continue
+        nmin, nmax = anchors[0][0], anchors[-1][0]
+        slope = _ajuste_lineal(anchors)
+        for it in items:
+            rid = it[0]
+            if rid in main or rid not in pos or rid not in info:
+                continue
+            la, ln = pos[rid]
+            nd = min(_hav_m(la, ln, p[0], p[1]) for p in mainpos)
+            if nd <= soft_m:
+                continue
+            nn = _num(it[2])
+            if (nn is not None and nmin <= nn <= nmax) or nd > hard_m:
+                out[rid] = _interp_pos(nn, anchors, slope) if nn is not None \
+                    else (anchors[0][1], anchors[0][2])
     return out
 
 
@@ -325,43 +332,25 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                     for rid, la, ln in _distribuir_osm(engine, input.baseline_id, pend, rows):
                         aceptados[rid] = (la, ln, "osm_interp")
 
-        # 3.5) Consistencia por calle: TODAS las direcciones de una calle deben quedar juntas.
-        # La que cayó lejos del núcleo (mediana) de SU calle es un geocode al homónimo
-        # equivocado (ej. otra "São Bento") → reposicionar sobre la calle real (OSM) y, si OSM
-        # no la ubica cerca del núcleo, snap al núcleo (mejor que el homónimo a km de distancia).
+        # 3.5) Consistencia por calle: una dirección lejos del núcleo de SU calle cuyo NÚMERO
+        # cae dentro del rango ya poblado (debería estar entre sus vecinas) — o a distancia
+        # absurda — es un geocode equivocado (homónimo / desplazado). Se la repone en su
+        # posición POR NÚMERO (modelo número→posición del núcleo). Los números FUERA del rango
+        # (arranque/fin de avenida) NO se tocan: son extensiones legítimas.
         def _pos(rid):
             if rid in aceptados:
                 return (aceptados[rid][0], aceptados[rid][1])
             it = item_by_rid[rid]
             return (float(it[3]), float(it[4])) if it[3] is not None else None
         pos = {rid: p for rid in item_by_rid if (p := _pos(rid))}
-        # Clave de grupo = CEP (cuadra: un CEP es un área chica → las direcciones que lo
-        # comparten están juntas). Se usa el CEP y no el código/nombre de calle entera porque
-        # una calle larga abarca varios CEP y se extiende legítimamente (km); el CEP no.
-        grupos: dict = defaultdict(list)
-        for rid, it in item_by_rid.items():
-            cep = re.sub(r"\D", "", it[10] or "")
-            grupos[f"cep:{cep}" if len(cep) == 8 else f"calle:{it[1]}"].append(rid)
-        outliers = _outliers_por_grupo(grupos, pos, info, input.desvio_calle_m,
-                                       input.link_calle_m)
-        if outliers:
-            logger.info(f"baseline_interp: {len(outliers)} direcciones lejos del núcleo de su "
-                        f"calle (homónimo) → reposicionar")
-            colocados: set = set()
-            tgt = [(rid, info[rid][0], info[rid][1], calle_raw.get(info[rid][1]))
-                   for rid in outliers if rid in info]
-            if input.usar_osm_fallback and tgt:
-                for rid, la, ln in _distribuir_osm(engine, input.baseline_id, tgt, rows):
-                    nuc = outliers[rid]
-                    # aceptar el OSM SOLO si cae cerca del núcleo (≤ link, no ≤ desvío): así no
-                    # re-cae en el homónimo aunque esté a < desvío del núcleo.
-                    if _hav_m(la, ln, nuc[0], nuc[1]) <= input.link_calle_m:
-                        aceptados[rid] = (la, ln, "osm_interp")
-                        colocados.add(rid)
-            for rid, (mlat, mlng) in outliers.items():
-                if rid not in colocados:
-                    aceptados[rid] = (mlat, mlng, "interp")   # snap al núcleo de la calle
-            out.reposicionadas_calle = len(outliers)
+        repos = _inconsistencias_por_calle(por_calle, pos, info, input.soft_calle_m,
+                                           input.hard_calle_m, input.link_calle_m)
+        for rid, (la, ln) in repos.items():
+            aceptados[rid] = (la, ln, "interp")
+        out.reposicionadas_calle = len(repos)
+        if repos:
+            logger.info(f"baseline_interp: {len(repos)} direcciones desplazadas (número dentro "
+                        f"del rango de su calle) → repuestas en su posición por número")
 
         # 4) Sin ubicar → centro de la ciudad, MARCADO (aproximado), sin inventar la cuadra.
         # No pisar un placement previo bueno (osm_interp/interp) si este run no lo re-ubicó
