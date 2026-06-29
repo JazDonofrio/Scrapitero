@@ -427,14 +427,20 @@ rango (autodetectado)"**. En el segundo, `GET /api/baselines/{id}/calles`
 (`_detectar_calles_baseline`) agrupa el relevamiento anterior por calle normalizada
 (`agents/direccion_norm.normalizar_calle`) y saca el **rango de numeración** (min/max), con el
 **tope extendido** (+20%, mín +50) para captar obra nueva. El operador edita esa tabla
-(rangos, excluir/agregar calles) y confirma → `POST …/crear-survey-calles` construye un
-**polígono de descarga** (`_poligono_de_calles`: **una** consulta Overpass de todas las vías
-del bbox de los puntos, matcheadas por núcleo de nombre con `baseline_interp._core_calle`, y
-construido como un **corredor angosto sobre el eje** de cada calle — ±`ancho_calle_m`/2,
-default 30 m, caras planas/paralelas al eje — porque SmartGIS baja por **intersección**, así
-un corredor fino agarra las parcelas que dan al frente de las dos veredas sin arrastrar las de
-fondo/calles vecinas) que queda como `regions.zone_geojson`, y guarda la lista en
-**`surveys.scope_calles`** (JSONB, migración 040). El relevamiento baja por ese polígono y,
+(rangos, excluir/agregar calles) y **previsualiza** la zona (`POST …/calles/preview`) →
+`POST …/crear-survey-calles` construye el **polígono de descarga** (`_poligono_de_calles`).
+**Garantiza, por CADA dirección, su CUADRA**: un bloque de **100 m de largo × 40 m de ancho**
+(±50 m sobre el eje real de la calle, ±20 m a cada lado) orientado según el eje OSM; la unión
+da el corredor (calles densas → segmento continuo; dirección aislada → igual su cuadra).
+Reusa el **mismo eje OSM cacheado** que el geocoding (`baseline_interp._osm_geometrias` +
+`_stitch`: cosido y sin carriles duplicados; caché `calle_geometria` mig. 041 por ciudad/calle,
+clave = `calle_norm` recomputado) → consistente y sin re-consultar Overpass si la ciudad ya está
+cacheada. Suma un **blob de garantía** de 20 m por punto (si el geocode cae a >20 m del eje no
+queda afuera). SmartGIS baja por **intersección**, así el corredor fino agarra las parcelas de
+las dos veredas. Queda como `regions.zone_geojson` y guarda la lista en
+**`surveys.scope_calles`** (JSONB, migración 040). **La zona autogenerada es EDITABLE**: el
+wizard la muestra en un mapa con Geoman (mover vértices, sumar/quitar polígonos) y `crear-survey-calles`
+acepta `zone_geojson` (el polígono ajustado) como override. El relevamiento baja por ese polígono y,
 **ya con las direcciones (BCI)**, el agente **`ScopeCallesFilter`** (rpc `scope_calles_filter`,
 paso del `VGPipelineRunner` tras BCIParser) **borra las parcelas cuya calle no esté en el scope
 o cuyo número quede fuera del rango** (conserva las de calle NULL). Así el alcance es **estricto
