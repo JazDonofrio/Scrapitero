@@ -29,11 +29,15 @@ from scrapitero.agents import geo
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+# Orden por confiabilidad observada (el primero que responde CON DATOS gana). overpass-api.de y
+# kumi devuelven datos consistentemente; overpass.osm.ch suele responder 200 pero VACÍO (punteó);
+# overpass.private.coffee viene haciendo read-timeout (~130 s) sistemático. Ver _try_mirrors:
+# un 200 vacío sin `remark` no se acepta como éxito — se prueba el próximo mirror.
 OVERPASS_MIRRORS = [
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 ]
 TOR_SOCKS5 = "socks5://127.0.0.1:9050"
 # Mirrors que funcionan via Tor cuando la IP directa está bloqueada
@@ -122,37 +126,55 @@ out geom;
 """
 
 
-def _try_mirrors(query: str, mirrors: list, proxy: str = None) -> dict:
+def _try_mirrors(query: str, mirrors: list, proxy: str = None, timeout: float = None) -> dict:
     last_error = ""
+    empty_fallback = None   # un 200 vacío (sin datos ni remark): mirror que probablemente punteó
     kwargs = {"proxies": proxy} if proxy else {}
+    cli_timeout = (timeout if timeout is not None else OVERPASS_TIMEOUT) + 10
     for mirror in mirrors:
         try:
-            with httpx.Client(follow_redirects=True, timeout=OVERPASS_TIMEOUT + 10, **kwargs) as client:
+            with httpx.Client(follow_redirects=True, timeout=cli_timeout, **kwargs) as client:
                 r = client.post(mirror, data={"data": query}, headers=_HEADERS)
             if r.status_code == 200:
                 via = f" via Tor" if proxy else ""
-                logger.info(f"Overpass OK{via} — {mirror}")
-                return r.json()
-            last_error = f"HTTP {r.status_code} ({mirror})"
-            logger.warning(f"Overpass {last_error}")
+                try:
+                    j = r.json()
+                except (ValueError, TypeError):
+                    j = None
+                # Un 200 con datos (o con `remark`, p.ej. "query timed out") es una respuesta real.
+                # Un 200 VACÍO y sin remark suele ser un mirror que punteó (overpass.osm.ch lo hace):
+                # no lo aceptamos como éxito; probamos el próximo y solo devolvemos vacío si TODOS
+                # coinciden (consulta genuinamente sin resultados).
+                if j is not None and (j.get("elements") or j.get("remark")):
+                    logger.info(f"Overpass OK{via} — {mirror}")
+                    return j
+                if j is not None and empty_fallback is None:
+                    empty_fallback = j
+                last_error = f"200 vacío ({mirror})"
+                logger.warning(f"Overpass {last_error}")
+            else:
+                last_error = f"HTTP {r.status_code} ({mirror})"
+                logger.warning(f"Overpass {last_error}")
         except httpx.HTTPError as exc:
             last_error = f"HTTPError ({mirror}): {exc}"
             logger.warning(f"Overpass {last_error}")
+    if empty_fallback is not None:
+        return empty_fallback   # todos los mirrors coinciden en vacío → genuinamente sin resultados
     return None, last_error
 
 
-def _fetch_overpass(query: str) -> dict:
+def _fetch_overpass(query: str, timeout: float = None) -> dict:
     logger.info("Consultando Overpass API...")
 
     # Intento 1: mirrors directos
-    result = _try_mirrors(query, OVERPASS_MIRRORS)
+    result = _try_mirrors(query, OVERPASS_MIRRORS, timeout=timeout)
     if result and not isinstance(result, tuple):
         return result
 
     # Intento 2: via Tor (si está disponible)
     if _tor_available():
         logger.info("Mirrors directos fallaron — reintentando via Tor...")
-        result = _try_mirrors(query, OVERPASS_MIRRORS_TOR, proxy=TOR_SOCKS5)
+        result = _try_mirrors(query, OVERPASS_MIRRORS_TOR, proxy=TOR_SOCKS5, timeout=timeout)
         if result and not isinstance(result, tuple):
             return result
         _, last_error = result

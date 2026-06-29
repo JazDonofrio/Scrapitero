@@ -234,12 +234,14 @@ def _interp_pos(N: int, anchors: list, slope: tuple) -> tuple:
 @agent_run
 def run(input: BaselineInterpInput) -> BaselineInterpOutput:
     """Ubica las direcciones NO-exactas del relevamiento anterior, en orden de confiabilidad:
-    1) **Mapbox por número** (solo `address`/`street`; descarta resultados a nivel ciudad);
-    2) **línea de OSM** para las que Mapbox apila/no ubica;
-    3) **Gemini** canoniza el nombre de calle no matcheado (ej. "R ORIEL B CAMPOS" →
-       "Rua Oriel Bezerra de Campos", cacheado por calle) y se reintenta Mapbox/OSM;
-    4) lo que ninguna ubica → **centro de la ciudad, marcado** `ciudad` (aproximado, no inventa
-       una posición de calle). Las exactas de geocodebr (`g:numero`) se respetan."""
+    1) **PRIMARIO — eje de calle de OSM**: interpola el número sobre la geometría real de la
+       calle (cacheada por ciudad/calle), anclando en las exactas `g:numero` y desambiguando el
+       homónimo correcto por consenso. Secuencial por construcción → resuelve de raíz el apilado
+       y el desorden del geocoder por-dirección;
+    2) **Mapbox por número** solo para las calles que OSM no tiene/no ubica;
+    3) **Gemini** canoniza el nombre de calle no matcheado y se reintenta OSM/Mapbox;
+    4) lo que ninguna ubica → punto aproximado de **geocodebr/CNEFE** (apilado, ubicación oficial)
+       o, si no, **centro de la ciudad, marcado** `ciudad`. Las exactas `g:numero` se respetan."""
     import httpx
     from collections import defaultdict, Counter
     from scrapitero.agents.baseline_geocoder import (
@@ -303,86 +305,75 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
         return {rid: (a, b) for rid, (a, b) in mb.items()
                 if cc[(round(a, 6), round(b, 6))] < 3}
 
+    # Anclas exactas (g:numero) por calle y punto geocodebr/CNEFE por calle → desambiguan el
+    # homónimo correcto de OSM y orientan el eje. Una sola llamada batch a geocodebr.
+    anclas_cn: dict = defaultdict(list)
+    for r in rows:
+        if (r[5] or "") == "g:numero" and _num(r[2]) is not None:
+            anclas_cn[r[1]].append((_num(r[2]), float(r[3]), float(r[4])))
+    gb_cn: dict = {}
     try:
-        # 1) Mapbox por número con el nombre original.
+        from scrapitero.agents.geocode_forward import geocodebr_lote
+        reps = []
+        for cn, items in por_calle.items():
+            tg = [it for it in items if (it[5] or "") != "g:numero" and _num(it[2]) is not None]
+            if not tg:
+                continue
+            md = sorted(tg, key=lambda r: _num(r[2]))[len(tg) // 2]
+            reps.append({"id": cn, "logradouro": md[6] or "", "numero": md[2] or "",
+                         "municipio": (md[8] or ciudad_g or ""), "estado": md[9] or "",
+                         "bairro": md[7] or "", "cep": md[10] or ""})
+        for cn, t in (geocodebr_lote(reps, max_desvio_m=1500.0) if reps else {}).items():
+            gb_cn[cn] = (t[0], t[1])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"baseline_interp: geocodebr (anclas de consenso) falló: {str(e)[:120]}")
+
+    # bbox para OSM con margen amplio (una calle puede estar mal ubicada por Mapbox).
+    _lats = [float(r[3]) for r in rows]; _lngs = [float(r[4]) for r in rows]
+    bbox = (min(_lats) - 0.01, min(_lngs) - 0.01, max(_lats) + 0.01, max(_lngs) + 0.01)
+
+    def _osm_calle(lineas, cn, targets_rid_num):
+        """Coloca por eje OSM los targets [(rid,num)] de UNA calle. {} si OSM no la tiene/ubica."""
+        if not lineas:
+            return {}
+        pistas = []
+        for rid, _n in targets_rid_num:
+            it = item_by_rid[rid]
+            if it[3] is not None:
+                pistas.append((_num(it[2]), float(it[3]), float(it[4])))
+        if cn in gb_cn:
+            pistas.append((None, gb_cn[cn][0], gb_cn[cn][1]))
+        return _colocar_en_eje(lineas, targets_rid_num, anclas_cn.get(cn, []), pistas)
+
+    try:
+        # 1) PRIMARIO: eje de calle de OSM. Una calle es una línea y las alturas crecen monótonas
+        # sobre ella → interpolar el número da posiciones SECUENCIALES por construcción, respetando
+        # las anclas exactas. Es mucho más confiable que el geocoder por-dirección (que apila/
+        # desordena) y subsume el viejo cross-check (una calle mal ubicada por Mapbox se reubica
+        # sola al eje real). UNA consulta Overpass para toda la zona, cacheada por ciudad/calle.
+        if input.usar_osm_fallback:
+            con_target = [(cn, calle_raw.get(cn)) for cn, items in por_calle.items()
+                          if any((it[5] or "") != "g:numero" for it in items)]
+            geoms = _osm_geometrias(engine, con_target, ciudad_g, bbox)
+            for cn, items in por_calle.items():
+                tg = [(it[0], _num(it[2])) for it in items if (it[5] or "") != "g:numero"]
+                if not tg:
+                    continue
+                for rid, (la, ln) in _osm_calle(geoms.get(cn, []), cn, tg).items():
+                    aceptados[rid] = (la, ln, "osm_interp")
+
+        # 2) Respaldo Mapbox por número SOLO para las calles que OSM no tiene/no ubicó.
         if mapbox_on:
             for cn, items in por_calle.items():
-                tg = [it for it in items if (it[5] or "") != "g:numero"]
+                tg = [it for it in items
+                      if (it[5] or "") != "g:numero" and it[0] not in aceptados]
                 if tg:
                     for rid, p in _mapbox_calle(tg).items():
                         aceptados[rid] = (p[0], p[1], "mapbox")
 
-        # 1.5) Cross-check contra geocodebr/CNEFE: Mapbox a veces ubica una calle ENTERA en el
-        # lugar equivocado (homónimo / barrio errado) — coherente consigo misma, así que la guarda
-        # por-calle (3.5) no la agarra. CNEFE (catastral oficial) es la verdad de terreno para la
-        # UBICACIÓN de la calle (aunque solo dé un punto aproximado, sin secuencia por número). Si
-        # el núcleo Mapbox de una calle quedó lejos del punto CNEFE y CNEFE es más coherente con el
-        # grueso del relevamiento (más cerca del centroide), reubicamos TODA la calle al punto CNEFE.
-        if aceptados:
-            try:
-                from scrapitero.agents.geocode_forward import geocodebr_lote
-                lats0 = [float(r[3]) for r in rows]; lngs0 = [float(r[4]) for r in rows]
-                cen = (sum(lats0) / len(lats0), sum(lngs0) / len(lngs0))
-                reps, por_cn_rids = [], {}
-                for cn, items in por_calle.items():
-                    acc = [item_by_rid[i[0]] for i in items
-                           if i[0] in aceptados and aceptados[i[0]][2] == "mapbox"]
-                    if not acc:
-                        continue
-                    por_cn_rids[cn] = [i[0] for i in items if (i[5] or "") != "g:numero"]
-                    md = sorted(acc, key=lambda r: _num(r[2]) or 0)[len(acc) // 2]  # fila mediana
-                    reps.append({"id": cn, "logradouro": md[6] or "", "numero": md[2] or "",
-                                 "municipio": (md[8] or ciudad_g or ""), "estado": md[9] or "",
-                                 "bairro": md[7] or "", "cep": md[10] or ""})
-                gb = geocodebr_lote(reps, max_desvio_m=1500.0) if reps else {}
-                sospechosas = []
-                for cn, t in gb.items():
-                    gla, gln = t[0], t[1]
-                    pts = [aceptados[r] for r in por_cn_rids[cn] if r in aceptados]
-                    nla = sum(a[0] for a in pts) / len(pts); nln = sum(a[1] for a in pts) / len(pts)
-                    # Distancia de CNEFE al punto MÁS CERCANO de la calle (no al centroide): una
-                    # avenida larga bien repartida tiene su centroide lejos de cualquier punto único,
-                    # pero CNEFE cae SOBRE la avenida (min chico) → no se toca. Solo cuando hasta el
-                    # punto más cercano está lejos, toda la calle es sospechosa de estar mal ubicada.
-                    if min(_hav_m(a[0], a[1], gla, gln) for a in pts) <= input.xcheck_geocodebr_m:
-                        continue                                     # CNEFE cae sobre la calle → ok
-                    if _hav_m(gla, gln, *cen) >= _hav_m(nla, nln, *cen):
-                        continue                                     # CNEFE no es más central → no tocar
-                    sospechosas.append((cn, gla, gln))
-                # Para cada calle sospechosa, OSM es el ÁRBITRO: su geometría (nombre exacto) dice
-                # dónde está REALMENTE la calle y permite interpolar los números secuencialmente.
-                # Mapbox y OSM suelen coincidir (y CNEFE numero_aproximado ser el outlier) → OSM
-                # gana. Solo si OSM no tiene la calle se la reubica al punto (apilado) de CNEFE.
-                relocadas = osm_fix = 0
-                for cn, gla, gln in sospechosas:
-                    osm_pos = []
-                    if input.usar_osm_fallback:
-                        tg = [(rid, _num(item_by_rid[rid][2]), cn, item_by_rid[rid][6])
-                              for rid in por_cn_rids[cn]]
-                        osm_pos = _distribuir_osm(engine, input.baseline_id, tg, rows)
-                    if osm_pos:
-                        for rid, la, ln in osm_pos:
-                            aceptados[rid] = (la, ln, "osm_interp")
-                        osm_fix += 1
-                    else:
-                        for rid in por_cn_rids[cn]:
-                            aceptados[rid] = (gla, gln, "g:numero_aproximado")
-                        relocadas += 1
-                if osm_fix or relocadas:
-                    logger.info(f"baseline_interp: {len(sospechosas)} calle(s) mal ubicadas por "
-                                f"Mapbox → {osm_fix} reinterpoladas sobre OSM, {relocadas} reubicadas "
-                                f"a CNEFE (sin geometría OSM)")
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"baseline_interp: cross-check geocodebr falló: {str(e)[:120]}")
-
-        # 2) Línea de OSM para lo que Mapbox no ubicó.
-        leftover = [(rid, info[rid][0], info[rid][1], calle_raw.get(info[rid][1]))
-                    for rid in info if rid not in aceptados]
-        if leftover and input.usar_osm_fallback:
-            for rid, la, ln in _distribuir_osm(engine, input.baseline_id, leftover, rows):
-                aceptados[rid] = (la, ln, "osm_interp")
-
-        # 3) Gemini: canonizar el nombre de las calles aún sin ubicar y reintentar.
+        # 3) Gemini: canonizar el nombre de las calles aún sin ubicar (ej. "R ORIEL B CAMPOS" →
+        # "Rua Oriel Bezerra de Campos") y reintentar — eje OSM primero (con el nombre canónico,
+        # vía _distribuir_osm que no usa la caché negativa de cn), Mapbox después.
         rem_calles: dict = defaultdict(list)
         for rid in info:
             if rid not in aceptados:
@@ -392,13 +383,14 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                 canon = _gemini_canonico(engine, cn, calle_raw.get(cn), ciudad_g, out)
                 if not canon:
                     continue
-                if mapbox_on:
-                    for rid, p in _mapbox_calle(items, calle_override=canon).items():
-                        aceptados[rid] = (p[0], p[1], "mapbox")
-                pend = [(it[0], _num(it[2]), cn, canon) for it in items if it[0] not in aceptados]
-                if pend and input.usar_osm_fallback:
+                pend = [(it[0], _num(it[2]), cn, canon) for it in items]
+                if input.usar_osm_fallback:
                     for rid, la, ln in _distribuir_osm(engine, input.baseline_id, pend, rows):
                         aceptados[rid] = (la, ln, "osm_interp")
+                if mapbox_on:
+                    falta = [it for it in items if it[0] not in aceptados]
+                    for rid, p in _mapbox_calle(falta, calle_override=canon).items():
+                        aceptados[rid] = (p[0], p[1], "mapbox")
 
         # 3.5) Consistencia por calle: una dirección lejos del núcleo de SU calle cuyo NÚMERO
         # cae dentro del rango ya poblado (debería estar entre sus vecinas) — o a distancia
@@ -426,15 +418,19 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
             logger.info(f"baseline_interp: {len(repos)} direcciones desplazadas (número dentro "
                         f"del rango de su calle) → repuestas en su posición por número")
 
-        # 4) Sin ubicar → centro de la ciudad, MARCADO (aproximado), sin inventar la cuadra.
-        # No pisar un placement previo bueno (osm_interp/interp) si este run no lo re-ubicó
-        # (p.ej. Overpass flakeó): solo mandamos al centro lo que está claramente mal/sin ubicar.
-        if centro:
-            for rid in info:
-                if rid in aceptados:
-                    continue
-                if (item_by_rid[rid][5] or "") in ("osm_interp", "interp"):
-                    continue   # conservar placement previo bueno
+        # 4) Sin ubicar: punto aproximado de geocodebr/CNEFE (apilado, pero en la ubicación
+        # oficial de la calle) si lo hay; si no, centro de la ciudad MARCADO (aproximado, sin
+        # inventar la cuadra). No pisar un placement previo bueno (osm_interp/interp) si este run
+        # no lo re-ubicó (p.ej. Overpass flakeó).
+        for rid in info:
+            if rid in aceptados:
+                continue
+            if (item_by_rid[rid][5] or "") in ("osm_interp", "interp"):
+                continue   # conservar placement previo bueno
+            cn = info[rid][1]
+            if cn in gb_cn:
+                aceptados[rid] = (gb_cn[cn][0], gb_cn[cn][1], "g:numero_aproximado")
+            elif centro:
                 aceptados[rid] = (centro[0], centro[1], "ciudad")
     finally:
         client.close()
@@ -584,3 +580,248 @@ def _distribuir_osm(engine, baseline_id: str, sin_ancla_targets: list, rows: lis
         for (num, rid), p in zip(items, pts):
             updates.append((rid, p[0], p[1]))
     return updates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colocación PRIMARIA por eje de calle (OSM): una calle es una línea y las alturas crecen de
+# forma monótona sobre ella. Interpolar el número sobre el eje real da posiciones secuenciales
+# por construcción — mucho más confiable que el geocoder por-dirección, que apila/desordena.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _merge_lines(geom):
+    """(Multi)LineString → lista de LineStrings continuas (linemerge)."""
+    from shapely.ops import linemerge
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    merged = linemerge(geom)
+    if merged.geom_type == "LineString":
+        return [merged]
+    return [g for g in merged.geoms if g.geom_type == "LineString" and not g.is_empty]
+
+
+def _stitch(lines, max_gap=0.0045, overlap=0.0003):
+    """Cose varios tramos de la MISMA calle en UN eje continuo (cadena greedy por extremo más
+    cercano, volteando los tramos según haga falta). OSM suele partir una calle en varias ways con
+    huecos (cruces, topología) que `linemerge` no une; sin coserlos, interpolar sobre un solo tramo
+    desordena los números. No une tramos separados por más de `max_gap` (~500 m → es otro pedazo /
+    homónimo). Devuelve un LineString.
+
+    Antes de coser DEDUPLICA carriles paralelos (avenidas de doble mano: OSM trae un way por
+    sentido, ~ida y vuelta): un tramo cuyo punto medio cae sobre otro ya aceptado se descarta —
+    si no, la cadena vuelve sobre sí misma (lazo) y las alturas bajas y altas caen en el mismo
+    extremo (caso AV Arthur Bernardes)."""
+    from shapely.geometry import LineString, Point
+    raw = sorted((list(l.coords) for l in lines if len(l.coords) >= 2),
+                 key=lambda s: -LineString(s).length)
+    segs: list = []
+    for seg in raw:                                       # quedarse con un carril por tramo
+        mid = Point(seg[len(seg) // 2])
+        if any(LineString(k).distance(mid) < overlap for k in segs):
+            continue
+        segs.append(seg)
+    if not segs:
+        return None
+    if len(segs) == 1:
+        return LineString(segs[0])
+    start = max(range(len(segs)), key=lambda i: LineString(segs[i]).length)
+    chain = segs.pop(start)
+    while segs:
+        head, tail = chain[0], chain[-1]
+        best = None  # (dist, idx, donde, flip)
+        for i, seg in enumerate(segs):
+            for pt, flip in ((seg[0], False), (seg[-1], True)):
+                dt = (tail[0] - pt[0]) ** 2 + (tail[1] - pt[1]) ** 2
+                dh = (head[0] - pt[0]) ** 2 + (head[1] - pt[1]) ** 2
+                if best is None or dt < best[0]:
+                    best = (dt, i, "tail", flip)
+                if dh < best[0]:
+                    best = (dh, i, "head", flip)
+        d, i, donde, flip = best
+        if d ** 0.5 > max_gap:
+            break                                        # el tramo más cercano está lejos → no es la misma calle
+        seg = segs.pop(i)
+        # al pegar por 'tail' queremos que el extremo MÁS CERCANO al tail quede primero
+        if donde == "tail":
+            d0 = (tail[0] - seg[0][0]) ** 2 + (tail[1] - seg[0][1]) ** 2
+            d1 = (tail[0] - seg[-1][0]) ** 2 + (tail[1] - seg[-1][1]) ** 2
+            chain = chain + (seg if d0 <= d1 else seg[::-1])
+        else:
+            d0 = (head[0] - seg[0][0]) ** 2 + (head[1] - seg[0][1]) ** 2
+            d1 = (head[0] - seg[-1][0]) ** 2 + (head[1] - seg[-1][1]) ** 2
+            chain = (seg[::-1] if d0 <= d1 else seg) + chain
+    return LineString(chain)
+
+
+def _osm_geometrias(engine, calles, ciudad, bbox):
+    """Geometría OSM de MUCHAS calles a la vez → {calle_norm: [LineStrings]}.
+
+    `calles`=[(calle_norm, calle_raw)]. Lee primero la caché `calle_geometria` (por ciudad/calle,
+    incl. resultado NEGATIVO); para las que faltan hace **UNA sola** consulta Overpass de todas las
+    vías con nombre del bbox (sin regex → barata) y matchea localmente por núcleo de nombre
+    (fuzzy ≥0.82). Cachea cada calle (incl. las no encontradas). Así el primer relevamiento de una
+    ciudad paga una consulta y los re-runs / otras zonas de esa ciudad la reusan."""
+    import json
+    import difflib
+    import time as _time
+    from collections import defaultdict
+    from shapely.geometry import LineString, shape, mapping
+    from shapely.ops import unary_union
+    from scrapitero.agents.osm_building_fetcher import _fetch_overpass
+    ciu = (ciudad or "").strip()[:120]
+    out: dict = {}
+    faltan: list = []
+    with engine.connect() as conn:
+        for cn, raw in calles:
+            row = conn.execute(text("SELECT geojson FROM calle_geometria WHERE ciudad=:c AND "
+                                    "calle_norm=:n"), {"c": ciu, "n": cn}).first()
+            if row is not None:
+                out[cn] = _merge_lines(shape(json.loads(row[0]))) if row[0] else []
+            else:
+                faltan.append((cn, raw))
+    if not faltan:
+        return out
+
+    # UNA consulta: todas las vías CON nombre del bbox (sin regex de nombre → Overpass la resuelve
+    # rápido; el matcheo por calle se hace local).
+    s, w, n, e = bbox
+    query = f'[out:json][timeout:90];way[highway][name]({s},{w},{n},{e});out geom;'
+    data = None
+    for _ in range(5):                                   # Overpass flakea: reintentar (timeout corto
+        try:                                             # → fail-fast en mirrors colgados)
+            data = _fetch_overpass(query, timeout=55)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"baseline_interp: Overpass (red de calles) falló: {exc}")
+            data = None
+        if data and data.get("elements"):
+            break
+        _time.sleep(3)
+    if data is None:                                     # sin respuesta → no cachear, devolver lo que haya
+        for cn, _raw in faltan:
+            out[cn] = []
+        return out
+
+    # agrupar las ways devueltas por núcleo de nombre
+    ways_por_core: dict = defaultdict(list)
+    for el in data.get("elements", []):
+        if el.get("type") != "way" or not el.get("geometry"):
+            continue
+        c2 = _core_calle((el.get("tags") or {}).get("name", ""))
+        if not c2:
+            continue
+        coords = [(g["lon"], g["lat"]) for g in el["geometry"] if "lon" in g and "lat" in g]
+        if len(coords) >= 2:
+            ways_por_core[c2].append(LineString(coords))
+
+    cores_osm = list(ways_por_core.keys())
+    with engine.begin() as conn:
+        for cn, raw in faltan:
+            core = _core_calle(raw or cn)
+            lines: list = []
+            if core:
+                for c2 in cores_osm:
+                    if difflib.SequenceMatcher(None, core, c2).ratio() >= 0.82:
+                        lines.extend(ways_por_core[c2])
+            gj = json.dumps(mapping(unary_union(lines))) if lines else None
+            conn.execute(text(
+                "INSERT INTO calle_geometria (ciudad, calle_norm, geojson) VALUES (:c,:n,:g) "
+                "ON CONFLICT (ciudad, calle_norm) DO UPDATE SET geojson=EXCLUDED.geojson, "
+                "fetched_at=now()"), {"c": ciu, "n": cn, "g": gj})
+            out[cn] = _merge_lines(unary_union(lines)) if lines else []
+    return out
+
+
+def _colocar_en_eje(lineas, targets, anclas, pistas):
+    """Coloca `targets`=[(rid,num)] sobre el eje OSM de su calle por interpolación de número.
+
+    - `anclas`=[(num,lat,lng)] exactas (g:numero) → modelo número→arclength piecewise (exacto
+      donde lo hay, interpolado/extrapolado el resto).
+    - `pistas`=[(num,lat,lng)] posiciones ruidosas de los targets (mapbox) + punto geocodebr →
+      desambiguan el homónimo (qué way) y orientan el eje cuando faltan anclas exactas.
+    Devuelve {rid:(lat,lng)} (fuente osm_interp) o {} si no se puede ubicar/orientar con
+    confianza (→ el llamador cae al camino por-dirección)."""
+    from shapely.geometry import Point
+    if not lineas or not targets:
+        return {}
+    UMB = 0.0020          # ~200 m: "cerca del eje" para soporte/orientación
+    UMB_ANCLA = 0.0014    # ~150 m: un ancla más lejos del eje está mal geocodificada → se descarta
+
+    def proj(ln, la, lo):
+        return ln.project(Point(lo, la))
+
+    # 1) elegir la línea (homónimos) por mayor soporte: anclas exactas pesan 3, pistas 1.
+    sop_pts = [(la, lo, 3.0) for _, la, lo in anclas] + [(la, lo, 1.0) for _, la, lo in pistas]
+
+    def soporte(ln):
+        return sum(p[2] for p in sop_pts if ln.distance(Point(p[1], p[0])) <= UMB)
+    # Quedarse con los tramos CERCA de las anclas/pistas (descarta homónimos lejanos) y COSERLOS
+    # en un eje continuo (una calle suele venir partida en varias ways con huecos).
+    if sop_pts:
+        soportadas = [ln for ln in lineas if soporte(ln) > 0]
+        if not soportadas:
+            return {}     # ninguna línea cerca de las anclas/pistas → es otro homónimo
+    else:
+        soportadas = list(lineas)
+    linea = _stitch(soportadas)
+    if linea is None or linea.length <= 0:
+        return {}
+    L = linea.length
+
+    # 2) modelo número→arclength
+    ax = {}
+    for num, la, lo in anclas:
+        if num is None:
+            continue
+        p = Point(lo, la)
+        if linea.distance(p) <= UMB_ANCLA:
+            ax.setdefault(num, []).append(proj(linea, la, lo))
+    ax = sorted((n, sum(v) / len(v)) for n, v in ax.items())
+
+    num2arc = None
+    if len(ax) >= 2 and ax[0][0] != ax[-1][0]:
+        def num2arc(N):                                  # piecewise por anclas exactas
+            if N <= ax[0][0]:
+                (n0, a0), (n1, a1) = ax[0], ax[1]
+            elif N >= ax[-1][0]:
+                (n0, a0), (n1, a1) = ax[-2], ax[-1]
+            else:
+                for i in range(len(ax) - 1):
+                    if ax[i][0] <= N <= ax[i + 1][0]:
+                        (n0, a0), (n1, a1) = ax[i], ax[i + 1]
+                        break
+            return a0 + (a1 - a0) * (N - n0) / (n1 - n0) if n1 != n0 else a0
+    else:
+        # sin ≥2 anclas exactas: proporción por número sobre el largo, orientada por las pistas.
+        nums = [n for _, n in targets if n is not None]
+        if not nums:
+            return {}
+        nmin, nmax = min(nums), max(nums)
+        if nmin == nmax:
+            mid = linea.interpolate(0.5 * L)
+            return {rid: (mid.y, mid.x) for rid, _ in targets}
+        # orientación: regresión número→arclength sobre las pistas proyectadas (aunque ruidosas,
+        # el SIGNO suele ser correcto). Si no hay señal, asumir inicio del eje = altura menor.
+        pp = [(num, proj(linea, la, lo)) for num, la, lo in pistas
+              if num is not None and linea.distance(Point(lo, la)) <= UMB]
+        signo = 1
+        if len({n for n, _ in pp}) >= 2:
+            mn = sum(n for n, _ in pp) / len(pp)
+            ma = sum(a for _, a in pp) / len(pp)
+            cov = sum((n - mn) * (a - ma) for n, a in pp)
+            if cov < 0:
+                signo = -1
+
+        def num2arc(N):
+            f = (N - nmin) / (nmax - nmin)
+            return f * L if signo > 0 else (1 - f) * L
+
+    out = {}
+    for rid, num in targets:
+        if num is None:
+            p = linea.interpolate(0.5 * L)
+        else:
+            arc = min(max(num2arc(num), 0.0), L)
+            p = linea.interpolate(arc)
+        out[rid] = (p.y, p.x)
+    return out
