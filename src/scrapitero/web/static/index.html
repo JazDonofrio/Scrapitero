@@ -453,12 +453,22 @@
             </div>
           </div>
           <div id="actu-calles-wrap" style="display:none;margin-top:.7rem">
-            <p class="form-hint">Calles + rango de alturas detectados del relevamiento anterior (el tope viene <strong>extendido</strong> para captar obra nueva). Editá rangos, destildá calles o agregá una. El relevamiento cubrirá <strong>exactamente</strong> esas calles dentro de esos números.</p>
-            <div id="actu-calles-tabla" style="max-height:300px;overflow:auto;border:1px solid #1f2937;border-radius:8px;padding:.4rem"></div>
-            <div style="text-align:right;margin-top:.6rem">
-              <button type="button" class="btn btn-outline" onclick="actuAgregarCalle()">＋ Agregar calle</button>
-              <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
-              <button type="button" class="btn btn-primary" id="actu-btn-crear-calles" onclick="actuCrearSurveyCalles(this)">Crear relevamiento</button>
+            <div id="actu-calles-paso1">
+              <p class="form-hint">Calles + rango de alturas detectados del relevamiento anterior (el tope viene <strong>extendido</strong> para captar obra nueva). Editá rangos, destildá calles o agregá una. Se autogenera, por cada dirección, su <strong>cuadra</strong> (100 m de largo × 40 m de ancho, ±20 m del eje).</p>
+              <div id="actu-calles-tabla" style="max-height:300px;overflow:auto;border:1px solid #1f2937;border-radius:8px;padding:.4rem"></div>
+              <div style="text-align:right;margin-top:.6rem">
+                <button type="button" class="btn btn-outline" onclick="actuAgregarCalle()">＋ Agregar calle</button>
+                <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
+                <button type="button" class="btn btn-primary" id="actu-btn-prev-calles" onclick="actuPreviewCalles(this)">Previsualizar zona →</button>
+              </div>
+            </div>
+            <div id="actu-calles-paso2" style="display:none">
+              <p class="form-hint">Zona autogenerada (una cuadra por dirección). Podés <strong>ajustarla</strong> a las necesidades del relevamiento: arrastrá los vértices, sumá o quitá polígonos con las herramientas de arriba a la derecha. Cuando esté lista, creá el relevamiento.</p>
+              <div id="actu-calles-mapa" style="height:420px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
+              <div style="text-align:right;margin-top:.6rem">
+                <button type="button" class="btn btn-outline" onclick="actuVolverCalles()">← Volver a calles</button>
+                <button type="button" class="btn btn-primary" id="actu-btn-crear-calles" onclick="actuCrearSurveyCalles(this)">Crear relevamiento</button>
+              </div>
             </div>
           </div>
           <div id="actu-msg" style="margin-top:.5rem;font-size:.8rem"></div>
@@ -752,15 +762,79 @@ function actuAgregarCalle() {
   actuRenderCallesTabla();
 }
 
-async function actuCrearSurveyCalles(btn) {
-  const seleccion = (actuState.calles || []).filter(c => c.incluir !== false && (c.calle || '').trim());
+function actuSelCalles() {
+  return (actuState.calles || []).filter(c => c.incluir !== false && (c.calle || '').trim())
+    .map(c => ({ calle: c.calle, calle_norm: c.calle_norm, num_min: c.num_min, num_max: c.num_max }));
+}
+
+// Paso 1 → genera la zona y la muestra EDITABLE en el mapa (paso 2).
+async function actuPreviewCalles(btn) {
+  const sel = actuSelCalles();
   const msg = document.getElementById('actu-msg');
-  if (!seleccion.length) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí al menos una calle.'; return; }
-  btn.disabled = true; btn.textContent = '⟳ Construyendo zona (OSM, ~1 min)…';
-  msg.style.color = '#6b7280'; msg.textContent = 'Detectando la geometría de las calles en OSM y creando el relevamiento…';
+  if (!sel.length) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí al menos una calle.'; return; }
+  btn.disabled = true; btn.textContent = '⟳ Construyendo zona (OSM)…';
+  msg.style.color = '#6b7280'; msg.textContent = 'Generando las cuadras sobre la geometría de OSM…';
   const fd = new FormData();
-  fd.append('calles', JSON.stringify(seleccion.map(c => ({
-    calle: c.calle, calle_norm: c.calle_norm, num_min: c.num_min, num_max: c.num_max }))));
+  fd.append('calles', JSON.stringify(sel));
+  try {
+    const d = await (await fetch(`/api/baselines/${actuState.baselineId}/calles/preview`, { method: 'POST', body: fd })).json();
+    if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = 'Previsualizar zona →'; return; }
+    msg.textContent = '';
+    document.getElementById('actu-calles-paso1').style.display = 'none';
+    document.getElementById('actu-calles-paso2').style.display = '';
+    actuRenderCallesMapa(d.geojson);
+  } catch(err) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; }
+  btn.disabled = false; btn.textContent = 'Previsualizar zona →';
+}
+
+function actuVolverCalles() {
+  document.getElementById('actu-calles-paso2').style.display = 'none';
+  document.getElementById('actu-calles-paso1').style.display = '';
+  if (actuState.callesMap) { actuState.callesMap.remove(); actuState.callesMap = null; }
+}
+
+// Mapa del preview: la zona autogenerada como capa EDITABLE (Geoman) + el relevamiento anterior debajo.
+function actuRenderCallesMapa(geojson) {
+  if (actuState.callesMap) { actuState.callesMap.remove(); actuState.callesMap = null; }
+  const map = L.map('actu-calles-mapa');
+  actuState.callesMap = map;
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  const pts = (actuState.puntos || []).filter(p => p.lat != null && p.lng != null);
+  const ref = L.featureGroup();
+  agruparPorUbicacion(pts).forEach(g => oldRelevMarker(g).addTo(ref));
+  ref.addTo(map);
+  // La zona generada, editable.
+  const zona = L.geoJSON(geojson, { style: { color: '#22c55e', weight: 2, fillOpacity: 0.18 } }).addTo(map);
+  actuState.callesZona = zona;
+  const bounds = zona.getBounds();
+  setTimeout(() => {
+    map.invalidateSize();
+    map.fitBounds(bounds.isValid() ? bounds.pad(0.15) : ref.getBounds().pad(0.15), { maxZoom: 17 });
+  }, 60);
+  map.pm.addControls({ position: 'topright', drawPolygon: true, drawMarker: false, drawPolyline: false,
+    drawCircle: false, drawCircleMarker: false, drawRectangle: true, drawText: false,
+    cutPolygon: true, rotateMode: false, dragMode: true, editMode: true, removalMode: true });
+  zona.eachLayer(l => l.pm && l.pm.enable({ allowSelfIntersection: false }));
+  // polígonos nuevos dibujados a mano se suman a la zona
+  map.on('pm:create', e => { actuState.callesZona.addLayer(e.layer); });
+}
+
+// Paso 2 → crea el survey con el polígono (posiblemente editado) + el scope de calles.
+async function actuCrearSurveyCalles(btn) {
+  const sel = actuSelCalles();
+  const msg = document.getElementById('actu-msg');
+  if (!sel.length) { msg.style.color = '#b91c1c'; msg.textContent = 'Elegí al menos una calle.'; return; }
+  // recolectar la geometría editada de todas las capas de la zona
+  const polys = [];
+  actuState.callesZona.eachLayer(l => { if (l.toGeoJSON) { const g = l.toGeoJSON(); if (g.geometry) polys.push(g.geometry); } });
+  if (!polys.length) { msg.style.color = '#b91c1c'; msg.textContent = 'La zona quedó vacía.'; return; }
+  const geom = polys.length === 1 ? polys[0]
+    : { type: 'MultiPolygon', coordinates: polys.map(p => p.type === 'MultiPolygon' ? p.coordinates : [p.coordinates]).flat() };
+  btn.disabled = true; btn.textContent = '⟳ Creando relevamiento…';
+  msg.style.color = '#6b7280'; msg.textContent = 'Creando el relevamiento…';
+  const fd = new FormData();
+  fd.append('calles', JSON.stringify(sel));
+  fd.append('zone_geojson', JSON.stringify(geom));
   try {
     const d = await (await fetch(`/api/baselines/${actuState.baselineId}/crear-survey-calles`, { method: 'POST', body: fd })).json();
     if (!d.ok) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + d.error; btn.disabled = false; btn.textContent = 'Crear relevamiento'; return; }

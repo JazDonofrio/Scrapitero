@@ -661,7 +661,13 @@ def _osm_geometrias(engine, calles, ciudad, bbox):
     incl. resultado NEGATIVO); para las que faltan hace **UNA sola** consulta Overpass de todas las
     vías con nombre del bbox (sin regex → barata) y matchea localmente por núcleo de nombre
     (fuzzy ≥0.82). Cachea cada calle (incl. las no encontradas). Así el primer relevamiento de una
-    ciudad paga una consulta y los re-runs / otras zonas de esa ciudad la reusan."""
+    ciudad paga una consulta y los re-runs / otras zonas de esa ciudad la reusan.
+
+    La **clave de caché es el `calle_norm` RECOMPUTADO del nombre** (`normalizar_calle(raw)`), no el
+    `calle_norm` que pasa el llamador (que puede venir de la columna stale del baseline o del nombre
+    lindo del scope) → así el geocoding y el corredor de scope-calles comparten el caché aunque
+    partan de strings distintos del mismo nombre. El dict de salida se devuelve bajo el `calle_norm`
+    que pasó el llamador."""
     import json
     import difflib
     import time as _time
@@ -669,17 +675,19 @@ def _osm_geometrias(engine, calles, ciudad, bbox):
     from shapely.geometry import LineString, shape, mapping
     from shapely.ops import unary_union
     from scrapitero.agents.osm_building_fetcher import _fetch_overpass
+    from scrapitero.agents.direccion_norm import normalizar_calle
     ciu = (ciudad or "").strip()[:120]
     out: dict = {}
-    faltan: list = []
+    faltan: list = []   # (cn_llamador, raw, nkey)
     with engine.connect() as conn:
         for cn, raw in calles:
+            nkey = normalizar_calle(raw) or cn      # clave canónica del caché
             row = conn.execute(text("SELECT geojson FROM calle_geometria WHERE ciudad=:c AND "
-                                    "calle_norm=:n"), {"c": ciu, "n": cn}).first()
+                                    "calle_norm=:n"), {"c": ciu, "n": nkey}).first()
             if row is not None:
                 out[cn] = _merge_lines(shape(json.loads(row[0]))) if row[0] else []
             else:
-                faltan.append((cn, raw))
+                faltan.append((cn, raw, nkey))
     if not faltan:
         return out
 
@@ -698,7 +706,7 @@ def _osm_geometrias(engine, calles, ciudad, bbox):
             break
         _time.sleep(3)
     if data is None:                                     # sin respuesta → no cachear, devolver lo que haya
-        for cn, _raw in faltan:
+        for cn, _raw, _nk in faltan:
             out[cn] = []
         return out
 
@@ -716,7 +724,7 @@ def _osm_geometrias(engine, calles, ciudad, bbox):
 
     cores_osm = list(ways_por_core.keys())
     with engine.begin() as conn:
-        for cn, raw in faltan:
+        for cn, raw, nkey in faltan:
             core = _core_calle(raw or cn)
             lines: list = []
             if core:
@@ -727,7 +735,7 @@ def _osm_geometrias(engine, calles, ciudad, bbox):
             conn.execute(text(
                 "INSERT INTO calle_geometria (ciudad, calle_norm, geojson) VALUES (:c,:n,:g) "
                 "ON CONFLICT (ciudad, calle_norm) DO UPDATE SET geojson=EXCLUDED.geojson, "
-                "fetched_at=now()"), {"c": ciu, "n": cn, "g": gj})
+                "fetched_at=now()"), {"c": ciu, "n": nkey, "g": gj})
             out[cn] = _merge_lines(unary_union(lines)) if lines else []
     return out
 
