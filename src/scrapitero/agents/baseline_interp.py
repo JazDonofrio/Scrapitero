@@ -335,7 +335,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                                  "municipio": (md[8] or ciudad_g or ""), "estado": md[9] or "",
                                  "bairro": md[7] or "", "cep": md[10] or ""})
                 gb = geocodebr_lote(reps, max_desvio_m=1500.0) if reps else {}
-                relocadas = 0
+                sospechosas = []
                 for cn, t in gb.items():
                     gla, gln = t[0], t[1]
                     pts = [aceptados[r] for r in por_cn_rids[cn] if r in aceptados]
@@ -343,17 +343,35 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
                     # Distancia de CNEFE al punto MÁS CERCANO de la calle (no al centroide): una
                     # avenida larga bien repartida tiene su centroide lejos de cualquier punto único,
                     # pero CNEFE cae SOBRE la avenida (min chico) → no se toca. Solo cuando hasta el
-                    # punto más cercano está lejos, toda la calle está en el lugar equivocado.
+                    # punto más cercano está lejos, toda la calle es sospechosa de estar mal ubicada.
                     if min(_hav_m(a[0], a[1], gla, gln) for a in pts) <= input.xcheck_geocodebr_m:
                         continue                                     # CNEFE cae sobre la calle → ok
                     if _hav_m(gla, gln, *cen) >= _hav_m(nla, nln, *cen):
                         continue                                     # CNEFE no es más central → no tocar
-                    for rid in por_cn_rids[cn]:                      # reubicar TODA la calle a CNEFE
-                        aceptados[rid] = (gla, gln, "g:numero_aproximado")
-                    relocadas += 1
-                if relocadas:
-                    logger.info(f"baseline_interp: {relocadas} calle(s) reubicadas a geocodebr/CNEFE "
-                                f"(Mapbox las había puesto lejos del relevamiento)")
+                    sospechosas.append((cn, gla, gln))
+                # Para cada calle sospechosa, OSM es el ÁRBITRO: su geometría (nombre exacto) dice
+                # dónde está REALMENTE la calle y permite interpolar los números secuencialmente.
+                # Mapbox y OSM suelen coincidir (y CNEFE numero_aproximado ser el outlier) → OSM
+                # gana. Solo si OSM no tiene la calle se la reubica al punto (apilado) de CNEFE.
+                relocadas = osm_fix = 0
+                for cn, gla, gln in sospechosas:
+                    osm_pos = []
+                    if input.usar_osm_fallback:
+                        tg = [(rid, _num(item_by_rid[rid][2]), cn, item_by_rid[rid][6])
+                              for rid in por_cn_rids[cn]]
+                        osm_pos = _distribuir_osm(engine, input.baseline_id, tg, rows)
+                    if osm_pos:
+                        for rid, la, ln in osm_pos:
+                            aceptados[rid] = (la, ln, "osm_interp")
+                        osm_fix += 1
+                    else:
+                        for rid in por_cn_rids[cn]:
+                            aceptados[rid] = (gla, gln, "g:numero_aproximado")
+                        relocadas += 1
+                if osm_fix or relocadas:
+                    logger.info(f"baseline_interp: {len(sospechosas)} calle(s) mal ubicadas por "
+                                f"Mapbox → {osm_fix} reinterpoladas sobre OSM, {relocadas} reubicadas "
+                                f"a CNEFE (sin geometría OSM)")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"baseline_interp: cross-check geocodebr falló: {str(e)[:120]}")
 
@@ -498,6 +516,7 @@ def _distribuir_osm(engine, baseline_id: str, sin_ancla_targets: list, rows: lis
     Matchea localmente por núcleo de nombre (fuzzy ≥0.82). Devuelve [(id, lat, lng)]."""
     import difflib
     import re as _re
+    import time as _time
     from collections import defaultdict
     from scrapitero.agents.osm_building_fetcher import _fetch_overpass
     lats = [r[3] for r in rows]
@@ -530,13 +549,23 @@ def _distribuir_osm(engine, baseline_id: str, sin_ancla_targets: list, rows: lis
         rx = _re.sub(r"[^a-z0-9]", ".", token)
         query = (f'[out:json][timeout:60];way[highway][name~"{rx}",i]'
                  f"({s},{w},{n},{e});out geom;")
-        try:
-            data = _fetch_overpass(query)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"baseline_interp: Overpass falló para «{core}»: {exc}")
+        # Overpass es intermitente: a veces devuelve {} sin error (mirror flakeó). Reintentar
+        # SOLO ante respuesta vacía (no cuando trae elementos pero ninguno matchea: ahí la calle
+        # realmente no está y reintentar es inútil). Hasta 3 intentos con pausa corta.
+        data = None
+        for _intento in range(3):
+            try:
+                data = _fetch_overpass(query)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"baseline_interp: Overpass falló para «{core}»: {exc}")
+                data = None
+            if data and data.get("elements"):
+                break
+            _time.sleep(2)
+        if not (data and data.get("elements")):
             continue
         best_poly, best_r = None, 0.0
-        for el in (data.get("elements", []) if data else []):
+        for el in data.get("elements", []):
             if el.get("type") != "way" or not el.get("geometry"):
                 continue
             c2 = _core_calle((el.get("tags") or {}).get("name", ""))
