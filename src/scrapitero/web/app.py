@@ -713,7 +713,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.parcela_id::text, p.categoria_uso, p.descripcion_uso,
                    COALESCE((SELECT h.tipo FROM hoteles h
                        WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
-                       ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo
+                       ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
+                   p.es_country,
+                   (SELECT COUNT(*) FROM parcela_unidades pu
+                    WHERE pu.parcela_id = p.parcela_id) AS n_unidades
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             WHERE p.survey_id = :sid
@@ -768,8 +771,30 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "descripcion_uso": r[28] or None,
             # Tipo de edificación unificado (1 label de la lista del cliente)
             "tipo_edificacion": _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29]) or None,
+            # Ítems críticos a los que pertenece la parcela (capas toggleables del mapa). Una
+            # parcela puede estar en varias (un edificio de deptos es Edificio Y PH).
+            "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
+                                     n_unidades=int(r[31] or 0),
+                                     descripcion=r[28], es_country=bool(r[30])),
         })
     return out
+
+
+def _items_criticos(hotel_tipo, uf_viv, n_unidades, descripcion, es_country) -> list:
+    """Capas críticas a las que pertenece una parcela (Hoteles/Edificios/PH/Shopping/Country).
+    Una parcela puede caer en varias. Ver la tabla de definiciones en CLAUDE.md."""
+    items = []
+    if hotel_tipo:                                  # hotel abierto vinculado
+        items.append("hotel")
+    if (uf_viv or 0) > 1:                           # APARTAMENTO (residencial multi-unidad)
+        items.append("edificio")
+    if (n_unidades or 0) > 1:                       # propiedad horizontal (>1 unidad en el BCI)
+        items.append("ph")
+    if descripcion and "shopping" in descripcion.lower():
+        items.append("shopping")
+    if es_country:                                  # dentro de un condomínio/loteamento fechado (OSM)
+        items.append("country")
+    return items
 
 
 @app.get("/api/surveys/{survey_id}/activity")
@@ -823,6 +848,27 @@ async def run_hoteles(survey_id: str, google: bool = True) -> JSONResponse:
         _thread_job_id.value = survey_id
         return run_hot(HotelFetcherInput(region_id=region_id, survey_id=survey_id,
                                          fuentes=fuentes)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.post("/api/surveys/{survey_id}/country")
+async def run_country(survey_id: str) -> JSONResponse:
+    """Corre CountryFetcher: detecta barrios cerrados / condomínios en OSM dentro de la zona y
+    marca `parcelas.es_country` de las que caen adentro → alimenta la capa 🏘 Country del mapa."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.country_fetcher import CountryFetcherInput
+    from scrapitero.agents.country_fetcher import run as run_country_agent
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_country_agent(CountryFetcherInput(region_id=region_id,
+                                                     survey_id=survey_id)).model_dump()
 
     data = await asyncio.to_thread(_job)
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)

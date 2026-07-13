@@ -1576,7 +1576,10 @@ function renderCard(s) {
             <span id="hot-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
             <button class="btn btn-sm btn-outline" onclick="runHabitacionesIA('${sid}', this)"
                title="Completar con IA (Gemini + búsqueda web) las habitaciones de los hoteles abiertos sin dato. Pago por hotel.">🛏️ Habitaciones IA</button>
-            <span id="hab-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
+            <span id="hab-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <button class="btn btn-sm btn-outline" onclick="runCountry('${sid}', this)"
+               title="Detectar barrios cerrados / condomínios en OSM y marcar las parcelas de adentro (capa 🏘 Country del mapa).">🏘 Country</button>
+            <span id="country-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>` : ''}
           </div>
           ${OPERADOR && s.country_code === 'BRA' ? `<div id="asist-${sid}" class="asist-box" style="display:none"></div>` : ''}
           ${OPERADOR ? `<div id="parcial-form-${sid}"></div>` : ''}
@@ -1677,6 +1680,12 @@ function initMap(sid) {
   const layersCtl = L.control.layers(
     {'🛰 Satélite': satellite, '🗺 Mapa': osm}, {'Etiquetas': labels}, {position: 'topleft'}
   ).addTo(map);
+  map._layersCtl = layersCtl;   // para registrar las capas de ítems críticos en loadParcelasMap
+
+  // Pane para los anillos de "ítems críticos" (Hoteles/Edificios/PH/Shopping/Country): por
+  // encima de los marcadores base de parcela (overlayPane=400) para que se vean destacados.
+  map.createPane('criticasPane');
+  map.getPane('criticasPane').style.zIndex = 450;
 
   // Google Maps (opcional): si hay API key configurada, se agregan como capas base
   // seleccionables vía Leaflet.GoogleMutant. Da imágenes de Google y más zoom nativo.
@@ -1737,6 +1746,18 @@ function initMap(sid) {
 const surveyHoteles = {};   // sid → {parcela_id → [hotel]}
 
 const hotelLayers = {};   // sid → L.layerGroup con los pines 🏨
+
+// Capas de "ítems críticos": una parcela puede pertenecer a varias (ver _items_criticos en app.py).
+// Cada una es un overlay toggleable (checkbox) en el control de capas del mapa; el marcador es un
+// ANILLO de color propio por encima del punto base, para poder aislar visualmente cada tipo.
+const ITEMS_CRITICOS = [
+  { key: 'hotel',    label: '🏨 Hoteles',   color: '#7c3aed' },
+  { key: 'edificio', label: '🏢 Edificios', color: '#2563eb' },
+  { key: 'ph',       label: '🧱 PH',        color: '#db2777' },
+  { key: 'shopping', label: '🛍 Shopping',  color: '#ea580c' },
+  { key: 'country',  label: '🏘 Country',   color: '#16a34a' },
+];
+const criticalLayers = {};   // sid → { key → L.layerGroup }
 
 // Espejo de _hotel_tipo_label (web/app.py): mapea el tipo del hotel a la etiqueta de la
 // taxonomía del cliente, para sumar las habitaciones por la misma línea de la leyenda.
@@ -1833,6 +1854,22 @@ async function runHoteles(sid, btn) {
     } else {
       if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.hoteles_en_zona} en zona · ${d.vinculados_parcela} en parcela · ${d.cerrados} cerrados · ${fmt(d.total_uf_comercio)} UF`; }
       await loadHoteles(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+async function runCountry(sid, btn) {
+  const msg = document.getElementById('country-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ OSM…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'Detectando barrios cerrados en OSM…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/country`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.areas} área(s) · ${d.parcelas_marcadas} parcelas`; }
+      await loadParcelasMap(sid);   // re-pinta parcelas + capa 🏘 Country con el flag actualizado
     }
   } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
   btn.disabled = false; btn.textContent = t0;
@@ -2232,6 +2269,11 @@ async function loadParcelasMap(sid) {
   const byPid = {};
   let nuevoUF = 0;   // UF total (viv+com) del relevamiento nuevo, para comparar en la leyenda
 
+  // Capas de ítems críticos: (re)crear un layerGroup por ítem y contar. Se registran como
+  // overlays del control de capas al final; una parcela cae en las capas de sus `items`.
+  const critGroups = {}; const critCounts = {};
+  ITEMS_CRITICOS.forEach(it => { critGroups[it.key] = L.layerGroup(); critCounts[it.key] = 0; });
+
   // Con una comparativa activa, el mapa se pinta por ESTADO (nueva/cambió/igual)
   // en vez de por tipología; "✕ Quitar del mapa" vuelve a la vista normal.
   const compEst = comparativaEstado[sid];
@@ -2314,10 +2356,34 @@ async function loadParcelasMap(sid) {
     }
     m.addTo(map);
     markers.push(m);
+
+    // Anillos de ítems críticos (capas toggleables). Una parcela puede caer en varias.
+    (p.items || []).forEach(key => {
+      const cfg = ITEMS_CRITICOS.find(x => x.key === key);
+      if (!cfg || !critGroups[key]) return;
+      L.circleMarker([p.lat, p.lng], {
+        pane: 'criticasPane', radius: 11, fill: false, interactive: false,
+        color: cfg.color, weight: 3, opacity: 0.95,
+      }).addTo(critGroups[key]);
+      critCounts[key]++;
+    });
   }
 
   activeMarkers[sid] = markers;
   parcelaMarkers[sid] = byPid;
+
+  // Registrar/actualizar las capas de ítems críticos como overlays toggleables del mapa.
+  if (map._layersCtl) {
+    const prev = criticalLayers[sid] || {};
+    ITEMS_CRITICOS.forEach(it => {
+      if (prev[it.key]) { try { map._layersCtl.removeLayer(prev[it.key]); map.removeLayer(prev[it.key]); } catch(_) {} }
+      const grp = critGroups[it.key];
+      const n = critCounts[it.key];
+      // solo ofrecer la capa si hay al menos una parcela de ese ítem (evita overlays vacíos)
+      if (n > 0) map._layersCtl.addOverlay(grp, `${it.label} (${n})`);
+    });
+    criticalLayers[sid] = critGroups;
+  }
 
   // Contador visible en el mapa
   const cntEl = document.getElementById('mcount-' + sid);
