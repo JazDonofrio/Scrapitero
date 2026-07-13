@@ -74,11 +74,16 @@ def _areas_osm(s, w, n, e, name_regex: str):
     from shapely.geometry import Polygon
     from scrapitero.agents.osm_building_fetcher import _fetch_overpass
     bbox = f"{s},{w},{n},{e}"
+    # Dos familias: (1) tag autoritativo `residential=gated`; (2) cualquier área CON NOMBRE de
+    # condomínio/loteamento fechado. No se restringe a landuse=residential porque en Brasil los
+    # condomínios se taguean de varias formas (landuse/place/leisure) — la precisión la da el
+    # filtro de ANILLO CERRADO (`_rings_de_geometry`): una vía abierta (calle "Condomínio X") no
+    # forma polígono y se descarta; solo sobreviven las áreas cerradas.
     q = ("[out:json][timeout:90];("
-         f'way["landuse"="residential"]["residential"="gated"]({bbox});'
-         f'relation["landuse"="residential"]["residential"="gated"]({bbox});'
-         f'way["landuse"="residential"]["name"~"{name_regex}",i]({bbox});'
-         f'relation["landuse"="residential"]["name"~"{name_regex}",i]({bbox});'
+         f'way["residential"="gated"]({bbox});'
+         f'relation["residential"="gated"]({bbox});'
+         f'way["name"~"{name_regex}",i]({bbox});'
+         f'relation["name"~"{name_regex}",i]({bbox});'
          ");out geom;")
     data = _fetch_overpass(q, timeout=55)
     polys = []
