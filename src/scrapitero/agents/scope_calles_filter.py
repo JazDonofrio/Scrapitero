@@ -72,13 +72,18 @@ def run(input: ScopeCallesInput) -> ScopeCallesOutput:
 
     with engine.connect() as conn:
         filas = conn.execute(text("""
-            SELECT parcela_id::text, calle, numero
+            SELECT parcela_id::text, calle, numero, fuente_parcela
             FROM parcelas WHERE survey_id = CAST(:sid AS uuid)
         """), {"sid": input.survey_id}).fetchall()
 
     out.parcelas_antes = len(filas)
     a_borrar: list[str] = []
-    for pid, calle, numero in filas:
+    for pid, calle, numero, fuente in filas:
+        # Entradas agregadas a mano (POIs de shopping sin parcela catastral, `fuente='shopping_poi'`)
+        # son inclusiones intencionales fuera del corredor → nunca se borran por scope.
+        if (fuente or "") == "shopping_poi":
+            out.conservadas += 1
+            continue
         if not (calle or "").strip():
             out.sin_direccion += 1
             continue                                  # sin dirección → conservar (conservador)
