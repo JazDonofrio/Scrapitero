@@ -165,7 +165,8 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
         # sobre las parcelas (tipo de edificación). Opcionales/best-effort.
         ("shopping_fetcher", shopping_fetcher.run,
          lambda s: shopping_fetcher.ShoppingFetcherInput(
-             region_id=input.region_id, survey_id=input.survey_id, fuentes=["osm"]),
+             region_id=input.region_id, survey_id=input.survey_id, fuentes=["osm"],
+             zona_buffer_m=150.0),   # captar shoppings retirados de la calle en modo corredor
          None, True),
         ("parcela_categoria", parcela_categoria.run,
          lambda s: parcela_categoria.ParcelaCategoriaInput(region_id=input.region_id),

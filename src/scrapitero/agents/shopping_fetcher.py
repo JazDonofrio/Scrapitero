@@ -34,6 +34,11 @@ class ShoppingFetcherInput(BaseModel):
     fuentes: list[str] = ["osm", "google"]
     max_requests: int = 40              # tope de teselas Google (pago)
     merge_dist_m: float = 150.0         # dedupe entre fuentes
+    # Buffer de la zona para el recorte: un shopping tiene HUELLA GRANDE y su punto (centro del
+    # edificio) puede caer retirado de la calle → fuera de un corredor angosto (scope calle+rango).
+    # Con un buffer, el POI sobrevive y `ParcelaCategoria` lo aterriza si cae dentro de una parcela
+    # del survey (recorte preciso). Default 0 = sin buffer (zonas dibujadas normales).
+    zona_buffer_m: float = 0.0
 
 
 class ShoppingFetcherOutput(BaseModel):
@@ -117,6 +122,8 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
              if gj.get("type") == "FeatureCollection" else [shape(gj.get("geometry", gj))])
     poly = unary_union(geoms).buffer(0)
     minx, miny, maxx, maxy = poly.bounds
+    # Polígono de recorte (opcionalmente buffereado para captar shoppings retirados del corredor).
+    poly_clip = poly.buffer(input.zona_buffer_m / 111000.0) if input.zona_buffer_m > 0 else poly
 
     crudos: list[dict] = []
     if "osm" in input.fuentes:
@@ -134,8 +141,8 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"ShoppingFetcher Google falló: {e}")
 
-    # recorte a zona + dedupe por proximidad
-    ubicados = [h for h in crudos if poly.contains(Point(h["lng"], h["lat"]))]
+    # recorte a zona (buffereada) + dedupe por proximidad
+    ubicados = [h for h in crudos if poly_clip.contains(Point(h["lng"], h["lat"]))]
     final: list[dict] = []
     for h in ubicados:
         if any(_dist_m(h["lat"], h["lng"], f["lat"], f["lng"]) <= input.merge_dist_m for f in final):
