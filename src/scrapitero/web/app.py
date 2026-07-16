@@ -1326,6 +1326,50 @@ async def eliminar_comentario(comentario_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _letra_secuencial(i: int) -> str:
+    """0→A, 1→B, …, 25→Z, 26→AA, 27→AB… (estilo columnas de planilla)."""
+    s = ""
+    i += 1
+    while i > 0:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _letras_direccion_repetida(items) -> dict:
+    """Para direcciones (calle+número) REPETIDAS, asigna una letra secuencial (A, B, C…) a cada
+    parcela SIN complemento propio, para identificar la vivienda. Las que ya traen complemento
+    (p.ej. el BCI dio ED/BLOCO/APTO) NO reciben letra: se conserva su complemento.
+
+    `items`: iterable de (id, calle, numero, complemento, lat, lng). Devuelve {id: letra}. El
+    orden es determinista (por posición) para que la letra de cada vivienda sea estable."""
+    import re
+    from collections import defaultdict
+    from scrapitero.agents.direccion_norm import normalizar_calle
+    grupos: dict = defaultdict(list)
+    for it in items:
+        cn = normalizar_calle(it[1] or "")
+        if not cn:
+            continue                      # sin calle → no se agrupa
+        # clave = calle + dígitos del número (conserva "0" y el "sin número"; dos parcelas que
+        # muestran la misma calle+número —incluido 0 o vacío— cuentan como dirección repetida).
+        nn = re.sub(r"\D", "", str(it[2] or ""))
+        grupos[(cn, nn)].append(it)
+    out: dict = {}
+    for its in grupos.values():
+        if len(its) <= 1:
+            continue                      # dirección única → no hay repetición
+        its.sort(key=lambda t: (t[4] if t[4] is not None else 0,
+                                t[5] if t[5] is not None else 0, str(t[0])))
+        i = 0
+        for it in its:
+            if (it[3] or "").strip():
+                continue                  # ya tiene complemento → se mantiene
+            out[it[0]] = _letra_secuencial(i)
+            i += 1
+    return out
+
+
 @app.get("/api/surveys/{survey_id}/export/csv")
 async def export_csv(survey_id: str) -> StreamingResponse:
     """Descarga un CSV con todas las parcelas del relevamiento."""
@@ -1479,8 +1523,13 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 _tipo_edificacion(r[8], r[9], r[13], r[36], r[38]),
             ]
 
+        # Letra secuencial (A, B, C…) para direcciones repetidas sin complemento propio.
+        letras_rep = _letras_direccion_repetida(
+            (r[34], r[2], r[3], r[4], r[18], r[19]) for r in rows)
+
         for r in rows:
-            direccion = " ".join(s for s in (r[2], r[3], r[4]) if s).strip()
+            comp_ef = (r[4] or "").strip() or letras_rep.get(r[34], "")
+            direccion = " ".join(s for s in (r[2], r[3], comp_ef) if s).strip()
             unidades = unidades_por_parcela.get(r[34])
             if unidades:
                 # Edificio/lote con varias unidades: una fila por unidad (sin conteo).
