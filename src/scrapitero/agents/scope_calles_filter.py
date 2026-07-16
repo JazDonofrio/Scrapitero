@@ -84,9 +84,10 @@ def run(input: ScopeCallesInput) -> ScopeCallesOutput:
     out.parcelas_antes = len(filas)
     a_borrar: list[str] = []
     for pid, calle, numero, fuente in filas:
-        # Entradas agregadas a mano (POIs de shopping sin parcela catastral, `fuente='shopping_poi'`)
-        # son inclusiones intencionales fuera del corredor → nunca se borran por scope.
-        if (fuente or "") == "shopping_poi":
+        # Entradas agregadas a partir de un POI o del relevamiento anterior (sin parcela catastral):
+        # `shopping_poi` (shoppings) o `baseline_poi` (direcciones del anterior no cubiertas por el
+        # catastro). Son inclusiones intencionales → nunca se borran por scope.
+        if (fuente or "") in ("shopping_poi", "baseline_poi"):
             out.conservadas += 1
             continue
         if not (calle or "").strip():
