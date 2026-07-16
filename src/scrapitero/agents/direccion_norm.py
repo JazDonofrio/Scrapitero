@@ -73,6 +73,11 @@ TITULOS = {
     "s": "san",
 }
 
+# Variantes de grafía del mismo nombre → forma canónica (se aplica a CUALQUIER token). El
+# catastro y el relevamiento anterior a veces escriben distinto el mismo nombre propio: sin esto,
+# `av pte artur bernardes` (catastro) ≠ `av pte arthur bernardes` (scope) y el filtro las separa.
+_VARIANTES = {"arthur": "artur", "thereza": "teresa", "tereza": "teresa"}
+
 # Preposiciones/artículos que se ELIMINAN en cualquier posición.
 PREPOSICIONES = {"de", "del", "do", "da", "dos", "das", "la", "las", "los",
                  "el", "e", "y"}
@@ -103,7 +108,7 @@ def normalizar_calle(calle: str | None) -> str:
         return ""
     s = _sin_acentos(str(calle)).lower()
     s = re.sub(r"[^\w\s]", " ", s)          # puntuación (incl. el " - " del BCI) → espacio
-    tokens = [t for t in s.split() if t not in PREPOSICIONES]
+    tokens = [_VARIANTES.get(t, t) for t in s.split() if t not in PREPOSICIONES]
     if not tokens:
         return ""
 
@@ -125,6 +130,26 @@ def normalizar_calle(calle: str | None) -> str:
             out = out[:j]
             break
     return " ".join(out)
+
+
+_VIA_VALORES = set(TIPOS_VIA.values())
+_TITULO_VALORES = set(TITULOS.values())
+
+
+def nucleo_calle(calle: str | None) -> str:
+    """Núcleo del nombre de calle para MATCHING tolerante: `normalizar_calle` sin el tipo de vía
+    ni los títulos honoríficos. Así "Rua Governador Pedro Pedrossian" y "Rua Pedro Pedrossian"
+    (el catastro a veces omite el título), o "Presidente Arthur/Artur Bernardes", colapsan al
+    mismo núcleo ("pedro pedrossian" / "artur bernardes"). Sirve para comparar el scope (del
+    relevamiento anterior) contra la dirección del catastro sin que una variante los separe."""
+    norm = normalizar_calle(calle)
+    if not norm:
+        return ""
+    toks = norm.split()
+    if toks and toks[0] in _VIA_VALORES:      # sacar tipo de vía inicial
+        toks = toks[1:]
+    toks = [t for t in toks if t not in _TITULO_VALORES]   # sacar títulos (gob/pte/cnel…)
+    return " ".join(toks) or norm             # si quedó vacío, volver al norm (nombre = puro título)
 
 
 def normalizar_numero(numero: str | int | None) -> str:

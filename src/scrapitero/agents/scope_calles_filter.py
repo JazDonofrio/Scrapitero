@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
-from scrapitero.agents.direccion_norm import normalizar_calle
+from scrapitero.agents.direccion_norm import normalizar_calle, nucleo_calle
 from scrapitero.db.engine import get_engine
 
 
@@ -56,15 +56,20 @@ def run(input: ScopeCallesInput) -> ScopeCallesOutput:
         logger.info("ScopeCallesFilter: el survey no tiene scope_calles → no-op")
         return out
 
-    # rangos por calle normalizada: {calle_norm: (min, max)}
+    # rangos por NÚCLEO de calle (tolerante a título/grafía: el catastro a veces omite el título
+    # o escribe distinto — "Pedro Pedrossian" vs "Governador Pedro Pedrossian", "Artur"/"Arthur").
+    # Si dos calles del scope colapsan al mismo núcleo, se unen los rangos (min más chico, max más
+    # grande) para no perder cobertura.
     rangos: dict[str, tuple[int, int]] = {}
     for c in scope:
-        cn = (c.get("calle_norm") or normalizar_calle(c.get("calle") or "")).strip()
-        if not cn:
+        nc = nucleo_calle(c.get("calle") or c.get("calle_norm") or "").strip()
+        if not nc:
             continue
-        mn = c.get("num_min"); mx = c.get("num_max")
-        rangos[cn] = (int(mn) if mn is not None else 0,
-                      int(mx) if mx is not None else 10**9)
+        mn = int(c.get("num_min")) if c.get("num_min") is not None else 0
+        mx = int(c.get("num_max")) if c.get("num_max") is not None else 10**9
+        if nc in rangos:
+            mn = min(mn, rangos[nc][0]); mx = max(mx, rangos[nc][1])
+        rangos[nc] = (mn, mx)
     if not rangos:
         out.ok = False
         out.error = "scope_calles vacío o sin calles válidas"
@@ -87,7 +92,7 @@ def run(input: ScopeCallesInput) -> ScopeCallesOutput:
         if not (calle or "").strip():
             out.sin_direccion += 1
             continue                                  # sin dirección → conservar (conservador)
-        cn = normalizar_calle(calle)
+        cn = nucleo_calle(calle)
         rango = rangos.get(cn)
         if rango is None:
             out.removidas_fuera_calle += 1
