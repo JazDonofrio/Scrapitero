@@ -1601,7 +1601,15 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 header = mapped + [k for k in extras_keys if k not in mapped]
             parc = conn.execute(text("""
                 SELECT calle, numero, complemento, barrio, municipio, estado_provincia,
-                       codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0)
+                       codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
+                       -- Nombre del comercio/hotel de la parcela (para DSC_NOME_DO_IMOVEL).
+                       NULLIF(TRIM(BOTH ' |' FROM CONCAT_WS(' | ',
+                         (SELECT string_agg(h.nombre, ' | ' ORDER BY h.nombre) FROM hoteles h
+                            WHERE h.parcela_id = parcelas.parcela_id
+                              AND h.nombre IS NOT NULL AND NOT h.cerrado_def),
+                         (SELECT string_agg(co.nombre, ' | ' ORDER BY co.nombre) FROM comercios co
+                            WHERE co.parcela_id = parcelas.parcela_id AND co.nombre IS NOT NULL)
+                       )), '') AS nome_imovel
                 FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
                 ORDER BY calle,
@@ -1634,13 +1642,16 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
         inv = {h: f for f, h in mapeo_d.items() if h}   # header → campo
         TIPO_VIV, TIPO_COM = "RESIDENCIAL", "COMERCIO EM GERAL"
 
+        # Índice de la columna del nombre del comercio (si el layout la tiene).
+        idx_nome = header.index("DSC_NOME_DO_IMOVEL") if "DSC_NOME_DO_IMOVEL" in header else None
+
         def _gen_plantilla():
             buf = io.StringIO()
             buf.write("﻿")   # BOM para Excel
             w = csv.writer(buf, delimiter=";")
             w.writerow(header)
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-            for calle, numero, compl, barrio, muni, est, cep, uv, uc in parc:
+            for calle, numero, compl, barrio, muni, est, cep, uv, uc, nome in parc:
                 full = " ".join(x for x in (calle, numero) if x)
                 if compl:
                     full = f"{full} {compl}".strip()
@@ -1653,7 +1664,10 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                     val = {"direccion": full, "calle": calle or "", "numero": numero or "",
                            "barrio": barrio or "", "ciudad": muni or "",
                            "estado": (est or "").upper(), "cep": cep or "", "uso": tipo}
-                    w.writerow([val.get(inv.get(col), "") for col in header])
+                    fila = [val.get(inv.get(col), "") for col in header]
+                    if idx_nome is not None and nome:   # nombre del comercio → DSC_NOME_DO_IMOVEL
+                        fila[idx_nome] = nome
+                    w.writerow(fila)
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
 
         return StreamingResponse(
