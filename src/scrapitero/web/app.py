@@ -1602,13 +1602,22 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             parc = conn.execute(text("""
                 SELECT calle, numero, complemento, barrio, municipio, estado_provincia,
                        codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
-                       -- Nombre del comercio/hotel de la parcela (para DSC_NOME_DO_IMOVEL).
+                       -- Nombre del comercio de la parcela (para DSC_NOME_DO_IMOVEL): hoteles +
+                       -- comercios (Google) + establecimiento agrupado + shoppings (POI espacial).
                        NULLIF(TRIM(BOTH ' |' FROM CONCAT_WS(' | ',
                          (SELECT string_agg(h.nombre, ' | ' ORDER BY h.nombre) FROM hoteles h
                             WHERE h.parcela_id = parcelas.parcela_id
                               AND h.nombre IS NOT NULL AND NOT h.cerrado_def),
                          (SELECT string_agg(co.nombre, ' | ' ORDER BY co.nombre) FROM comercios co
-                            WHERE co.parcela_id = parcelas.parcela_id AND co.nombre IS NOT NULL)
+                            WHERE co.parcela_id = parcelas.parcela_id AND co.nombre IS NOT NULL),
+                         (SELECT est.nombre FROM establecimientos est
+                            WHERE est.establecimiento_id = parcelas.establecimiento_id),
+                         (SELECT string_agg(poi.nombre, ' | ' ORDER BY poi.nombre)
+                            FROM establecimientos_poi poi
+                            WHERE poi.region_id = parcelas.region_id AND poi.nombre IS NOT NULL
+                              AND parcelas.geometry IS NOT NULL
+                              AND ST_Contains(parcelas.geometry,
+                                    ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326)))
                        )), '') AS nome_imovel
                 FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
