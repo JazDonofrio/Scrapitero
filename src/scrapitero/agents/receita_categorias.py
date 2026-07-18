@@ -61,7 +61,8 @@ _CNAE_MAP: dict[str, tuple[str, str]] = {
     "5590603": ("R", "PENSÃO"),
     # ── Salud (E) — público/particular se refina con natureza ──
     "8610": ("E", "HOSPITAL"),
-    "8630": ("E", "CLÍNICA"),                   # atenção ambulatorial (clínica/consultório)
+    "8630503": ("E", "CONSULTÓRIO"),            # atenção ambulatorial restrita a consultas
+    "8630": ("E", "CLÍNICA"),                   # resto de atenção ambulatorial
     "8640": ("E", "MÉDICO / HOSPITALAR"),       # laboratórios / diagnóstico
     "8650": ("E", "MÉDICO / HOSPITALAR"),       # profissionais da área de saúde
     "8660": ("E", "MÉDICO / HOSPITALAR"),
@@ -125,6 +126,8 @@ def clasificar(cnae: Optional[str], natureza: Optional[str] = None
         desc = "HOSPITAL PÚBLICO" if pub else "HOSPITAL PARTICULAR"
     elif desc == "CLÍNICA":
         desc = "CLÍNICA PUBLICA" if pub else "CLÍNICA PARTICULAR"
+    elif desc == "CONSULTÓRIO":
+        desc = "CONSULTÓRIO PÚBLICO" if pub else "CONSULTÓRIO PARTICULAR"
     elif desc == "ESCOLA":
         if pub:
             nat = (natureza or "").strip()[:4]
