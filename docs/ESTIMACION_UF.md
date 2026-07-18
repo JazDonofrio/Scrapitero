@@ -195,9 +195,12 @@ Cualquier valor distinto de `bci` se considera **estimación**.
 - **Mapa del survey**: los marcadores se colorean por **tipología** (no por `uso` crudo),
   combinando uso + UF estimadas: `vivienda` (resid. 1 UF), `edificio de viviendas`
   (resid. ≥2 UF), `comercio` (com. 1 UF), `edificio de comercios` (com. ≥2 UF), `mixto`,
-  `vacante`. La **leyenda** lista esas tipologías con su conteo, y cada marcador lleva un
-  **label permanente con la cantidad de UF totales** de la parcela (ver `categoriaMapa`,
-  `CAT_COLOR`/`CAT_LABEL` en index.html).
+  `vacante`. La **leyenda (referencias)** lista los **tipos de edificación de la taxonomía
+  del cliente** (`tipo_edificacion`: RESIDÊNCIA, APARTAMENTO, BAR, ESCOLA, HOTEL, LOTE VAZIO…
+  — ver `docs/TIPOS_PROPIEDAD.md`) con su conteo; el punto de cada línea usa el color del
+  marcador (la tipología amplia). Con una comparativa activa la leyenda pasa a listar por
+  estado (nueva/cambió/igual). Cada marcador lleva un **label permanente con la cantidad de
+  UF totales** de la parcela (ver `categoriaMapa`, `CAT_COLOR`/`CAT_LABEL` en index.html).
 - **Cuadro de actividad** ("Actividad" del survey): al correr `UnidadesEstimator` se
   registran las **situaciones particulares** que explican el número final — p.ej.
   "Caseros 549 (mixto): edificio de 2373 m² de 1 planta → 1 vivienda (no subdividido)",
