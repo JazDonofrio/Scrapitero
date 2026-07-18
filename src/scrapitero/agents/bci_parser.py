@@ -75,6 +75,36 @@ def _br_num(s: str) -> Optional[float]:
         return None
 
 
+# ── Vocabulario de USO de la edificación (BCI de Várzea Grande) ─────────────────
+# El "uso" de cada unidade aparece en el PDF como "... USO <VALOR>" (en la línea de
+# acabamento). El BCI usa más valores que los 4 clásicos; los enumeramos explícitamente
+# para NO confundirlos con otros campos que también dicen "USO" (USO INTERNO / USO
+# TERRENO / USO PARTICULAR / USO EDIFICAÇÃO, que son headers de otras secciones).
+# Mapeo a la categoría de UF del relevamiento. Decisión del cliente: todo lo construido
+# que no es vivienda ni industria cuenta como COMÉRCIO EM GERAL (1 unidad de comercio):
+# servicios, enseñanza, religioso y público (municipal/estadual/federal).
+_BCI_USO_CAT = {
+    "RESIDENCIAL": "vivienda",
+    "COMERCIAL":   "comercio",
+    "SERVICOS":    "comercio",
+    "SERVIÇOS":    "comercio",
+    "ENSINO":      "comercio",
+    "RELIGIOSO":   "comercio",
+    "MUNICIPAL":   "comercio",
+    "ESTADUAL":    "comercio",
+    "FEDERAL":     "comercio",
+    "INDUSTRIAL":  "industrial",
+    "MISTO":       "comercio",   # a nivel unidade, la porción no residencial → comercio
+}
+# Regex que captura sólo los valores conocidos (los más largos primero para no cortar).
+_BCI_USO_RE = r'\bUSO\s+(' + "|".join(
+    sorted(_BCI_USO_CAT, key=len, reverse=True)) + r')\b'
+# Etiqueta canónica de uso por unidad (lo que se guarda en parcela_unidades.uso y usa el
+# CSV expandido). Servicios/religioso/ensino/público quedan como 'comercial'.
+_CAT_USO_LABEL = {"vivienda": "residencial", "comercio": "comercial",
+                  "industrial": "industrial"}
+
+
 # ── Parser de campos ───────────────────────────────────────────────────────────
 
 def _parse_bci(text: str) -> dict:
@@ -131,7 +161,8 @@ def _parse_bci(text: str) -> dict:
             n_u, cod_u, area_u, _area_tot = mu.groups()
             fin = unit_iter[i + 1].start() if i + 1 < len(unit_iter) else len(text)
             blk = text[mu.end():fin]
-            uso_m = re.search(r'\bUSO\s+(RESIDENCIAL|COMERCIAL|INDUSTRIAL|MISTO)\b', blk, re.I)
+            uso_m = re.search(_BCI_USO_RE, blk, re.I)
+            uso_cat = _BCI_USO_CAT.get(uso_m.group(1).upper()) if uso_m else None
             ano_m = re.search(r'ANO\s+CONSTRU[CÇ][AÃ]O:?\s*(\d{4})', blk, re.I)
             try:
                 area_v = float(area_u.replace(",", "."))
@@ -142,20 +173,26 @@ def _parse_bci(text: str) -> dict:
                 "codigo": cod_u,
                 "area_m2": area_v,
                 "anio": int(ano_m.group(1)) if (ano_m and ano_m.group(1) != "0") else None,
-                "uso": uso_m.group(1).lower() if uso_m else None,
+                # Etiqueta canónica (servicios/religioso/etc. → comercial) para que la
+                # expansión del CSV cuente la unidad como comercio, no como vivienda.
+                "uso": _CAT_USO_LABEL.get(uso_cat) if uso_cat else None,
             })
         r["unidades"] = unidades
 
-        usos = re.findall(r'\bUSO\s+(RESIDENCIAL|COMERCIAL|INDUSTRIAL|MISTO)\b', text, re.I)
-        r["uf_vivienda"] = sum(1 for u in usos if u.upper() == "RESIDENCIAL")
-        r["uf_comercio"] = sum(1 for u in usos if u.upper() == "COMERCIAL")
+        # Cada "USO <X>" reconocido suma 1 UF a su categoría. Servicios/religioso/
+        # ensino/público cuentan como comercio (COMÉRCIO EM GERAL) por decisión del
+        # cliente; antes caían fuera del whitelist → 0 UF + uso_principal 'residencial'.
+        usos = re.findall(_BCI_USO_RE, text, re.I)
+        cats = [_BCI_USO_CAT[u.upper()] for u in usos]
+        r["uf_vivienda"] = sum(1 for c in cats if c == "vivienda")
+        r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
         r["uf_total"] = len(unit_iter) or len(usos)
 
         if r["uf_comercio"] > 0 and r["uf_vivienda"] > 0:
             r["uso_principal"] = "mixto"
         elif r["uf_comercio"] > 0:
             r["uso_principal"] = "comercial"
-        elif re.search(r'\bUSO\s+INDUSTRIAL\b', text, re.I):
+        elif "industrial" in cats:
             r["uso_principal"] = "industrial"
         else:
             r["uso_principal"] = "residencial"
