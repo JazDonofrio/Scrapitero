@@ -19,6 +19,7 @@ Requiere variable de entorno:
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Optional
@@ -77,6 +78,41 @@ def _parse_components(components: list[dict]) -> dict:
             if field and field not in result:
                 result[field] = comp.get("long_name", "")
     return result
+
+
+# ── Caché de reverse geocoding (coord→dirección) — migración 032 ──────────────
+# El mismo punto físico se re-resuelve en re-runs, sub-zonas y regiones "copia"
+# (mismo centroide en dos regiones). Cacheamos por coordenada redondeada + idioma
+# para no re-pagarle a Google por el mismo lugar. Sólo se cachean resultados útiles
+# (con calle o número); los vacíos quedan sin cachear (se reintentan, son baratos).
+
+def _rev_key(lat: float, lng: float, language: str) -> str:
+    return f"{lat:.6f}|{lng:.6f}|{language}"
+
+
+def _reverse_geocode_cached(engine, lat: float, lng: float, api_key: str,
+                            language: str) -> tuple[dict, bool]:
+    """Devuelve (componentes_parseados, desde_cache). Reusa el caché por coordenada;
+    en miss pega a Google, parsea y guarda el resultado si es útil."""
+    clave = _rev_key(lat, lng, language)
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT componentes FROM reverse_geocode_cache WHERE clave = :k"),
+            {"k": clave},
+        ).fetchone()
+    if row is not None:
+        return (row[0] or {}), True
+
+    resultado = _reverse_geocode(lat, lng, api_key, language)
+    addr_g = _parse_components(resultado.get("address_components", [])) if resultado else {}
+    if addr_g.get("calle") or addr_g.get("numero"):
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO reverse_geocode_cache (clave, componentes)
+                VALUES (:k, CAST(:comp AS JSONB))
+                ON CONFLICT (clave) DO NOTHING
+            """), {"k": clave, "comp": json.dumps(addr_g, ensure_ascii=False)})
+    return addr_g, False
 
 
 def _detect_language(region_id: str) -> str:
@@ -311,6 +347,7 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
         resueltas_google = 0
         sin_resultado = 0
         google_calls = 0
+        cache_hits = 0
 
         with engine.begin() as conn:
             for p in parcelas:
@@ -328,33 +365,35 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
                         )
                         continue
 
-                # ── Estrategia 2: Google Maps API ──────────────────────────
+                # ── Estrategia 2: Google Maps API (con caché coord→dirección) ──
                 if not api_key:
                     sin_resultado += 1
                     continue
 
-                resultado = _reverse_geocode(p["lat"], p["lng"], api_key, language)
-                google_calls += 1
+                addr_g, desde_cache = _reverse_geocode_cached(
+                    engine, p["lat"], p["lng"], api_key, language)
+                if desde_cache:
+                    cache_hits += 1
+                else:
+                    google_calls += 1
 
-                if resultado:
-                    addr_g = _parse_components(resultado.get("address_components", []))
-                    # Para parciales: basta con encontrar numero; para completas: necesitamos calle
-                    useful = addr_g.get("numero") if preserve_calle else addr_g.get("calle")
-                    if useful:
-                        _update_parcela_direccion(conn, p["parcela_id"], addr_g, preserve_calle)
-                        resueltas_google += 1
-                        logger.debug(
-                            f"✓ Google {'[parcial] ' if preserve_calle else ''}"
-                            f"{p['parcela_id'][:8]}… → "
-                            f"{p.get('calle_existente') or addr_g.get('calle', '')} "
-                            f"{addr_g.get('numero', '')}"
-                        )
-                    else:
-                        sin_resultado += 1
+                # Para parciales: basta con encontrar numero; para completas: necesitamos calle
+                useful = addr_g.get("numero") if preserve_calle else addr_g.get("calle")
+                if useful:
+                    _update_parcela_direccion(conn, p["parcela_id"], addr_g, preserve_calle)
+                    resueltas_google += 1
+                    logger.debug(
+                        f"✓ Google{' [cache]' if desde_cache else ''}"
+                        f"{' [parcial]' if preserve_calle else ''} "
+                        f"{p['parcela_id'][:8]}… → "
+                        f"{p.get('calle_existente') or addr_g.get('calle', '')} "
+                        f"{addr_g.get('numero', '')}"
+                    )
                 else:
                     sin_resultado += 1
 
-                if input.delay_ms > 0:
+                # Throttle sólo cuando realmente pegamos a Google (no en cache hit)
+                if not desde_cache and input.delay_ms > 0:
                     time.sleep(input.delay_ms / 1000)
 
         resueltas = resueltas_logr + resueltas_google
@@ -363,7 +402,8 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
         logger.info(
             f"AddressResolver: {resueltas} resueltas "
             f"({resueltas_logr} IBGE gratis, {resueltas_google} Google), "
-            f"{sin_resultado} sin resultado. Costo estimado: USD {costo:.2f}"
+            f"{sin_resultado} sin resultado, {cache_hits} de caché (sin costo). "
+            f"Costo estimado: USD {costo:.2f}"
         )
 
         return AddressResolverOutput(
