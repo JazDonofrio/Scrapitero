@@ -73,7 +73,13 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
                 SELECT p.parcela_id,
                        string_agg(DISTINCT e.descripcion, ', ' ORDER BY e.descripcion) AS descripciones,
                        MAX(CASE e.categoria WHEN 'E' THEN 3 WHEN 'C' THEN 2 WHEN 'R' THEN 1 ELSE 0 END) AS catrank
-                FROM parcelas p JOIN e ON ST_Contains(p.geometry, e.geom)
+                FROM parcelas p JOIN e
+                    -- tolerancia de borde (5 m): un punto de geocoding/tag puede caer
+                    -- unos metros afuera del polígono real y ST_Contains (contención
+                    -- estricta) nunca lo cuenta, aunque el establecimiento esté
+                    -- claramente pegado a esa parcela
+                    ON (ST_Contains(p.geometry, e.geom)
+                        OR ST_DWithin(p.geometry::geography, e.geom::geography, 5))
                 WHERE p.region_id=:rid AND p.geometry IS NOT NULL
                 GROUP BY p.parcela_id
             )
@@ -84,6 +90,23 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
             FROM hit WHERE p.parcela_id = hit.parcela_id
             RETURNING p.categoria_uso, p.descripcion_uso
         """), {"rid": input.region_id}).fetchall()
+
+        # Piso mínimo de UF para shoppings: ni Receita (el CNAE de administración de
+        # propiedades no distingue locales) ni OSM/Google traen la cantidad de locales de
+        # un shopping real, así que BCI/UnidadesEstimator lo dejan con la UF genérica del
+        # edificio (con frecuencia 1, muy por debajo de la realidad de un mall con decenas
+        # de locales). No hay de dónde sacar el conteo REAL gratis — esto NO lo resuelve,
+        # solo evita el 0/1 evidentemente incorrecto para una parcela con actividad
+        # comercial confirmada. `uf_fuente='shopping_min'` deja explícito que es un piso,
+        # no un conteo exacto (no se pisa un conteo real ya mayor).
+        conn.execute(text("""
+            UPDATE parcelas SET
+                uf_comercio = 1,
+                unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0) + 1,
+                uf_fuente = 'shopping_min'
+            WHERE region_id=:rid AND descripcion_uso ILIKE '%SHOPPING%'
+              AND COALESCE(uf_comercio, 0) < 1
+        """), {"rid": input.region_id})
 
     out.parcelas_selladas = len(res)
     for cat, desc in res:

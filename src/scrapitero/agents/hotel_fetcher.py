@@ -65,6 +65,10 @@ class HotelFetcherInput(BaseModel):
     proxy_hab_max: int = 400
     # Dedupe cross-fuente sin CNPJ (Google no trae): unir por nombre similar + proximidad.
     merge_dist_m: float = 200.0
+    # Radio amplio cuando el nombre es FUERTE (igual o núcleo idéntico): las coordenadas de
+    # Cadastur/Receita salen de geocodificar la dirección fiscal y caen lejos del pin real
+    # (en VG: Casa Nova 303 m, Express 573 m, Ceolatto 1566 m, Las Velas 2135 m).
+    merge_dist_fuerte_m: float = 2500.0
     # Buffer al recorte de zona: incluye hoteles pegados al límite (geocoding ±metros)
     # que de otro modo caerían justo afuera del polígono.
     borde_buffer_m: float = 40.0
@@ -124,22 +128,34 @@ def _tokens_sig(n: str) -> set:
 
 
 def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
-    """¿Son el mismo nombre de hotel? Igual normalizado; uno contenido en el otro por tokens;
-    o, **ignorando palabras genéricas** (hotel/pousada/…), el núcleo distintivo de uno está
-    contenido en el del otro o comparten ≥2 tokens distintivos; o ratio difflib ≥ 0.82."""
+    """¿Son el mismo nombre de hotel? Igual normalizado; **núcleo distintivo idéntico**
+    (ignorando palabras genéricas hotel/pousada/ltda/…: "HOTEL TAINA" ≡ "Tainá Hotel");
+    ≥2 tokens distintivos en común; o ratio difflib ≥ 0.82.
+    NO alcanza compartir UNA palabra: un comercio llamado "Amazon" no es el
+    "Amazon Hotel Aeroporto" (era el bug del subset de tokens crudos)."""
     import difflib
     na, nb = _norm(a), _norm(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    ta, tb = set(na.split()), set(nb.split())
-    if ta and tb and (ta <= tb or tb <= ta):
-        return True
     sa, sb = _tokens_sig(na), _tokens_sig(nb)
-    if sa and sb and (sa <= sb or sb <= sa or len(sa & sb) >= 2):
+    if sa and sb and (sa == sb or len(sa & sb) >= 2):
         return True
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
+
+
+def _nombre_fuerte(a: Optional[str], b: Optional[str]) -> bool:
+    """Señal FUERTE de mismo nombre: igual normalizado o núcleo distintivo idéntico.
+    Habilita el radio de merge amplio (las coordenadas de Cadastur/Receita salen de
+    geocodificar la dirección fiscal y pueden caer a cientos de metros del hotel real)."""
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    sa, sb = _tokens_sig(na), _tokens_sig(nb)
+    return bool(sa) and sa == sb
 
 
 def _clave_dir(h: dict) -> Optional[str]:
@@ -158,21 +174,39 @@ def _clave_dir(h: dict) -> Optional[str]:
     return k if (k and k.rsplit("|", 1)[-1]) else None
 
 
-def _mismo_hotel(a: dict, b: dict, max_dist_m: float) -> bool:
+def _mismo_hotel(a: dict, b: dict, max_dist_m: float, max_dist_fuerte_m: float = 0.0) -> bool:
     """Dos registros = el mismo hotel:
       1. mismo CNPJ (cuando ambos lo tienen);
-      2. **igual dirección** (calle+número normalizados) — el criterio principal cross-fuente,
+      2. CNPJs DISTINTOS ya **no** descarta: el dueño cierra una empresa y abre otra para
+         el mismo hotel (re-registro/matriz-filial). Se exige evidencia estricta: mismo
+         nombre + misma dirección, o mismo nombre fuerte a ≤ `max_dist_m`;
+      3. **igual dirección** (calle+número normalizados) — criterio principal cross-fuente,
          independiente de las coordenadas (cada fuente geocodifica distinto);
-      3. fallback sin lo anterior: nombre similar + a menos de `max_dist_m` metros."""
-    if a.get("cnpj") and b.get("cnpj"):
-        return a["cnpj"] == b["cnpj"]
+      4. nombre FUERTE (igual o núcleo distintivo idéntico) + ≤ `max_dist_fuerte_m`: las
+         coords de Cadastur/Receita son la dirección fiscal geocodificada y caen a cientos
+         de metros del pin real de Google/OSM;
+      5. nombre similar (débil) + ≤ `max_dist_m`."""
+    if a.get("cnpj") and b.get("cnpj") and a["cnpj"] == b["cnpj"]:
+        return True
+    cnpjs_distintos = bool(a.get("cnpj") and b.get("cnpj"))
     ka, kb = _clave_dir(a), _clave_dir(b)
-    if ka and kb and ka == kb:        # igual dirección ⇒ mismo hotel (sea cual sea la distancia)
+    misma_dir = bool(ka and kb and ka == kb)
+    if cnpjs_distintos:
+        # dos personas jurídicas: solo si es evidentemente el MISMO hotel físico
+        if misma_dir:
+            return _nombre_similar(a.get("nombre"), b.get("nombre"))
+        if a.get("lat") is None or b.get("lat") is None:
+            return False
+        return (_nombre_fuerte(a.get("nombre"), b.get("nombre"))
+                and _dist_m(a["lat"], a["lng"], b["lat"], b["lng"]) <= max_dist_m)
+    if misma_dir:                     # igual dirección ⇒ mismo hotel (sea cual sea la distancia)
         return True
     if a.get("lat") is None or b.get("lat") is None:
         return False
-    return (_nombre_similar(a.get("nombre"), b.get("nombre"))
-            and _dist_m(a["lat"], a["lng"], b["lat"], b["lng"]) <= max_dist_m)
+    d = _dist_m(a["lat"], a["lng"], b["lat"], b["lng"])
+    if _nombre_fuerte(a.get("nombre"), b.get("nombre")):
+        return d <= max(max_dist_fuerte_m, max_dist_m)
+    return _nombre_similar(a.get("nombre"), b.get("nombre")) and d <= max_dist_m
 
 
 def _municipio_nombre_uf(cod: str, client: httpx.Client) -> tuple[Optional[str], Optional[str]]:
@@ -627,14 +661,33 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         if sum(geo_stats.values()):
             logger.info("HotelFetcher geocoding: " + ", ".join(
                 f"{k}={v}" for k, v in geo_stats.items() if v))
+        # El cap se aplica ACÁ, a lo recién buscado — nunca a `hoteles` ya mezclado con
+        # semillas de otras fuentes: aplicado después del merge, `hoteles[:max_hoteles]`
+        # podía cortar justo los hoteles de esta corrida (las semillas quedan primero en
+        # la lista) mientras el DELETE por fuente ya había borrado sus filas viejas →
+        # desaparecían de la región sin dejar rastro.
+        if input.max_hoteles:
+            ubicados = ubicados[:input.max_hoteles]
 
     # Dedupe entre fuentes: por CNPJ cuando ambos lo tienen; si no (Google no trae CNPJ),
-    # por nombre similar + proximidad espacial (≤ merge_dist_m) para no contar 2 veces el
-    # mismo hotel que aportan dos fuentes con coordenadas algo distintas.
+    # por dirección normalizada o nombre + proximidad (radio amplio si el nombre es fuerte:
+    # las coords de Cadastur/Receita son la dirección fiscal geocodificada, no el hotel).
     _FUENTE_PRIO = {"cadastur": 3, "receita": 2, "osm": 1, "google": 0}
+    # Para la UBICACIÓN el orden se invierte: Google/OSM traen el pin físico real;
+    # Cadastur/Receita, una dirección (a veces fiscal) geocodificada.
+    _GEO_PRIO = {"google": 3, "osm": 2, "cadastur": 1, "receita": 0}
 
     def _merge_into(g: dict, h: dict) -> None:
         h_mejor = _FUENTE_PRIO.get(h["fuente"], 0) > _FUENTE_PRIO.get(g["fuente"], 0)
+        # Ubicación + dirección física: manda el pin real (Google/OSM). La dirección fiscal
+        # de Receita geocodificada era lo que confundía a la asistencia humana.
+        g_geo = g.get("geo_fuente") or g["fuente"]
+        if h.get("lat") is not None and (
+                g.get("lat") is None
+                or _GEO_PRIO.get(h["fuente"], 0) > _GEO_PRIO.get(g_geo, 0)):
+            g["lat"], g["lng"], g["geo_fuente"] = h["lat"], h["lng"], h["fuente"]
+            if h.get("direccion") and h["fuente"] in ("google", "osm"):
+                g["direccion"], g["dir_fisica"] = h["direccion"], True
         # Habitaciones: manda la fuente MÁS confiable (Cadastur UH real > estimación IA de
         # Google). Si la más confiable no tiene dato, se completa con la otra.
         if h["uh"] and (h_mejor or not g["uh"]):
@@ -645,84 +698,191 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
         g["estrellas"] = g["estrellas"] or h["estrellas"]
         g["cnpj"] = g["cnpj"] or h["cnpj"]
         g["business_status"] = g.get("business_status") or h.get("business_status")
-        g["cerrado"] = g["cerrado"] or h["cerrado"]
         g["telefono"] = g.get("telefono") or h.get("telefono")
         if h_mejor:
-            # identidad de la fuente más confiable (Cadastur > Receita > OSM > Google)
-            for k in ("nombre", "direccion", "tipo", "situacion", "fuente"):
+            # identidad de la fuente más confiable (Cadastur > Receita > OSM > Google);
+            # la dirección solo si el grupo no tiene ya la física del pin real. `cerrado`
+            # SIGUE a la fuente ganadora (no un OR acumulativo): si quedó cerrado por un
+            # falso positivo de Google en una corrida vieja y hoy Cadastur (más confiable)
+            # dice que está activo, tiene que poder reabrir — un OR nunca deja volver atrás.
+            g["cerrado"] = h["cerrado"]
+            for k in ("nombre", "tipo", "situacion"):
                 if h.get(k):
                     g[k] = h[k]
+            # `fuente` NO se pisa si `g` es una semilla (o ya absorbió una): esa columna es
+            # lo único que decide, en la PRÓXIMA corrida, si la fila cuenta como semilla
+            # protegida (`fuente != ANY(fuentes_run)`). Si se pisara con la fuente de HOY,
+            # la próxima vez que se re-corra esa misma fuente la fila se borraría de nuevo
+            # como "propia" y jamás volvería a entrar como semilla — el pin/negocio real
+            # de Google/OSM rescatado hoy se perdería en el siguiente re-corte gratuito.
+            if h.get("fuente") and not (g.get("_seed_id") or g.get("_dirty")):
+                g["fuente"] = h["fuente"]
+            if h.get("direccion") and not g.get("dir_fisica"):
+                g["direccion"] = h["direccion"]
         else:
             g["direccion"] = g.get("direccion") or h.get("direccion")
             g["situacion"] = g["situacion"] or h["situacion"]
 
-    grupos: list[dict] = []
-    by_cnpj: dict = {}
+    # Semillas cross-run: filas ya en DB de fuentes que NO corren en este run (p.ej. Google,
+    # paga, de una corrida anterior). Entran al dedupe como grupos para que las fuentes de
+    # hoy se FUSIONEN con ellas en vez de duplicarlas ('demo' se conserva aparte, como hoy).
+    # Si una semilla absorbe datos se borra y reinserta mergeada; intacta, queda como está.
+    fuentes_run = list(out.por_fuente.keys())
+    semillas: list[dict] = []
+    with engine.connect() as conn:
+        # Scope por survey (mismo patrón que /api/surveys/{id}/hoteles-asistencia): filas
+        # SIN survey_id (comunes al survey grande y sus sub-zonas) + las del survey actual.
+        # Sin esto, correr el paso de hoteles sobre UN survey podía absorber y reetiquetar
+        # (línea de abajo, "sid": input.survey_id) los hoteles de Google de OTRO survey de
+        # la misma región, haciéndolos desaparecer de ahí — "los relevamientos nunca se
+        # pisan" (CLAUDE.md).
+        for r in conn.execute(text("""
+            SELECT hotel_id::text, nombre, cnpj, tipo, direccion, telefono,
+                   ST_Y(location), ST_X(location), habitaciones, habitaciones_fuente,
+                   leitos, estrellas, fuente, situacion_cadastur, business_status, cerrado_def,
+                   survey_id::text
+            FROM hoteles
+            WHERE region_id = :r AND fuente != 'demo' AND NOT (fuente = ANY(:f))
+              AND (survey_id IS NULL OR CAST(:sid AS uuid) IS NULL
+                   OR survey_id = CAST(:sid AS uuid))
+        """), {"r": input.region_id, "f": fuentes_run, "sid": input.survey_id}):
+            semillas.append({
+                "_seed_id": r[0], "nombre": r[1],
+                "cnpj": (re.sub(r"\D", "", r[2] or "")[:20] or None), "tipo": r[3],
+                "direccion": r[4], "telefono": r[5],
+                "lat": float(r[6]) if r[6] is not None else None,
+                "lng": float(r[7]) if r[7] is not None else None,
+                "uh": r[8], "hab_fuente": r[9], "leitos": r[10], "estrellas": r[11],
+                "fuente": r[12], "geo_fuente": r[12],
+                "dir_fisica": r[12] in ("google", "osm"),
+                "situacion": r[13], "business_status": r[14], "cerrado": bool(r[15]),
+                "survey_id": r[16],
+            })
+
+    grupos: list[dict] = list(semillas)
+    by_cnpj: dict = {s["cnpj"]: s for s in semillas if s.get("cnpj")}
     for h in ubicados:
         g = by_cnpj.get(h["cnpj"]) if h.get("cnpj") else None
         if g is None:
             for cand in grupos:
-                if _mismo_hotel(h, cand, input.merge_dist_m):
+                if _mismo_hotel(h, cand, input.merge_dist_m, input.merge_dist_fuerte_m):
                     g = cand
                     break
         if g is None:
             g = dict(h)
+            g["geo_fuente"] = h["fuente"]
+            g["dir_fisica"] = h["fuente"] in ("google", "osm")
+            g["survey_id"] = input.survey_id
             grupos.append(g)
         else:
             _merge_into(g, h)
+            g["_dirty"] = True
         if g.get("cnpj") and g["cnpj"] not in by_cnpj:
             by_cnpj[g["cnpj"]] = g
-    hoteles = grupos
-    if input.max_hoteles:
-        hoteles = hoteles[:input.max_hoteles]
+    hoteles = grupos      # el cap de max_hoteles ya se aplicó sobre `ubicados` (arriba),
+                           # no acá: acá `grupos` ya incluye semillas que no hay que cortar
     out.hoteles_en_zona = len(hoteles)
     if not hoteles:
         _tg(f"🏨 {out.municipio}: 0 hoteles dentro de la zona.")
         return out
 
-    fuentes_run = list(out.por_fuente.keys())
     with engine.begin() as conn:
         # Idempotente: borra lo de estas fuentes para esta región y reinserta (la
-        # fuente 'demo' u otras se conservan). OSM no tiene CNPJ → no sirve ON CONFLICT.
-        conn.execute(text("DELETE FROM hoteles WHERE region_id=:r AND fuente=ANY(:f)"),
-                     {"r": input.region_id, "f": fuentes_run})
+        # fuente 'demo' u otras se conservan). Acotado al MISMO scope de survey que la
+        # query de semillas (arriba): sin este filtro, correr el paso sobre un survey
+        # chico borraba también las filas de esas fuentes que pertenecían a OTRO survey
+        # de la misma región (survey grande / otra sub-zona) y nadie las reinsertaba.
+        conn.execute(text("""
+            DELETE FROM hoteles WHERE region_id=:r AND fuente=ANY(:f)
+              AND (survey_id IS NULL OR CAST(:sid AS uuid) IS NULL
+                   OR survey_id = CAST(:sid AS uuid))
+        """), {"r": input.region_id, "f": fuentes_run, "sid": input.survey_id})
+        # Semillas que absorbieron datos de este run: su fila vieja se reemplaza por el
+        # grupo mergeado. Las intactas no se tocan (conservan hotel_id/parcela/estado).
+        absorbidas = [h["_seed_id"] for h in hoteles if h.get("_seed_id") and h.get("_dirty")]
+        if absorbidas:
+            conn.execute(text("DELETE FROM hoteles WHERE hotel_id::text = ANY(:ids)"),
+                         {"ids": absorbidas})
+        insertados: list[str] = []      # hotel_ids escritos en ESTE run (para los updates)
         for h in hoteles:
-            conn.execute(text("""
+            if h.get("_seed_id") and not h.get("_dirty"):
+                continue
+            hid = str(uuid.uuid4())
+            # Semilla absorbida ⇒ conserva SU survey_id original (nunca lo cambia el merge,
+            # así no le roba visibilidad a otro survey de la región); grupo nuevo ⇒ el de
+            # esta corrida (ya seteado al crearlo, más arriba).
+            sid = h["survey_id"] if "survey_id" in h else input.survey_id
+            # ON CONFLICT sobre uq_hoteles_region_cnpj (mig. 025): si el mismo CNPJ ya existe
+            # por una fila de OTRO survey que el scope de semillas no atrapó (dedupe en
+            # memoria solo ve las filas de survey propio/compartido), esto actualiza el
+            # contenido en vez de romper la transacción — y deliberadamente NO toca
+            # survey_id en el UPDATE, para no robarle la fila a quien la creó. Con cnpj
+            # NULL (OSM) el constraint nunca conflictúa (NULL≠NULL en Postgres), así que
+            # siempre inserta.
+            real_id = conn.execute(text("""
                 INSERT INTO hoteles (hotel_id, survey_id, region_id, nombre, cnpj, tipo,
                     direccion, telefono, location, habitaciones, habitaciones_fuente, leitos,
                     estrellas, fuente, situacion_cadastur, business_status, cerrado_def)
                 VALUES (:id, :sid, :rid, :nombre, :cnpj, :tipo, :dir, :tel,
                     ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), :uh, :habf, :leitos, :est,
                     :fuente, :sit, :bs, :cerr)
-            """), {"id": str(uuid.uuid4()), "sid": input.survey_id, "rid": input.region_id,
+                ON CONFLICT ON CONSTRAINT uq_hoteles_region_cnpj DO UPDATE SET
+                    nombre=EXCLUDED.nombre, tipo=EXCLUDED.tipo, direccion=EXCLUDED.direccion,
+                    telefono=EXCLUDED.telefono, location=EXCLUDED.location,
+                    habitaciones=EXCLUDED.habitaciones,
+                    habitaciones_fuente=EXCLUDED.habitaciones_fuente,
+                    leitos=EXCLUDED.leitos, estrellas=EXCLUDED.estrellas,
+                    fuente=EXCLUDED.fuente, situacion_cadastur=EXCLUDED.situacion_cadastur,
+                    business_status=EXCLUDED.business_status, cerrado_def=EXCLUDED.cerrado_def
+                RETURNING hotel_id::text
+            """), {"id": hid, "sid": sid, "rid": input.region_id,
                    "nombre": h["nombre"], "cnpj": h["cnpj"], "tipo": h["tipo"],
                    "dir": h["direccion"], "tel": h.get("telefono"), "lng": h["lng"], "lat": h["lat"],
                    "uh": h["uh"], "habf": h.get("hab_fuente"), "leitos": h["leitos"],
                    "est": h["estrellas"], "fuente": h["fuente"], "sit": h["situacion"],
-                   "bs": h.get("business_status"), "cerr": h["cerrado"]})
+                   "bs": h.get("business_status"), "cerr": h["cerrado"]}).scalar()
+            insertados.append(real_id)
 
+        # Los updates de abajo van por hotel_id insertado (no por fuente): un grupo mergeado
+        # puede conservar la fuente de una semilla que no corrió en este run (p.ej. cadastur).
         conn.execute(text("""
             UPDATE hoteles h SET parcela_id = p.parcela_id
             FROM parcelas p
-            WHERE p.region_id = :rid AND h.region_id = :rid AND h.fuente = ANY(:f)
+            WHERE p.region_id = :rid AND h.hotel_id::text = ANY(:ids)
               AND p.geometry IS NOT NULL AND h.location IS NOT NULL
               AND ST_Contains(p.geometry, h.location)
-        """), {"rid": input.region_id, "f": fuentes_run})
+        """), {"rid": input.region_id, "ids": insertados})
 
-        # Enriquecer abierto/cerrado con el business_status de Google (comercios cercanos)
-        conn.execute(text("""
-            UPDATE hoteles h SET business_status = c.business_status
-            FROM comercios c
-            WHERE c.region_id = :rid AND h.region_id = :rid AND h.fuente = ANY(:f)
-              AND c.location IS NOT NULL AND h.location IS NOT NULL
-              AND ST_DWithin(c.location::geography, h.location::geography, 60)
-              AND (c.rubro ILIKE '%hotel%' OR c.rubro ILIKE '%lodging%'
-                   OR c.tipos ILIKE '%lodging%' OR c.tipos ILIKE '%hotel%')
-        """), {"rid": input.region_id, "f": fuentes_run})
+        # Enriquecer abierto/cerrado con el business_status de Google (comercios cercanos).
+        # Exige NOMBRE similar además de proximidad: antes cualquier lodging a ≤60 m
+        # pisaba el estado de un hotel ajeno (era otro vector de confusión hotel↔comercio).
+        candidatos = conn.execute(text("""
+            SELECT nombre, business_status, ST_Y(location), ST_X(location)
+            FROM comercios
+            WHERE region_id = :rid AND location IS NOT NULL AND business_status IS NOT NULL
+              AND (rubro ILIKE '%hotel%' OR rubro ILIKE '%lodging%'
+                   OR tipos ILIKE '%lodging%' OR tipos ILIKE '%hotel%')
+        """), {"rid": input.region_id}).fetchall()
+        if candidatos:
+            filas = conn.execute(text("""
+                SELECT hotel_id::text, nombre, ST_Y(location), ST_X(location)
+                FROM hoteles WHERE hotel_id::text = ANY(:ids) AND location IS NOT NULL
+            """), {"ids": insertados}).fetchall()
+            for hid, hnombre, hlat, hlng in filas:
+                mejor = None
+                for cnombre, cbs, clat, clng in candidatos:
+                    d = _dist_m(hlat, hlng, clat, clng)
+                    if d <= 60 and _nombre_similar(hnombre, cnombre) \
+                            and (mejor is None or d < mejor[0]):
+                        mejor = (d, cbs)
+                if mejor:
+                    conn.execute(text(
+                        "UPDATE hoteles SET business_status=:bs WHERE hotel_id::text=:id"),
+                        {"bs": mejor[1], "id": hid})
         conn.execute(text("""
             UPDATE hoteles SET cerrado_def = TRUE
-            WHERE region_id = :rid AND fuente = ANY(:f) AND business_status = 'CLOSED_PERMANENTLY'
-        """), {"rid": input.region_id, "f": fuentes_run})
+            WHERE hotel_id::text = ANY(:ids) AND business_status = 'CLOSED_PERMANENTLY'
+        """), {"ids": insertados})
 
         # Habitaciones cargadas a MANO (asistencia humana): rellenan donde no hay dato
         # exacto (Cadastur UHs / OSM rooms). Sobreviven a re-cortes (tabla por CNPJ).
@@ -731,9 +891,9 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             UPDATE hoteles h
             SET habitaciones = m.habitaciones, habitaciones_fuente = 'manual'
             FROM hotel_habitaciones_manual m
-            WHERE h.region_id = :rid AND h.fuente = ANY(:f)
+            WHERE h.hotel_id::text = ANY(:ids)
               AND m.region_id = :rid AND h.cnpj = m.cnpj AND h.habitaciones IS NULL
-        """), {"rid": input.region_id, "f": fuentes_run})
+        """), {"rid": input.region_id, "ids": insertados})
 
         # ESTIMACIÓN de habitaciones por área del BCI cuando no hay dato exacto
         # (Cadastur UHs / OSM rooms). Proxy: area_construida / m2_por_habitacion.
@@ -744,19 +904,19 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 SET habitaciones = LEAST(GREATEST(ROUND(p.area_m2_construida / :m2)::int, 1), :habmax),
                     habitaciones_fuente = 'bci_proxy'
                 FROM parcelas p
-                WHERE h.region_id = :rid AND h.fuente = ANY(:f)
+                WHERE h.hotel_id::text = ANY(:ids)
                   AND h.parcela_id = p.parcela_id AND h.habitaciones IS NULL
                   AND p.area_m2_construida IS NOT NULL AND p.area_m2_construida > 0
                   AND p.area_m2_construida <= :areamax
-            """), {"rid": input.region_id, "f": fuentes_run, "m2": input.m2_por_habitacion,
+            """), {"ids": insertados, "m2": input.m2_por_habitacion,
                    "habmax": input.proxy_hab_max, "areamax": input.proxy_area_max_m2})
 
         out.vinculados_parcela = conn.execute(text(
-            "SELECT COUNT(*) FROM hoteles WHERE region_id=:r AND fuente=ANY(:f) AND parcela_id IS NOT NULL"),
-            {"r": input.region_id, "f": fuentes_run}).scalar() or 0
+            "SELECT COUNT(*) FROM hoteles WHERE hotel_id::text=ANY(:ids) AND parcela_id IS NOT NULL"),
+            {"ids": insertados}).scalar() or 0
         out.cerrados = conn.execute(text(
-            "SELECT COUNT(*) FROM hoteles WHERE region_id=:r AND fuente=ANY(:f) AND cerrado_def"),
-            {"r": input.region_id, "f": fuentes_run}).scalar() or 0
+            "SELECT COUNT(*) FROM hoteles WHERE hotel_id::text=ANY(:ids) AND cerrado_def"),
+            {"ids": insertados}).scalar() or 0
         # Hoteles ABIERTOS sin habitaciones (ninguna fuente las tiene) → asistencia humana.
         # Cuenta TODAS las fuentes de la región (no solo las de esta corrida): un hotel de
         # Google sin habitaciones (que un re-corte receita+osm no toca) igual necesita ayuda.
@@ -772,6 +932,25 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 WHERE region_id=:r AND parcela_id IS NOT NULL AND NOT cerrado_def
                 GROUP BY parcela_id
             """), {"r": input.region_id}).fetchall()
+            # Resetear las parcelas que en una corrida ANTERIOR tenían un hotel vinculado
+            # (uf_fuente='cadastur', la marca que deja el UPDATE de abajo) y hoy ya NO
+            # aparecen en filas_uf — el hotel cerró, se fusionó a otra parcela, o se
+            # re-geocodificó a una vecina. Sin esto, uf_comercio/uso_principal quedaban
+            # pegados para siempre con el valor viejo (y si el hotel se movió, terminaba
+            # contado en DOS parcelas a la vez: la vieja con el valor stale + la nueva).
+            vigentes = [pid for pid, _ in filas_uf]
+            conn.execute(text("""
+                UPDATE parcelas SET
+                    uf_comercio = 0,
+                    unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0),
+                    uf_fuente = NULL,
+                    uso_principal = CASE WHEN uso_fuente = 'cadastur' THEN NULL
+                                         ELSE uso_principal END,
+                    uso_fuente = CASE WHEN uso_fuente = 'cadastur' THEN NULL
+                                      ELSE uso_fuente END
+                WHERE region_id = :r AND uf_fuente = 'cadastur'
+                  AND NOT (parcela_id::text = ANY(:vigentes))
+            """), {"r": input.region_id, "vigentes": vigentes})
             for pid, uf in filas_uf:
                 uf = int(uf)
                 out.parcelas_con_hotel += 1

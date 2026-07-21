@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import unicodedata
 import uuid
 from typing import Optional
 
@@ -26,6 +28,39 @@ from sqlalchemy import text
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.baseline_geocoder import _HEADERS, _tg
 from scrapitero.db.engine import get_engine
+
+# Palabras genéricas que no distinguen un shopping de otro ("Shopping Iguatemi" vs
+# "Iguatemi Shopping Center" deben matchear por el núcleo "iguatemi").
+_GENERICOS_SHOPPING = {
+    "shopping", "shoppings", "mall", "center", "centro", "galeria", "galería",
+    "de", "da", "do", "dos", "das", "e",
+}
+
+
+def _norm(s: Optional[str]) -> str:
+    s = "".join(c for c in unicodedata.normalize("NFKD", str(s or ""))
+                if not unicodedata.combining(c))
+    return " ".join(s.lower().split())
+
+
+def _tokens_sig(n: str) -> set:
+    return {t for t in n.split() if t not in _GENERICOS_SHOPPING and len(t) > 1}
+
+
+def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
+    """¿Mismo shopping? Sin nombre en alguno de los dos, no hay señal — quien llama
+    decide el fallback (a distancia sola). Igual que hotel_fetcher._nombre_similar:
+    NO alcanza compartir una sola palabra genérica."""
+    import difflib
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    sa, sb = _tokens_sig(na), _tokens_sig(nb)
+    if sa and sb and (sa == sb or len(sa & sb) >= 2):
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
 
 
 class ShoppingFetcherInput(BaseModel):
@@ -141,20 +176,57 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"ShoppingFetcher Google falló: {e}")
 
-    # recorte a zona (buffereada) + dedupe por proximidad
+    # recorte a zona (buffereada)
     ubicados = [h for h in crudos if poly_clip.contains(Point(h["lng"], h["lat"]))]
-    final: list[dict] = []
+    fuentes_run = list(out.por_fuente.keys())
+
+    # Semillas cross-run: shoppings ya guardados en DB de fuentes que NO corren hoy (p.ej.
+    # Google, pago, de una corrida anterior; el paso gratis del pipeline solo corre OSM).
+    # Sin esto, cada combinación de fuentes distinta duplicaba el mismo shopping físico.
+    with engine.connect() as conn:
+        semillas = [dict(r._mapping) for r in conn.execute(text("""
+            SELECT poi_id::text, nombre, lat, lng, fuente FROM establecimientos_poi
+            WHERE region_id=:r AND categoria='E' AND descripcion='SHOPPING'
+              AND NOT (fuente = ANY(:f))
+        """), {"r": input.region_id, "f": fuentes_run})]
+    for s in semillas:
+        s["_seed_id"] = s.pop("poi_id")
+
+    # Dedupe por nombre + distancia (si ambos tienen nombre) o por sola distancia (si a
+    # alguno le falta, típico de un nodo OSM shop=mall sin tag name) — nunca por la sola
+    # cercanía cuando los dos nombres están y son distintos, para no fusionar dos
+    # shoppings/galerías reales que casualmente están cerca.
+    final: list[dict] = list(semillas)
     for h in ubicados:
-        if any(_dist_m(h["lat"], h["lng"], f["lat"], f["lng"]) <= input.merge_dist_m for f in final):
-            continue
-        final.append(h)
+        destino = None
+        for f in final:
+            if _dist_m(h["lat"], h["lng"], f["lat"], f["lng"]) > input.merge_dist_m:
+                continue
+            if h.get("nombre") and f.get("nombre"):
+                if _nombre_similar(h["nombre"], f["nombre"]):
+                    destino = f
+                    break
+            else:
+                destino = f
+                break
+        if destino is None:
+            final.append(h)
+        else:
+            if not destino.get("nombre") and h.get("nombre"):
+                destino["nombre"] = h["nombre"]
+            destino["_dirty"] = True
     out.en_zona = len(final)
 
-    fuentes_run = list(out.por_fuente.keys())
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM establecimientos_poi WHERE region_id=:r AND fuente=ANY(:f)"),
                      {"r": input.region_id, "f": fuentes_run})
+        absorbidas = [f["_seed_id"] for f in final if f.get("_seed_id") and f.get("_dirty")]
+        if absorbidas:
+            conn.execute(text("DELETE FROM establecimientos_poi WHERE poi_id::text = ANY(:ids)"),
+                         {"ids": absorbidas})
         for h in final:
+            if h.get("_seed_id") and not h.get("_dirty"):
+                continue        # semilla intacta: no se toca
             conn.execute(text("""
                 INSERT INTO establecimientos_poi (poi_id, region_id, fuente, categoria, descripcion, nombre, lat, lng)
                 VALUES (:id, :r, :f, 'E', 'SHOPPING', :n, :lat, :lng)
