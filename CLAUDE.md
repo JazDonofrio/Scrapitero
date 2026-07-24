@@ -313,6 +313,23 @@ HotelFetcher manda un **🆘 aviso por Telegram con un link** a la página `/asi
 del número (queda `habitaciones_fuente='manual'`, persiste por CNPJ a re-cortes). Los que la IA no
 encuentra (nombres basura de Google, etc.) caen acá. El popup del hotel muestra dirección completa.
 
+**Falsos hoteles → reclasificar a comercio (botón "🚫 No es hotel"):** Google Places a veces
+devuelve un comercio con `primaryType=lodging` (dato erróneo; p.ej. "Casa Cortina", tienda de
+cortinas — la Receita lo confirma comércio CNAE 4759, y no trae CNPJ para cruzarlo automático).
+En la asistencia, el link **"🚫 No es hotel"** de cada tarjeta abre un selector con la
+**taxonomía del cliente** (`GET /api/tipos-edificacion`, constante `TIPOS_EDIFICACION` en
+`web/app.py`, espejo de `docs/TIPOS_PROPIEDAD.md`); al elegir la etiqueta (típ. `COMÉRCIO EM
+GERAL`) el `POST /api/hoteles/{id}/no-es-hotel`: (1) **borra el hotel** (sale de la asistencia,
+no cuenta como hotel); (2) lo guarda en **`hotel_descartado`** (mig. 043) con etiqueta +
+coordenada → HotelFetcher lo **filtra** en la próxima corrida (`_cargar_descartados`/
+`_esta_descartado`: por CNPJ o nombre+proximidad ≤200 m, no reaparece) y el mapa lo **dibuja
+como comercio en su coordenada real** (marcador 🏪 color comercio vía
+`GET /api/surveys/{sid}/comercios-marcados` + `loadComerciosMarcados`), **sin** necesitar una
+parcela; (3) si tenía parcela, sella `parcela_tipo_manual` (override de máxima prioridad del
+"Tipo de edificación", gana a hotel/CNPJ/catastro); (4) corrige el `rubro` `lodging`→`comercio`
+del comercio homónimo cercano. Requisito del cliente: "ningún caso es ignorable" — el ex-hotel
+queda **visible como comercio en su coordenada**, no solo borrado.
+
 **Botón 🏨 Hoteles:** tilde **"Google (pago)"** para correr con/sin la fuente paga. En la
 leyenda del mapa, las líneas de hotel de la taxonomía del cliente (HOTEL/MOTEL/FLAT/PENSÃO)
 muestran, además del conteo de parcelas, el **total de habitaciones** de esos hoteles

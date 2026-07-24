@@ -174,6 +174,34 @@ def _clave_dir(h: dict) -> Optional[str]:
     return k if (k and k.rsplit("|", 1)[-1]) else None
 
 
+def _cargar_descartados(engine, region_id: str) -> list[dict]:
+    """Falsos hoteles marcados a mano por el operador (`hotel_descartado`, mig. 043) de la
+    región: Google/otra fuente que NO es hospedaje (p.ej. una tienda tagueada `lodging`)."""
+    try:
+        with engine.connect() as conn:
+            filas = conn.execute(text(
+                "SELECT cnpj, nombre_norm, lat, lng FROM hotel_descartado WHERE region_id=:r"),
+                {"r": region_id}).fetchall()
+    except Exception:  # tabla aún no migrada
+        return []
+    return [{"cnpj": (re.sub(r"\D", "", f[0] or "")[:20] or None), "nombre_norm": f[1],
+             "lat": f[2], "lng": f[3]} for f in filas]
+
+
+def _esta_descartado(h: dict, descartados: list[dict]) -> bool:
+    """¿`h` está en la lista de descartes? Por CNPJ (si ambos lo tienen); si no, por
+    nombre normalizado idéntico + proximidad ≤200 m (para los sin-CNPJ de Google/OSM)."""
+    hn = _norm(h.get("nombre"))
+    for d in descartados:
+        if d["cnpj"] and h.get("cnpj") and d["cnpj"] == h["cnpj"]:
+            return True
+        if (d["nombre_norm"] and hn and d["nombre_norm"] == hn
+                and d["lat"] is not None and h.get("lat") is not None
+                and _dist_m(h["lat"], h["lng"], d["lat"], d["lng"]) <= 200):
+            return True
+    return False
+
+
 def _mismo_hotel(a: dict, b: dict, max_dist_m: float, max_dist_fuerte_m: float = 0.0) -> bool:
     """Dos registros = el mismo hotel:
       1. mismo CNPJ (cuando ambos lo tienen);
@@ -607,6 +635,17 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 out.fuentes_fallidas["google"] = str(e)
                 logger.warning(f"HotelFetcher: Google falló: {e}")
 
+        # Descartes manuales del operador ("esto NO es hotel", p.ej. Google mal-tagueó una
+        # tienda como lodging). Se filtran ACÁ para que no vuelvan a entrar (por CNPJ si lo
+        # hay; si no —Google no trae—, por nombre normalizado + proximidad ≤200 m).
+        descartados = _cargar_descartados(engine, input.region_id)
+        if descartados and crudos:
+            antes = len(crudos)
+            crudos = [h for h in crudos if not _esta_descartado(h, descartados)]
+            if antes != len(crudos):
+                logger.info(f"HotelFetcher: {antes - len(crudos)} candidato(s) filtrado(s) "
+                            f"por descarte manual del operador (no son hoteles)")
+
         if not crudos:
             motivo = "; ".join(f"{k}: {v}" for k, v in out.fuentes_fallidas.items()) or "0 hoteles"
             if out.fuentes_fallidas and not out.por_fuente:
@@ -641,6 +680,13 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                     f"el resto va a Mapbox/Nominatim/Google (con caché).")
 
         ubicados = []
+        # Cadastur/Receita con CNPJ que geocodifican FUERA de la zona (o no geocodifican):
+        # su coordenada es la dirección fiscal, no confiable (cae lejos del hotel real, a
+        # veces afuera del polígono). Si ese CNPJ corresponde a un hotel que SÍ está en la
+        # zona (su pin físico de Google/OSM o una semilla), no hay que tirarlos: su DATO
+        # (habitaciones/nombre/situação) tiene que fusionarse en ese hotel. Se rescatan por
+        # CNPJ más abajo, una vez conocidas las semillas.
+        rescatables: list[dict] = []
         geo_stats = {"cache": 0, "mapbox": 0, "nominatim": 0, "google": 0}
         with engine.connect() as gconn:
             for h in crudos:
@@ -649,6 +695,8 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                                               f"{mun_nombre} - {uf}" if mun_nombre else None, "Brasil") if x)
                     hit = _geocode_cached(q, client, gconn) if q else None
                     if not hit:
+                        if h.get("cnpj"):    # sin coords pero con CNPJ → candidato a rescate
+                            rescatables.append(h)
                         continue
                     h["lat"], h["lng"] = hit[0], hit[1]
                     cache_hit = hit[3]
@@ -658,6 +706,8 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                         time.sleep(max(input.delay_ms, 0) / 1000.0)
                 if zona_poly.contains(Point(h["lng"], h["lat"])):
                     ubicados.append(h)
+                elif h.get("cnpj"):          # con coords pero fuera de zona: rescatable por CNPJ
+                    rescatables.append(h)
         if sum(geo_stats.values()):
             logger.info("HotelFetcher geocoding: " + ", ".join(
                 f"{k}={v}" for k, v in geo_stats.items() if v))
@@ -758,6 +808,24 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 "situacion": r[13], "business_status": r[14], "cerrado": bool(r[15]),
                 "survey_id": r[16],
             })
+
+    # Rescate por CNPJ: incorpora a `ubicados` los Cadastur/Receita que quedaron fuera de
+    # zona (o sin geocodificar) pero cuyo CNPJ corresponde a un hotel que SÍ está en la zona
+    # —un pin físico de esta corrida o una semilla ya persistida—. Entran como DATO puro
+    # (se les anula la coordenada fiscal: la ubicación la pone el pin real vía `_merge_into`),
+    # así el hotel identificado por CNPJ recibe sus habitaciones/nombre aunque su dirección
+    # fiscal caiga lejos. Sin esto, un hotel con pin dentro de la zona pero geocode fiscal
+    # afuera se quedaba sin las habitaciones de Cadastur (atascado en la asistencia).
+    if rescatables:
+        cnpjs_zona = ({h["cnpj"] for h in ubicados if h.get("cnpj")}
+                      | {s["cnpj"] for s in semillas if s.get("cnpj")})
+        rescatados = [h for h in rescatables if h.get("cnpj") in cnpjs_zona]
+        for h in rescatados:
+            h["lat"] = h["lng"] = None      # dato puro: nunca pisa la ubicación del pin real
+        if rescatados:
+            ubicados.extend(rescatados)
+            logger.info(f"HotelFetcher: {len(rescatados)} hotel(es) Cadastur/Receita fuera de "
+                        f"zona rescatados por CNPJ (aportan datos a un hotel ya en la zona)")
 
     grupos: list[dict] = list(semillas)
     by_cnpj: dict = {s["cnpj"]: s for s in semillas if s.get("cnpj")}

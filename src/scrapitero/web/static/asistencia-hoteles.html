@@ -74,7 +74,35 @@ let pendientes=0, total=0;
 function updateSub(){ document.getElementById('sub').textContent =
   `${pendientes} sin resolver de ${total} · relevamiento ${SID.slice(0,8)}`; }
 
+// Taxonomía de etiquetas (R/C/E) para el flujo "no es hotel".
+let TIPOS_HTML = '';
+async function cargarTipos(){
+  try{ const d = await fetch('/api/tipos-edificacion').then(r=>r.json());
+    if(d.ok){ TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
+      d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+
+        g.tipos.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')+'</optgroup>').join(''); }
+  }catch(e){}
+}
+
+async function descartar(hotelId, tipo, card, btn){
+  if(!tipo){ alert('Elegí una etiqueta antes de confirmar'); return; }
+  if(!confirm(`Marcar "${card.querySelector('.nm').textContent.trim()}" como NO hotel y etiquetarlo "${tipo}"?`)) return;
+  btn.disabled=true; btn.textContent='…';
+  try{
+    const r = await fetch(`/api/hoteles/${hotelId}/no-es-hotel`,{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({tipo_edificacion:tipo})}).then(r=>r.json());
+    if(r.ok){
+      if(markers[hotelId]){ map.removeLayer(markers[hotelId]); delete markers[hotelId]; }
+      card.classList.add('done');
+      card.innerHTML = `<div class="nm">🚫 ${esc(card.querySelector('.nm').textContent.replace(/^🏨\s*/,''))}</div>`+
+        `<div class="mut">No es hotel · etiquetado <b>${esc(tipo)}</b></div>`;
+      pendientes--; updateSub();
+    } else { alert(r.error||'Error'); btn.disabled=false; btn.textContent='Confirmar'; }
+  }catch(e){ alert('Error de red'); btn.disabled=false; btn.textContent='Confirmar'; }
+}
+
 async function load(){
+  await cargarTipos();
   const d = await fetch(`/api/surveys/${SID}/hoteles-asistencia`).then(r=>r.json());
   if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
   if(d.baseline_id){
@@ -100,10 +128,20 @@ async function load(){
       (h.cnpj?`<div class="mut">CNPJ ${esc(h.cnpj)}</div>`:'')+
       (nb?`<div class="base">↩ Anterior (${nb.d} m): ${esc(nb.direccion)} · UF ${nb.uf_total}</div>`:'')+
       `<div class="row"><input type="number" min="0" placeholder="habitaciones" id="i-${h.hotel_id}">`+
-      `<button>Guardar</button></div>`;
-    const btn=card.querySelector('button'), inp=card.querySelector('input');
+      `<button>Guardar</button></div>`+
+      `<div class="row noh" style="display:none"><select style="flex:1;padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.82rem">${TIPOS_HTML}</select>`+
+      `<button class="ok" style="background:#f59e0b">Confirmar</button></div>`+
+      `<div style="margin-top:6px"><a href="#" class="noh-tog" style="color:#f59e0b;font-size:.76rem;text-decoration:none">🚫 No es hotel</a></div>`;
+    const btn=card.querySelector('.row button'), inp=card.querySelector('input');
     btn.onclick=(e)=>{ e.stopPropagation(); guardar(h.hotel_id, inp.value, btn, card); };
     inp.onclick=(e)=>e.stopPropagation();
+    // Flujo "no es hotel": el link revela el selector de etiqueta + Confirmar.
+    const nohRow=card.querySelector('.row.noh'), nohTog=card.querySelector('.noh-tog');
+    const nohSel=nohRow.querySelector('select'), nohBtn=nohRow.querySelector('button.ok');
+    nohTog.onclick=(e)=>{ e.preventDefault(); e.stopPropagation();
+      nohRow.style.display = nohRow.style.display==='none' ? 'flex' : 'none'; };
+    nohSel.onclick=(e)=>e.stopPropagation();
+    nohBtn.onclick=(e)=>{ e.stopPropagation(); descartar(h.hotel_id, nohSel.value, card, nohBtn); };
     if(h.lat!=null){
       const mk=L.marker([h.lat,h.lng]).addTo(map).bindPopup(`🏨 ${esc(h.nombre||'')}`);
       markers[h.hotel_id]=mk; bounds.push([h.lat,h.lng]);

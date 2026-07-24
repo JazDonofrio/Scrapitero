@@ -666,8 +666,30 @@ def _hotel_tipo_label(t: Optional[str]) -> str:
     return "HOTEL"
 
 
+# Taxonomía FIJA del cliente (solo Brasil) para el "Tipo de edificación". Fuente de verdad:
+# docs/TIPOS_PROPIEDAD.md. Es la lista que ve el operador al etiquetar a mano una parcela.
+TIPOS_EDIFICACION: dict[str, list[str]] = {
+    "R": ["RESIDÊNCIA", "APARTAMENTO", "PENSÃO"],
+    "C": ["AGÊNCIA DE AUTOMOVEIS", "BAR", "BUFFET", "CASA NOTURNA", "COMÉRCIO EM GERAL",
+          "ESCRITÓRIO DE SERVICOS", "IMOBILIÁRIA", "INDÚSTRIA", "INSTITUIÇÃO FINANCEIRA",
+          "LANCHONETE", "OFICINA", "PADARIA", "RESTAURANTE"],
+    "E": ["ASSOCIAÇÃO / SINDICATO", "CLÍNICA PARTICULAR", "CLÍNICA PUBLICA",
+          "CONSULTÓRIO PARTICULAR", "CONSULTÓRIO PÚBLICO", "CRECHE", "ESCOLA",
+          "ESCOLA PARTICULAR", "ESCOLA PÚBLICA", "ESCOLA PÚBLICA ESTADUAL",
+          "ESCOLA PÚBLICA MUNICIPAL", "ESTACIONAMENTO", "FLAT", "HOSPITAL PARTICULAR",
+          "HOSPITAL PÚBLICO", "HOTEL", "INSTITUICAO ESPORTIVA", "MÉDICO / HOSPITALAR",
+          "MOTEL", "ÓRGÃO PÚBLICO", "POSTO DE GASOLINA", "SERVICOS", "SHOPPING",
+          "SUPERMERCADO", "UNIVERSIDADE/FACULDADE", "LOTE VAZIO"],
+}
+# categoría (R/C/E) de cada etiqueta, para guardar junto al override manual.
+_TIPO_CATEGORIA: dict[str, str] = {
+    t: cat for cat, ts in TIPOS_EDIFICACION.items() for t in ts}
+
+
 def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str],
-                      hotel_tipo: Optional[str]) -> str:
+                      hotel_tipo: Optional[str], manual: Optional[str] = None) -> str:
+    if manual:                                       # etiqueta forzada a mano → gana a todo
+        return manual
     if hotel_tipo:
         return _hotel_tipo_label(hotel_tipo)
     if descripcion:                                  # 1+ descripciones CNPJ → la primera
@@ -716,9 +738,11 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                        ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
                    p.es_country,
                    (SELECT COUNT(*) FROM parcela_unidades pu
-                    WHERE pu.parcela_id = p.parcela_id) AS n_unidades
+                    WHERE pu.parcela_id = p.parcela_id) AS n_unidades,
+                   ptm.tipo_edificacion AS tipo_manual
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
+            LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
             WHERE p.survey_id = :sid
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
             ORDER BY p.calle NULLS LAST
@@ -769,8 +793,8 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ)
             "categoria_uso": r[27] or None,
             "descripcion_uso": r[28] or None,
-            # Tipo de edificación unificado (1 label de la lista del cliente)
-            "tipo_edificacion": _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29]) or None,
+            # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override manual.
+            "tipo_edificacion": _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]) or None,
             # Ítems críticos a los que pertenece la parcela (capas toggleables del mapa). Una
             # parcela puede estar en varias (un edificio de deptos es Edificio Y PH).
             "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
@@ -1036,6 +1060,101 @@ async def set_habitaciones_manual(hotel_id: str, request: Request) -> JSONRespon
                 DO UPDATE SET habitaciones = :n, actualizado_at = now()
             """), {"r": region_id, "c": cnpj, "n": n})
     return JSONResponse({"ok": True, "habitaciones": n})
+
+
+@app.get("/api/tipos-edificacion")
+async def tipos_edificacion() -> JSONResponse:
+    """Taxonomía fija del cliente (R/C/E) para que el operador elija una etiqueta a mano.
+    Fuente de verdad: docs/TIPOS_PROPIEDAD.md / TIPOS_EDIFICACION."""
+    etiquetas = {"R": "Residencial", "C": "Comercial", "E": "Especial"}
+    return JSONResponse({"ok": True, "grupos": [
+        {"categoria": cat, "titulo": etiquetas[cat], "tipos": TIPOS_EDIFICACION[cat]}
+        for cat in ("C", "R", "E")]})     # Comercial primero (lo más común al corregir un falso hotel)
+
+
+@app.post("/api/hoteles/{hotel_id}/no-es-hotel")
+async def hotel_no_es_hotel(hotel_id: str, request: Request) -> JSONResponse:
+    """El operador marca que un supuesto hotel NO es hotel (p.ej. Google mal-tagueó una
+    tienda como `lodging`). Lo saca de `hoteles`, recuerda el descarte en `hotel_descartado`
+    (para que un re-corte del botón 🏨 no lo re-cree) y le pone la etiqueta elegida a la
+    parcela en `parcela_tipo_manual` (gana al cálculo automático de _tipo_edificacion)."""
+    try:
+        body = await request.json()
+        tipo = (body.get("tipo_edificacion") or "").strip()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "body inválido"}, status_code=400)
+    if tipo not in _TIPO_CATEGORIA:
+        return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo!r}"},
+                            status_code=400)
+    cat = _TIPO_CATEGORIA[tipo]
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT region_id, survey_id::text, cnpj, nombre, parcela_id::text,
+                   ST_Y(location), ST_X(location)
+            FROM hoteles WHERE hotel_id::text = :h"""), {"h": hotel_id}).fetchone()
+        if not row:
+            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
+        region_id, survey_id, cnpj, nombre, parcela_id, lat, lng = row
+        import unicodedata
+        # misma normalización que hotel_fetcher._norm (sin acentos, lower) para que el
+        # filtro de descarte matchee en la próxima corrida.
+        nombre_norm = " ".join("".join(
+            c for c in unicodedata.normalize("NFKD", str(nombre or ""))
+            if not unicodedata.combining(c)).lower().split())
+        # Descarte = memoria de "no es hotel" + punto de comercio a dibujar en su coordenada.
+        # HotelFetcher lo lee y filtra en la próxima corrida (por CNPJ si lo hay; si no
+        # —Google—, por nombre normalizado + proximidad). El mapa lo dibuja como comercio.
+        conn.execute(text("""
+            INSERT INTO hotel_descartado (region_id, survey_id, cnpj, nombre, nombre_norm,
+                                          lat, lng, tipo_edificacion, categoria, autor)
+            VALUES (:r, CAST(:s AS uuid), :c, :nom, :n, :lat, :lng, :t, :cat, 'operador')
+        """), {"r": region_id, "s": survey_id, "c": cnpj, "nom": nombre,
+               "n": nombre_norm or None, "lat": lat, "lng": lng, "t": tipo, "cat": cat})
+        # Etiqueta manual a la parcela (si el hotel estaba vinculado a una).
+        if parcela_id:
+            conn.execute(text("""
+                INSERT INTO parcela_tipo_manual (parcela_id, tipo_edificacion, categoria, autor)
+                VALUES (CAST(:p AS uuid), :t, :cat, 'operador')
+                ON CONFLICT (parcela_id) DO UPDATE SET
+                    tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
+            """), {"p": parcela_id, "t": tipo, "cat": cat})
+        # Si el mismo punto está en `comercios` con rubro 'lodging' (así lo trajo Google),
+        # corregirlo para que no cuente como hospedaje en ningún lado.
+        if lat is not None and lng is not None:
+            conn.execute(text("""
+                UPDATE comercios SET rubro = 'comercio'
+                WHERE region_id = :r AND rubro ILIKE 'lodging'
+                  AND location IS NOT NULL
+                  AND ST_DWithin(location::geography,
+                                 ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, 30)
+            """), {"r": region_id, "lat": lat, "lng": lng})
+        conn.execute(text("DELETE FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id})
+    return JSONResponse({"ok": True, "tipo_edificacion": tipo,
+                         "parcela_etiquetada": bool(parcela_id)})
+
+
+@app.get("/api/surveys/{survey_id}/comercios-marcados")
+async def comercios_marcados(survey_id: str) -> JSONResponse:
+    """Puntos que el operador reclasificó de falso-hotel a comercio (`hotel_descartado`), para
+    dibujarlos en el mapa con color/etiqueta de comercio en su coordenada real. Sin parcela:
+    viven en su propia coordenada. Scope: el survey + los de la región sin survey (compartidos)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        region = conn.execute(text(
+            "SELECT region_id FROM surveys WHERE survey_id = :s"), {"s": survey_id}).scalar()
+        if region is None:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+        rows = conn.execute(text("""
+            SELECT nombre, tipo_edificacion, categoria, lat, lng, cnpj
+            FROM hotel_descartado
+            WHERE region_id = :r AND lat IS NOT NULL AND lng IS NOT NULL
+              AND (survey_id = CAST(:s AS uuid) OR survey_id IS NULL)
+            ORDER BY nombre
+        """), {"r": region, "s": survey_id}).fetchall()
+    puntos = [{"nombre": r[0], "tipo_edificacion": r[1], "categoria": r[2],
+               "lat": float(r[3]), "lng": float(r[4]), "cnpj": r[5]} for r in rows]
+    return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})
 
 
 @app.get("/api/surveys/{survey_id}/manzanas")
@@ -1441,7 +1560,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 ), '') AS hoteles_nombres,
                 COALESCE((SELECT h.tipo FROM hoteles h
                     WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
-                    ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo
+                    ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
+                (SELECT ptm.tipo_edificacion FROM parcela_tipo_manual ptm
+                    WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -1519,8 +1640,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 # DSC_LOGRADOURO_NO = número de la dirección
                 r[3] or "",
                 # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
-                # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38]
-                _tipo_edificacion(r[8], r[9], r[13], r[36], r[38]),
+                # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38], override manual=r[39]
+                _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39]),
             ]
 
         # Letra secuencial (A, B, C…) para direcciones repetidas sin complemento propio.

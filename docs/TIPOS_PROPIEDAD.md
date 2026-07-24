@@ -70,6 +70,8 @@
 
 `_tipo_edificacion` resuelve el label por este orden (gana el primero que aplica):
 
+0. **Etiqueta MANUAL del operador** (`parcela_tipo_manual`, mig. 043) → gana a todo. La setea
+   el flujo "no es hotel" de la asistencia (ver abajo) cuando el ex-hotel tenía una parcela.
 1. **Hotel vinculado** a la parcela → HOTEL / MOTEL / FLAT / PENSÃO
 2. **Establecimiento CNPJ** (`descripcion_uso`, de `ParcelaCategoria`) → esa descripción
 3. **Uso del catastro/BCI** → LOTE VAZIO / RESIDÊNCIA / APARTAMENTO / INDÚSTRIA /
@@ -77,6 +79,24 @@
 
 (Para que entren los tipos específicos del CNPJ hay que correr `parcela_categoria` sobre la
 región; si no, la parcela cae al uso del catastro.)
+
+## Etiquetado manual desde la asistencia de hoteles ("no es hotel")
+
+Google Places a veces devuelve un comercio con `primaryType=lodging` (dato erróneo de Google;
+p.ej. "Casa Cortina", una tienda de cortinas). Ese falso hotel queda en `hoteles` y atascado en
+la asistencia. Desde `/asistencia-hoteles/{survey}`, el botón **"🚫 No es hotel"** abre un
+selector con **esta misma lista** de etiquetas; al elegir una (típicamente `COMÉRCIO EM GERAL`)
+el backend (`POST /api/hoteles/{id}/no-es-hotel`):
+1. lo **borra de `hoteles`** (sale de la asistencia, no cuenta como hotel),
+2. lo registra en **`hotel_descartado`** (mig. 043) con la etiqueta + coordenada real →
+   HotelFetcher lo **filtra** en la próxima corrida (no reaparece) y el mapa lo **dibuja como
+   comercio en su coordenada** (`GET /api/surveys/{sid}/comercios-marcados`, marcador 🏪 color
+   comercio), **sin** depender de que caiga en una parcela,
+3. si tenía parcela vinculada, además sella `parcela_tipo_manual` (prioridad 0 de arriba),
+4. corrige el `rubro` del comercio homónimo cercano de `lodging` → `comercio`.
+
+La lista de etiquetas se sirve en `GET /api/tipos-edificacion` (constante `TIPOS_EDIFICACION`
+en `web/app.py`, espejo de este documento).
 
 ---
 

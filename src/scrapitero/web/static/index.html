@@ -1740,6 +1740,39 @@ function initMap(sid) {
   loadParcelasMap(sid);   // carga inicial
   loadComentarios(sid);   // comentarios del cliente (sugerencias/correcciones)
   loadHoteles(sid);       // hoteles (Cadastur + Google) para el popup de la parcela
+  loadComerciosMarcados(sid);  // falsos hoteles reclasificados a comercio (punto en su coordenada)
+}
+
+/* ── Comercios marcados a mano (ex-falsos-hoteles) ─────────────────────────────
+   Puntos que el operador reclasificó de "hotel" a comercio desde la asistencia (p.ej.
+   "Casa Cortina", que Google devolvía como lodging). Se dibujan en su coordenada real, con
+   color de comercio y su etiqueta de la taxonomía — no dependen de caer en una parcela. */
+const comercioMarcadoLayers = {};   // sid → L.layerGroup
+async function loadComerciosMarcados(sid) {
+  try {
+    const d = await fetch(`/api/surveys/${sid}/comercios-marcados`).then(r => r.json());
+    if (!d || !d.ok) return;
+    const map = maps[sid];
+    if (!map) return;
+    if (comercioMarcadoLayers[sid]) { try { map.removeLayer(comercioMarcadoLayers[sid]); } catch(_) {} }
+    const grp = L.layerGroup();
+    const col = CAT_COLOR.comercio;   // #fb923c — mismo color que los comercios del mapa
+    (d.puntos || []).forEach(p => {
+      if (p.lat == null || p.lng == null) return;
+      const mk = L.marker([p.lat, p.lng], { icon: L.divIcon({
+        className: 'comercio-marcado-pin',
+        html: `<div style="background:${col};border:2px solid #fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 0 3px rgba(0,0,0,.4)">🏪</div>`,
+        iconSize: [20, 20], iconAnchor: [10, 10],
+      }) });
+      mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">🏪 <b>${escHtml(p.nombre || 'Comercio')}</b>`
+        + `<br><span style="color:${col};font-weight:700">${escHtml(p.tipo_edificacion || 'COMÉRCIO EM GERAL')}</span>`
+        + (p.cnpj ? `<br><span style="color:#6b7280;font-size:.72rem">CNPJ ${escHtml(p.cnpj)}</span>` : '')
+        + `<br><span style="color:#9ca3af;font-size:.7rem">reclasificado a mano (no es hotel)</span></div>`, { maxWidth: 240 });
+      mk.addTo(grp);
+    });
+    grp.addTo(map);
+    comercioMarcadoLayers[sid] = grp;
+  } catch(_) {}
 }
 
 /* ── Hoteles (Cadastur + Google) ───────────────────────────────────────────── */
