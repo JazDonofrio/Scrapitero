@@ -898,6 +898,137 @@ async def run_country(survey_id: str) -> JSONResponse:
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
 
 
+@app.post("/api/surveys/{survey_id}/footprints")
+async def run_footprints(survey_id: str) -> JSONResponse:
+    """Corre FootprintFetcher: trae footprints de edificios (Google Open Buildings, fallback
+    OSM) para la capa de REVISIÓN visual 🏗️ — no toca `parcelas` ni el relevamiento, solo
+    guarda en `footprints_revision` para comparar contra lo que dice el catastro."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.footprint_fetcher import FootprintInput
+    from scrapitero.agents.footprint_fetcher import run as run_footprint_agent
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_footprint_agent(FootprintInput(region_id=region_id,
+                                                   survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.get("/api/surveys/{survey_id}/footprints")
+async def get_footprints(survey_id: str) -> dict:
+    """GeoJSON FeatureCollection de los footprints ya traídos por 🏗️ Footprints (revisión).
+    Solo los vinculados a una parcela relevada (el bbox de descarga es más ancho que la
+    zona relevada — sin este filtro el payload trae también las cuadras vecinas, que no
+    aportan nada a la revisión). Cada feature lleva lo que dice el catastro (uf_vivienda /
+    tipo de edificación) para comparar visualmente contra el footprint en el popup."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT ST_AsGeoJSON(f.footprint), f.source, f.confidence, f.area_m2,
+                   p.parcela_id::text, p.uso_principal, p.uf_vivienda, p.area_m2_construida,
+                   p.descripcion_uso,
+                   COALESCE((SELECT h.tipo FROM hoteles h
+                       WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
+                       ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
+                   ptm.tipo_edificacion AS tipo_manual
+            FROM footprints_revision f
+            JOIN parcelas p ON p.parcela_id = f.parcela_id
+            LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
+            WHERE f.survey_id = :sid
+        """), {"sid": survey_id}).fetchall()
+
+    features = []
+    for geom_gj, source, confidence, area_m2, parcela_id, uso, uf_viv, area_c, descripcion, hotel_tipo, tipo_manual in rows:
+        if not geom_gj:
+            continue
+        props = {
+            "source": source,
+            "confidence": round(float(confidence), 3) if confidence is not None else None,
+            "area_m2": round(float(area_m2), 1) if area_m2 is not None else None,
+            "parcela_id": parcela_id,
+        }
+        if parcela_id:
+            props["catastro_tipo_edificacion"] = _tipo_edificacion(
+                uso, uf_viv, area_c, descripcion, hotel_tipo, tipo_manual)
+            props["catastro_uf_vivienda"] = int(uf_viv or 0)
+        features.append({
+            "type": "Feature",
+            "geometry": json.loads(geom_gj),
+            "properties": props,
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+@app.post("/api/surveys/{survey_id}/altura")
+async def run_altura(survey_id: str) -> JSONResponse:
+    """Corre AlturaFetcher: altura satelital por parcela (Google Solar − Elevation) y la
+    contrasta con el proxy de pisos del catastro → capa de revisión 📏. El BCI no trae
+    pisos, así que esta es la única señal de "hay más construido de lo declarado"."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.altura_fetcher import AlturaInput
+    from scrapitero.agents.altura_fetcher import run as run_altura_agent
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_altura_agent(AlturaInput(region_id=region_id,
+                                            survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.get("/api/surveys/{survey_id}/altura")
+async def get_altura(survey_id: str) -> dict:
+    """Altura satelital por parcela para la capa 📏 (revisión).
+
+    Devuelve el año de la imagen junto a cada dato **a propósito**: la imagery de Solar en
+    VG es en su mayoría de 2014, así que el número no es "estado actual" y el operador tiene
+    que poder verlo antes de sacar conclusiones."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT p.centroid_lat, p.centroid_lng, p.cca_code, p.calle, p.numero,
+                   p.uso_principal, p.area_m2_construida,
+                   a.altura_m, a.pisos_satelital, a.pisos_bci_proxy,
+                   a.discrepancia, a.motivo, a.imagery_year, a.imagery_quality,
+                   a.ground_area_m2
+            FROM parcela_altura a
+            JOIN parcelas p ON p.parcela_id = a.parcela_id
+            WHERE a.survey_id = :sid
+              AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
+            ORDER BY a.discrepancia DESC, a.altura_m DESC NULLS LAST
+        """), {"sid": survey_id}).fetchall()
+
+    items = [{
+        "lat": float(r[0]), "lng": float(r[1]),
+        "cca": r[2] or "", "calle": r[3] or "", "numero": r[4] or "",
+        "uso": r[5] or "", "area_c": round(float(r[6]), 1) if r[6] else None,
+        "altura_m": round(float(r[7]), 1) if r[7] is not None else None,
+        "pisos_sat": int(r[8]) if r[8] is not None else None,
+        "pisos_bci": int(r[9]) if r[9] is not None else None,
+        "discrepancia": bool(r[10]),
+        "motivo": r[11] or None,
+        "imagery_year": int(r[12]) if r[12] else None,
+        "imagery_quality": r[13] or None,
+        "ground_area_m2": round(float(r[14]), 0) if r[14] else None,
+    } for r in rows]
+    return {
+        "total": len(items),
+        "discrepancias": sum(1 for i in items if i["discrepancia"]),
+        "items": items,
+    }
+
+
 @app.post("/api/surveys/{survey_id}/habitaciones-llm")
 async def run_habitaciones_llm(survey_id: str) -> JSONResponse:
     """Completa con IA (Gemini + búsqueda web) las habitaciones de los hoteles abiertos sin
@@ -994,9 +1125,10 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
 
 @app.get("/asistencia-hoteles/{survey_id}")
 async def asistencia_hoteles_page(survey_id: str):
-    """Página (operador) de carga manual de habitaciones: mapa con solo los hoteles +
-    datos del hotel y del relevamiento anterior, para que un humano consiga el dato faltante."""
-    return FileResponse(STATIC_DIR / "asistencia-hoteles.html")
+    """Compatibilidad: la asistencia de hoteles quedó absorbida por el reporte de incidencias.
+    Se mantiene la ruta para que los links ya enviados por Telegram sigan funcionando."""
+    return RedirectResponse(f"/incidencias/{survey_id}?tipo=hotel_sin_habitaciones",
+                            status_code=302)
 
 
 @app.get("/api/surveys/{survey_id}/hoteles-asistencia")
@@ -1086,52 +1218,313 @@ async def hotel_no_es_hotel(hotel_id: str, request: Request) -> JSONResponse:
     if tipo not in _TIPO_CATEGORIA:
         return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo!r}"},
                             status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        ok, detalle = _descartar_hotel(conn, hotel_id, tipo)
+    if not ok:
+        return JSONResponse({"ok": False, "error": detalle}, status_code=404)
+    return JSONResponse({"ok": True, "tipo_edificacion": tipo,
+                         "parcela_etiquetada": bool(detalle)})
+
+
+def _descartar_hotel(conn, hotel_id: str, tipo: str) -> tuple[bool, object]:
+    """Aplica "esto NO es hotel": lo borra de `hoteles`, lo recuerda en `hotel_descartado`,
+    etiqueta la parcela y corrige el rubro del comercio homónimo.
+
+    Extraído para que lo compartan el endpoint de la asistencia y el de resolución de
+    incidencias (misma transacción del caller). Devuelve (ok, parcela_id | mensaje_error)."""
     cat = _TIPO_CATEGORIA[tipo]
+    row = conn.execute(text("""
+        SELECT region_id, survey_id::text, cnpj, nombre, parcela_id::text,
+               ST_Y(location), ST_X(location)
+        FROM hoteles WHERE hotel_id::text = :h"""), {"h": hotel_id}).fetchone()
+    if not row:
+        return False, "Hotel no encontrado"
+    region_id, survey_id, cnpj, nombre, parcela_id, lat, lng = row
+    import unicodedata
+    # misma normalización que hotel_fetcher._norm (sin acentos, lower) para que el
+    # filtro de descarte matchee en la próxima corrida.
+    nombre_norm = " ".join("".join(
+        c for c in unicodedata.normalize("NFKD", str(nombre or ""))
+        if not unicodedata.combining(c)).lower().split())
+    # Descarte = memoria de "no es hotel" + punto de comercio a dibujar en su coordenada.
+    # HotelFetcher lo lee y filtra en la próxima corrida (por CNPJ si lo hay; si no
+    # —Google—, por nombre normalizado + proximidad). El mapa lo dibuja como comercio.
+    conn.execute(text("""
+        INSERT INTO hotel_descartado (region_id, survey_id, cnpj, nombre, nombre_norm,
+                                      lat, lng, tipo_edificacion, categoria, autor)
+        VALUES (:r, CAST(:s AS uuid), :c, :nom, :n, :lat, :lng, :t, :cat, 'operador')
+    """), {"r": region_id, "s": survey_id, "c": cnpj, "nom": nombre,
+           "n": nombre_norm or None, "lat": lat, "lng": lng, "t": tipo, "cat": cat})
+    # Etiqueta manual a la parcela (si el hotel estaba vinculado a una).
+    if parcela_id:
+        conn.execute(text("""
+            INSERT INTO parcela_tipo_manual (parcela_id, tipo_edificacion, categoria, autor)
+            VALUES (CAST(:p AS uuid), :t, :cat, 'operador')
+            ON CONFLICT (parcela_id) DO UPDATE SET
+                tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
+        """), {"p": parcela_id, "t": tipo, "cat": cat})
+    # Si el mismo punto está en `comercios` con rubro 'lodging' (así lo trajo Google),
+    # corregirlo para que no cuente como hospedaje en ningún lado.
+    if lat is not None and lng is not None:
+        conn.execute(text("""
+            UPDATE comercios SET rubro = 'comercio'
+            WHERE region_id = :r AND rubro ILIKE 'lodging'
+              AND location IS NOT NULL
+              AND ST_DWithin(location::geography,
+                             ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, 30)
+        """), {"r": region_id, "lat": lat, "lng": lng})
+    conn.execute(text("DELETE FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id})
+    return True, parcela_id
+
+
+# ── Reporte de incidencias (resolución humana) ────────────────────────────────────────
+# Centraliza los casos que sólo un humano puede resolver. La asistencia de hoteles quedó
+# absorbida como el tipo `hotel_sin_habitaciones`. Ver agents/incidencias_reporter.py.
+
+_INCIDENCIA_ESTADOS = ("pendiente", "resuelta", "descartada", "obsoleta")
+
+
+@app.get("/incidencias/{survey_id}")
+async def incidencias_page(survey_id: str) -> FileResponse:
+    """Página del reporte de incidencias (el JS lee el survey_id del path)."""
+    return FileResponse(STATIC_DIR / "incidencias.html")
+
+
+@app.get("/api/surveys/{survey_id}/incidencias")
+async def listar_incidencias(survey_id: str, estado: str = Query("pendiente"),
+                             tipo: str = Query("")) -> JSONResponse:
+    """Incidencias del relevamiento + resumen por tipo/estado (alimenta la página y el banner).
+
+    `estado` acepta un estado concreto o `todas`; `tipo` filtra por tipo (vacío = todos)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text(
+            "SELECT region_id, baseline_id::text FROM surveys WHERE survey_id = :sid"),
+            {"sid": survey_id}).fetchone()
+        if not meta:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+
+        cond, params = ["survey_id = CAST(:sid AS uuid)"], {"sid": survey_id}
+        if estado and estado != "todas":
+            cond.append("estado = :estado")
+            params["estado"] = estado
+        if tipo:
+            cond.append("tipo = :tipo")
+            params["tipo"] = tipo
+        rows = conn.execute(text(f"""
+            SELECT incidencia_id::text, tipo, estado, prioridad, titulo, detalle, datos,
+                   lat, lng, parcela_id::text, hotel_cnpj, resolucion, nota, autor,
+                   creada_at, resuelta_at
+            FROM incidencias
+            WHERE {' AND '.join(cond)}
+            ORDER BY prioridad, tipo, titulo
+        """), params).fetchall()
+
+        # Resumen SIEMPRE sobre todo el survey (no sobre el filtro): lo usan los chips.
+        por_tipo = conn.execute(text("""
+            SELECT tipo, estado, count(*) FROM incidencias
+            WHERE survey_id = CAST(:sid AS uuid) GROUP BY tipo, estado
+        """), {"sid": survey_id}).fetchall()
+
+    resumen: dict = {"por_tipo": {}, "por_estado": {}}
+    for t, e, n in por_tipo:
+        resumen["por_tipo"].setdefault(t, {})[e] = n
+        resumen["por_estado"][e] = resumen["por_estado"].get(e, 0) + n
+
+    items = [{
+        "incidencia_id": r[0], "tipo": r[1], "estado": r[2], "prioridad": r[3],
+        "titulo": r[4], "detalle": r[5], "datos": r[6] or {},
+        "lat": float(r[7]) if r[7] is not None else None,
+        "lng": float(r[8]) if r[8] is not None else None,
+        "parcela_id": r[9], "hotel_cnpj": r[10],
+        "resolucion": r[11], "nota": r[12], "autor": r[13],
+        "creada_at": r[14].isoformat() if r[14] else None,
+        "resuelta_at": r[15].isoformat() if r[15] else None,
+    } for r in rows]
+    return JSONResponse({"ok": True, "survey_id": survey_id, "baseline_id": meta[1],
+                         "incidencias": items, "total": len(items),
+                         "pendientes": resumen["por_estado"].get("pendiente", 0),
+                         "resumen": resumen})
+
+
+@app.post("/api/surveys/{survey_id}/incidencias/generar")
+async def generar_incidencias(survey_id: str) -> JSONResponse:
+    """Re-escanea el relevamiento y actualiza las incidencias. Idempotente: preserva el estado
+    y la nota de las ya resueltas/descartadas (clave natural)."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    from scrapitero.agents.incidencias_reporter import IncidenciasInput
+    from scrapitero.agents.incidencias_reporter import run as run_incidencias
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_incidencias(IncidenciasInput(region_id=region_id,
+                                                survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.post("/api/incidencias/{incidencia_id}/reabrir")
+async def reabrir_incidencia(incidencia_id: str) -> JSONResponse:
+    """Vuelve una incidencia resuelta/descartada a `pendiente` para poder rehacerla.
+
+    Una resolución puede estar mal (se cargó un número equivocado, se descartó algo que sí
+    era un problema), así que el estado no puede ser un camino de una sola dirección. Se
+    conserva la `nota` como historial y se limpia la resolución.
+
+    OJO: **no deshace el efecto** de la resolución sobre los datos — los overrides
+    (`hotel_habitaciones_manual`, `parcela_tipo_manual`, `parcela_uf_manual`) siguen
+    aplicados, y `no_es_hotel` ya borró el hotel. Reabrir habilita volver a resolver con el
+    valor correcto (los upserts pisan el anterior); para el falso descarte de un hotel hay
+    que re-correr 🏨 tras limpiar `hotel_descartado`."""
     engine = get_engine()
     with engine.begin() as conn:
         row = conn.execute(text("""
-            SELECT region_id, survey_id::text, cnpj, nombre, parcela_id::text,
-                   ST_Y(location), ST_X(location)
-            FROM hoteles WHERE hotel_id::text = :h"""), {"h": hotel_id}).fetchone()
-        if not row:
-            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
-        region_id, survey_id, cnpj, nombre, parcela_id, lat, lng = row
-        import unicodedata
-        # misma normalización que hotel_fetcher._norm (sin acentos, lower) para que el
-        # filtro de descarte matchee en la próxima corrida.
-        nombre_norm = " ".join("".join(
-            c for c in unicodedata.normalize("NFKD", str(nombre or ""))
-            if not unicodedata.combining(c)).lower().split())
-        # Descarte = memoria de "no es hotel" + punto de comercio a dibujar en su coordenada.
-        # HotelFetcher lo lee y filtra en la próxima corrida (por CNPJ si lo hay; si no
-        # —Google—, por nombre normalizado + proximidad). El mapa lo dibuja como comercio.
-        conn.execute(text("""
-            INSERT INTO hotel_descartado (region_id, survey_id, cnpj, nombre, nombre_norm,
-                                          lat, lng, tipo_edificacion, categoria, autor)
-            VALUES (:r, CAST(:s AS uuid), :c, :nom, :n, :lat, :lng, :t, :cat, 'operador')
-        """), {"r": region_id, "s": survey_id, "c": cnpj, "nom": nombre,
-               "n": nombre_norm or None, "lat": lat, "lng": lng, "t": tipo, "cat": cat})
-        # Etiqueta manual a la parcela (si el hotel estaba vinculado a una).
-        if parcela_id:
+            UPDATE incidencias
+               SET estado = 'pendiente', resolucion = NULL, resuelta_at = NULL,
+                   actualizada_at = now()
+             WHERE incidencia_id = CAST(:i AS uuid)
+            RETURNING tipo, nota
+        """), {"i": incidencia_id}).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "Incidencia no encontrada"}, status_code=404)
+    return JSONResponse({"ok": True, "estado": "pendiente", "tipo": row[0], "nota": row[1]})
+
+
+@app.post("/api/incidencias/{incidencia_id}/resolver")
+async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONResponse:
+    """Aplica la resolución del operador y cierra la incidencia.
+
+    `accion` despacha a la escritura correspondiente, reusando las tablas de override que ya
+    existen para que un re-scrape no pierda la corrección:
+      - `habitaciones`      → `hoteles` + `hotel_habitaciones_manual` (durable por CNPJ)
+      - `no_es_hotel`       → helper `_descartar_hotel` (4 tablas)
+      - `tipo_edificacion`  → `parcela_tipo_manual`
+      - `uf`                → `parcelas` (uf_fuente='manual') + `parcela_uf_manual`
+      - `descartar`         → no cambia datos, sólo cierra el caso con nota
+    """
+    try:
+        body = await request.json()
+        accion = (body.get("accion") or "").strip()
+        valor = body.get("valor")
+        nota = (body.get("nota") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "body inválido"}, status_code=400)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        inc = conn.execute(text("""
+            SELECT tipo, parcela_id::text, datos FROM incidencias
+            WHERE incidencia_id = CAST(:i AS uuid)"""), {"i": incidencia_id}).fetchone()
+        if not inc:
+            return JSONResponse({"ok": False, "error": "Incidencia no encontrada"},
+                                status_code=404)
+        _tipo, parcela_id, datos = inc[0], inc[1], (inc[2] or {})
+        estado_final = "resuelta"
+
+        if accion == "habitaciones":
+            hotel_id = datos.get("hotel_id")
+            if not hotel_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene hotel_id"},
+                                    status_code=400)
+            try:
+                n = int(valor)
+            except (ValueError, TypeError):
+                return JSONResponse({"ok": False, "error": "habitaciones inválido"},
+                                    status_code=400)
+            if n < 0:
+                return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"},
+                                    status_code=400)
+            h = conn.execute(text(
+                "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+                {"h": hotel_id}).fetchone()
+            if not h:
+                return JSONResponse({"ok": False, "error": "El hotel ya no existe (re-corré 🏨)"},
+                                    status_code=409)
+            conn.execute(text("UPDATE hoteles SET habitaciones = :n, "
+                              "habitaciones_fuente = 'manual' WHERE hotel_id::text = :h"),
+                         {"n": n, "h": hotel_id})
+            if h[1]:
+                conn.execute(text("""
+                    INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
+                    VALUES (:r, :c, :n, 'operador')
+                    ON CONFLICT (region_id, cnpj)
+                    DO UPDATE SET habitaciones = :n, actualizado_at = now()
+                """), {"r": h[0], "c": h[1], "n": n})
+
+        elif accion == "no_es_hotel":
+            tipo_ed = (str(valor or "")).strip()
+            if tipo_ed not in _TIPO_CATEGORIA:
+                return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
+                                    status_code=400)
+            hotel_id = datos.get("hotel_id")
+            if not hotel_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene hotel_id"},
+                                    status_code=400)
+            ok, detalle = _descartar_hotel(conn, hotel_id, tipo_ed)
+            if not ok:
+                return JSONResponse({"ok": False, "error": detalle}, status_code=409)
+
+        elif accion == "tipo_edificacion":
+            tipo_ed = (str(valor or "")).strip()
+            if tipo_ed not in _TIPO_CATEGORIA:
+                return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
+                                    status_code=400)
+            if not parcela_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
+                                    status_code=400)
             conn.execute(text("""
                 INSERT INTO parcela_tipo_manual (parcela_id, tipo_edificacion, categoria, autor)
                 VALUES (CAST(:p AS uuid), :t, :cat, 'operador')
                 ON CONFLICT (parcela_id) DO UPDATE SET
                     tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
-            """), {"p": parcela_id, "t": tipo, "cat": cat})
-        # Si el mismo punto está en `comercios` con rubro 'lodging' (así lo trajo Google),
-        # corregirlo para que no cuente como hospedaje en ningún lado.
-        if lat is not None and lng is not None:
+            """), {"p": parcela_id, "t": tipo_ed, "cat": _TIPO_CATEGORIA[tipo_ed]})
+
+        elif accion == "uf":
+            if not parcela_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
+                                    status_code=400)
+            v = valor if isinstance(valor, dict) else {}
+            try:
+                uf_v = int(v.get("uf_vivienda"))
+                uf_c = int(v.get("uf_comercio"))
+            except (ValueError, TypeError):
+                return JSONResponse({"ok": False, "error": "uf_vivienda/uf_comercio inválidos"},
+                                    status_code=400)
+            if uf_v < 0 or uf_c < 0:
+                return JSONResponse({"ok": False, "error": "las UF deben ser ≥ 0"},
+                                    status_code=400)
             conn.execute(text("""
-                UPDATE comercios SET rubro = 'comercio'
-                WHERE region_id = :r AND rubro ILIKE 'lodging'
-                  AND location IS NOT NULL
-                  AND ST_DWithin(location::geography,
-                                 ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, 30)
-            """), {"r": region_id, "lat": lat, "lng": lng})
-        conn.execute(text("DELETE FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id})
-    return JSONResponse({"ok": True, "tipo_edificacion": tipo,
-                         "parcela_etiquetada": bool(parcela_id)})
+                UPDATE parcelas SET uf_vivienda = :uv, uf_comercio = :uc,
+                       unidades_funcionales_estimadas = :ut, uf_fuente = 'manual'
+                WHERE parcela_id = CAST(:p AS uuid)
+            """), {"uv": uf_v, "uc": uf_c, "ut": uf_v + uf_c, "p": parcela_id})
+            conn.execute(text("""
+                INSERT INTO parcela_uf_manual (parcela_id, uf_vivienda, uf_comercio, autor)
+                VALUES (CAST(:p AS uuid), :uv, :uc, 'operador')
+                ON CONFLICT (parcela_id) DO UPDATE SET
+                    uf_vivienda = :uv, uf_comercio = :uc, actualizado_at = now()
+            """), {"p": parcela_id, "uv": uf_v, "uc": uf_c})
+
+        elif accion == "descartar":
+            estado_final = "descartada"
+
+        else:
+            return JSONResponse({"ok": False, "error": f"acción desconocida: {accion!r}"},
+                                status_code=400)
+
+        conn.execute(text("""
+            UPDATE incidencias SET estado = :est, resolucion = :res, nota = :nota,
+                   autor = 'operador', resuelta_at = now(), actualizada_at = now()
+            WHERE incidencia_id = CAST(:i AS uuid)
+        """), {"est": estado_final, "res": accion, "nota": nota, "i": incidencia_id})
+
+    return JSONResponse({"ok": True, "estado": estado_final, "accion": accion})
 
 
 @app.get("/api/surveys/{survey_id}/comercios-marcados")

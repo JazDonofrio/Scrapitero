@@ -107,7 +107,9 @@ def _por_clave(parcelas: list[dict]) -> tuple[dict[str, dict], int]:
     grupos: dict[str, dict] = {}
     sin_dir = 0
     for p in parcelas:
-        clave = clave_direccion(p["calle"], p["numero"])
+        # tolerante=True: matchea por núcleo de calle (ignora Rua/Avenida/Travessa + títulos),
+        # así el catastro y el relevamiento anterior no se separan por rotular distinto la vía.
+        clave = clave_direccion(p["calle"], p["numero"], tolerante=True)
         if not clave:
             sin_dir += 1
             continue
@@ -125,9 +127,12 @@ def _cargar_baseline(conn, baseline_id: str) -> dict[str, dict]:
     """), {"bid": baseline_id}).fetchall()
     grupos: dict[str, dict] = {}
     for calle, numero, calle_norm, numero_norm, uso, uf_v, uf_c, raw in rows:
-        if not calle_norm:
+        # misma clave tolerante que el lado parcelas (núcleo de calle, ignora tipo de vía +
+        # título) — recomputada del `calle` crudo, no de la columna `calle_norm` (que conserva
+        # el tipo). Sin esto, "Rua X" (baseline) nunca matchea "Avenida X" (catastro).
+        clave = clave_direccion(calle, numero, tolerante=True)
+        if not clave:
             continue
-        clave = f"{calle_norm}|{numero_norm or ''}"
         agg = grupos.setdefault(clave, _agg_nuevo())
         _acumular(agg, calle or raw, numero, uso, uf_v, uf_c)
     return grupos

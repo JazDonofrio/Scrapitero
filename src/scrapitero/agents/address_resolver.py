@@ -41,12 +41,15 @@ class AddressResolverInput(BaseModel):
     batch_size: int = 100                  # máximo de parcelas por corrida
     delay_ms: int = 50                     # delay entre llamadas para no superar quota
     fill_partial: bool = True              # también rellenar parcelas con calle pero sin numero
+    # Paso 0: reverse contra el catastro (gratis, autoritativo) antes de IBGE/Google.
+    usar_catastro: bool = True
 
 
 class AddressResolverOutput(BaseModel):
     ok: bool
     parcelas_procesadas: int               # total encontradas sin dirección completa
     parcelas_resueltas: int                # con dirección encontrada (cualquier fuente)
+    parcelas_resueltas_catastro: int = 0  # resueltas por reverse contra el catastro (gratis, oficial)
     parcelas_resueltas_logradouros: int = 0  # resueltas gratis por interpolación IBGE
     parcelas_resueltas_google: int = 0    # resueltas por Google Maps API
     parcelas_sin_resultado: int            # sin resultado en ninguna fuente
@@ -277,7 +280,8 @@ def _update_parcela_direccion(conn, parcela_id: str, addr: dict, preserve_calle:
     de localidad — solo actualiza `numero`, `barrio` y `codigo_postal`.
     """
     source = addr.get("source", "google_maps")
-    confidence = 0.80 if source == "ibge_logradouros" else 0.85
+    # `catastro` es la dirección oficial del inmueble (no una inferencia) → confianza máxima.
+    confidence = {"catastro": 0.99, "ibge_logradouros": 0.80}.get(source, 0.85)
 
     if preserve_calle:
         conn.execute(text("""
@@ -345,13 +349,43 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
 
         resueltas_logr = 0
         resueltas_google = 0
+        resueltas_catastro = 0
         sin_resultado = 0
         google_calls = 0
         cache_hits = 0
 
+        # ── Estrategia 0: REVERSE contra el CATASTRO (gratis y autoritativo) ──
+        # Si el centroide de la parcela cae dentro de OTRA parcela que sí tiene dirección
+        # oficial (típico: subdivisiones/PH sobre un lote catalogado, o parcelas de una capa
+        # sin dirección superpuestas a una con BCI), esa dirección manda. Es preferible a
+        # preguntarle a Google la dirección de un punto cuya dirección el municipio ya
+        # publicó — además de gratis, no tiene la ambigüedad del reverse comercial.
+        rev: dict = {}
+        if input.usar_catastro and parcelas:
+            try:
+                from scrapitero.agents.catastro_geocoder import reverse_lote
+                rev = reverse_lote([(p["lat"], p["lng"]) for p in parcelas],
+                                   region_id=input.region_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort, sigue con IBGE/Google
+                logger.warning(f"AddressResolver: reverse por catastro no disponible: {exc!r}")
+
         with engine.begin() as conn:
             for p in parcelas:
                 preserve_calle = bool(p["calle_existente"])  # True = solo completar numero
+
+                cat = rev.get((float(p["lat"]), float(p["lng"])))
+                # Solo sirve si aporta lo que falta (número para las parciales, calle para
+                # las vacías) y no es la propia parcela.
+                if cat and cat.get("parcela_id") != p["parcela_id"]:
+                    aporta = cat.get("numero") if preserve_calle else cat.get("calle")
+                    if aporta:
+                        _update_parcela_direccion(conn, p["parcela_id"], {
+                            "calle": cat.get("calle"), "numero": cat.get("numero"),
+                            "codigo_postal": cat.get("codigo_postal"),
+                            "barrio": cat.get("barrio"), "source": "catastro",
+                        }, preserve_calle)
+                        resueltas_catastro += 1
+                        continue
 
                 # ── Estrategia 1: interpolación IBGE (gratis, solo si no hay calle) ──
                 if not preserve_calle:
@@ -396,12 +430,13 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
                 if not desde_cache and input.delay_ms > 0:
                     time.sleep(input.delay_ms / 1000)
 
-        resueltas = resueltas_logr + resueltas_google
+        resueltas = resueltas_catastro + resueltas_logr + resueltas_google
         costo = google_calls * 0.005  # USD por llamada Geocoding API
 
         logger.info(
             f"AddressResolver: {resueltas} resueltas "
-            f"({resueltas_logr} IBGE gratis, {resueltas_google} Google), "
+            f"({resueltas_catastro} catastro gratis/oficial, {resueltas_logr} IBGE gratis, "
+            f"{resueltas_google} Google), "
             f"{sin_resultado} sin resultado, {cache_hits} de caché (sin costo). "
             f"Costo estimado: USD {costo:.2f}"
         )
@@ -410,6 +445,7 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
             ok=True,
             parcelas_procesadas=len(parcelas),
             parcelas_resueltas=resueltas,
+            parcelas_resueltas_catastro=resueltas_catastro,
             parcelas_resueltas_logradouros=resueltas_logr,
             parcelas_resueltas_google=resueltas_google,
             parcelas_sin_resultado=sin_resultado,

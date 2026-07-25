@@ -132,6 +132,28 @@ def normalizar_calle(calle: str | None) -> str:
     return " ".join(out)
 
 
+# Anotación entre paréntesis que el CSV del cliente pega al nombre de la calle:
+# "AV DA FEB(RES ALAMEDA)", "R PEDRO PEDROSSIAN (LOT JD GLORIA)". Es el loteamento /
+# residencial / jardim / conjunto, es decir un BARRIO, no parte del nombre de la vía.
+# Mandarla dentro de la calle al geocoder degrada el resultado (Google devuelve el centro
+# de la calle o directamente otra vía).
+_PARENTESIS_RE = re.compile(r"\s*\(([^)]*)\)\s*")
+
+
+def limpiar_calle_anotacion(calle: str | None) -> tuple[str, str]:
+    """Separa el nombre de la vía de la anotación entre paréntesis.
+
+    Devuelve `(calle_sin_parentesis, anotacion)` — la anotación suele ser el
+    loteamento/residencial (un barrio). Ej.: "AV DA FEB(RES ALAMEDA)" →
+    ("AV DA FEB", "RES ALAMEDA"). Sin paréntesis devuelve `(calle, "")`."""
+    if not calle:
+        return "", ""
+    s = str(calle)
+    anot = " ".join(m.strip() for m in _PARENTESIS_RE.findall(s) if m.strip())
+    limpia = _PARENTESIS_RE.sub(" ", s)
+    return " ".join(limpia.split()).strip(" ,-"), anot
+
+
 _VIA_VALORES = set(TIPOS_VIA.values())
 _TITULO_VALORES = set(TITULOS.values())
 
@@ -226,9 +248,17 @@ def separar_numero(direccion: str | None) -> tuple[str, str]:
     return s[:m.start()].strip(" ,"), m.group(1)
 
 
-def clave_direccion(calle: str | None, numero: str | int | None) -> str:
-    """Clave de matching: 'calle_norm|numero_norm'. '' si no hay calle."""
-    cn = normalizar_calle(calle)
+def clave_direccion(calle: str | None, numero: str | int | None,
+                    tolerante: bool = False) -> str:
+    """Clave de matching: 'calle_norm|numero_norm'. '' si no hay calle.
+
+    `tolerante=True` usa el **núcleo** de la calle (`nucleo_calle`: sin tipo de vía ni
+    títulos honoríficos) en vez del nombre normalizado completo. Sirve para **comparar dos
+    fuentes que rotulan distinto la misma calle** (p.ej. el relevamiento anterior dice "Rua
+    Gov Pedro Pedrossian" y el catastro "Avenida Gov Pedro Pedrossian" → mismo núcleo
+    "pedro pedrossian"). Lo usa la comparativa; el matching estricto (hoteles) sigue con el
+    default `False` para no colapsar calles distintas."""
+    cn = nucleo_calle(calle) if tolerante else normalizar_calle(calle)
     if not cn:
         return ""
     return f"{cn}|{normalizar_numero(numero)}"

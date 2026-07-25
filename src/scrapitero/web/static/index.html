@@ -94,10 +94,12 @@
     .chevron.open { transform: rotate(180deg); }
 
     /* Card detail */
+    /* Mapa a ANCHO COMPLETO arriba y el detalle debajo (antes iban lado a lado con el
+       mapa acotado a 580px). El mapa es lo que más se mira, así que se lleva todo el ancho. */
     .card-detail { display: none; border-top: 1px solid #f3f4f6; }
-    .card-detail.open { display: flex; }
-    .detail-map { width: 580px; min-width: 580px; height: 460px; flex-shrink: 0; position: relative; }
-    .detail-body { flex: 1; padding: 1.1rem 1.2rem; overflow: auto; }
+    .card-detail.open { display: block; }
+    .detail-map { width: 100%; min-width: 0; height: 60vh; min-height: 420px; position: relative; }
+    .detail-body { padding: 1.1rem 1.2rem; }
 
     /* Botón fullscreen y contador sobre el mapa */
     .map-fs-btn {
@@ -213,6 +215,27 @@
     .pipeline-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f3f4f6; }
     .pipeline-title { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: #9ca3af; margin-bottom: .6rem; }
     .pipeline-steps { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    /* Detalle de avance por etapa (una fila por tool, con % real) */
+    .etapas-wrap { margin-top: .7rem; border: 1px solid #e5e7eb; border-radius: 9px; padding: .6rem .75rem; background: #fcfcfd; }
+    .etapas-head { display: flex; justify-content: space-between; align-items: baseline;
+                   font-size: .74rem; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+    .etapas-glob { font-weight: 700; color: #0f172a; letter-spacing: 0; text-transform: none; }
+    .etapas-glob-bg { background: #e5e7eb; border-radius: 4px; height: 6px; margin: .35rem 0 .6rem; }
+    .etapas-glob-bar { background: #0ea5e9; height: 6px; border-radius: 4px; transition: width .3s; }
+    .etapa-row { display: grid; grid-template-columns: 8.5rem 1fr 2.6rem 4.5rem minmax(0, 1.4fr);
+                 gap: .5rem; align-items: center; font-size: .74rem; padding: .16rem 0; }
+    .etapa-nom { font-weight: 600; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .etapa-bar-bg { background: #eef1f5; border-radius: 3px; height: 5px; }
+    .etapa-bar { height: 5px; border-radius: 3px; transition: width .3s; }
+    .etapa-pct { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .etapa-est { font-size: .7rem; }
+    .etapa-txt { color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .etapa-aviso { margin-top: .5rem; font-size: .73rem; color: #92400e;
+                   background: #fffbeb; border: 1px solid #fcd34d; border-radius: 6px; padding: .35rem .55rem; }
+    @media (max-width: 720px) {
+      .etapa-row { grid-template-columns: 7rem 1fr 2.4rem; }
+      .etapa-est, .etapa-txt { display: none; }
+    }
     .pipeline-step { display: flex; align-items: center; gap: .3rem; padding: .3rem .65rem; border-radius: 6px; font-size: .78rem; font-weight: 600; }
     .step-done  { background: #dcfce7; color: #166534; }
     .step-run   { background: #fef3c7; color: #92400e; }
@@ -344,8 +367,7 @@
     .alog-empty { color: #64748b; font-style: italic; }
 
     @media (max-width: 720px) {
-      .card-detail.open { flex-direction: column; }
-      .detail-map { width: 100%; min-width: 0; height: 340px; }
+      .detail-map { width: 100%; min-width: 0; height: 340px; min-height: 0; }
       .form-grid { grid-template-columns: 1fr; }
       .card-kpis { gap: .75rem; }
     }
@@ -445,8 +467,18 @@
             <label><input type="radio" name="actu-modo" value="calles" onchange="actuSetModoZona('calles')"> 🛣️ Por calle + rango de alturas (autodetectado)</label>
           </div>
           <div id="actu-mapa-wrap" style="display:none;margin-top:.7rem">
-            <p class="form-hint">Dibujá el polígono de la <strong>nueva zona</strong> usando la herramienta de polígono (arriba a la derecha del mapa), sobre los puntos del relevamiento anterior.</p>
-            <div id="actu-mapa" style="height:420px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
+            <p class="form-hint">Dibujá el polígono de la <strong>nueva zona</strong> con la herramienta ⬟ o ▭ (arriba a la derecha del mapa), sobre los puntos del relevamiento anterior.
+              Podés mover los vértices para ajustarlo, y cambiar a <strong>satélite</strong> con el control de capas (arriba a la izquierda).</p>
+            <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.45rem">
+              <button type="button" class="btn btn-sm btn-outline" onclick="actuEncuadrar()"
+                 title="Volver a encuadrar el mapa sobre el relevamiento anterior">⤢ Ver todo</button>
+              <button type="button" class="btn btn-sm btn-outline" onclick="actuBorrarZona()"
+                 title="Borrar el polígono dibujado y empezar de nuevo">🗑 Borrar zona</button>
+              <button type="button" class="btn btn-sm btn-outline" onclick="actuMapaGrande(this)"
+                 title="Agrandar el mapa para dibujar más cómodo">⛶ Agrandar</button>
+              <span id="actu-sel" style="font-size:.78rem;color:#6b7280"></span>
+            </div>
+            <div id="actu-mapa" style="height:520px;border-radius:8px;overflow:hidden;border:1px solid #1f2937"></div>
             <div style="text-align:right;margin-top:.6rem">
               <button type="button" class="btn btn-outline" onclick="toggleForm()">Cancelar</button>
               <button type="button" class="btn btn-primary" id="actu-btn-crear" onclick="actuCrearSurvey()" disabled>Crear actualización</button>
@@ -565,7 +597,9 @@ async function submitForm(e) {
 
 /* ── Actualización: crear sobre el CSV anterior geocodificado ───── */
 const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: null, pollTimer: null,
-                    logEntries: [], logLastId: 0 };
+                    logEntries: [], logLastId: 0,
+                    // para el resumen en vivo del polígono dibujado
+                    puntos: [], ptsGroup: null, seleccion: 0 };
 const ACTU_USO_COLOR = { residencial:'#3b82f6', comercial:'#f59e0b', mixto:'#a855f7', industrial:'#ef4444', vacante:'#9ca3af' };
 
 // Contrato de columnas del CSV del relevamiento anterior (sin mapeo manual): el CSV debe
@@ -843,18 +877,120 @@ async function actuCrearSurveyCalles(btn) {
   } catch(err) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; btn.disabled = false; btn.textContent = 'Crear relevamiento'; }
 }
 
+// ¿(lat,lng) dentro del anillo? Ray casting — sin dependencias extra. `ring` = [[lng,lat],…]
+function _puntoEnAnillo(lat, lng, ring) {
+  let dentro = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) dentro = !dentro;
+  }
+  return dentro;
+}
+// Dentro del GeoJSON dibujado (Polygon o MultiPolygon): en un anillo exterior y en ningún hueco.
+function _puntoEnGeoJSON(lat, lng, gj) {
+  const polys = gj.type === 'MultiPolygon' ? gj.coordinates : [gj.coordinates];
+  for (const poly of polys) {
+    if (!poly.length) continue;
+    if (_puntoEnAnillo(lat, lng, poly[0])) {
+      let enHueco = false;
+      for (let k = 1; k < poly.length; k++) if (_puntoEnAnillo(lat, lng, poly[k])) enHueco = true;
+      if (!enHueco) return true;
+    }
+  }
+  return false;
+}
+// Área aproximada en km² de un anillo lat/lng (fórmula del área esférica proyectada).
+function _areaKm2(gj) {
+  const polys = gj.type === 'MultiPolygon' ? gj.coordinates : [gj.coordinates];
+  let a = 0;
+  for (const poly of polys) {
+    for (let r = 0; r < poly.length; r++) {
+      const ring = poly[r]; let s = 0;
+      const latm = ring.reduce((t, p) => t + p[1], 0) / ring.length;
+      const kx = 111.320 * Math.cos(latm * Math.PI / 180), ky = 110.574;   // km por grado
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        s += (ring[j][0] * kx) * (ring[i][1] * ky) - (ring[i][0] * kx) * (ring[j][1] * ky);
+      }
+      a += (r === 0 ? 1 : -1) * Math.abs(s / 2);
+    }
+  }
+  return a;
+}
+
+// Resumen EN VIVO de lo que abarca el polígono: sin esto dibujás a ciegas y no sabés si
+// incluiste las direcciones que querías. Se recalcula al crear y al mover cada vértice.
+function actuActualizarSeleccion() {
+  const el = document.getElementById('actu-sel');
+  if (!el) return;
+  const layer = actuState.drawnLayer;
+  if (!layer) { el.textContent = 'Sin zona dibujada todavía.'; el.style.color = '#6b7280'; return; }
+  let gj;
+  try { gj = layer.toGeoJSON().geometry; } catch(_) { return; }
+  const pts = actuState.puntos || [];
+  let n = 0, ufv = 0, ufc = 0;
+  pts.forEach(p => {
+    if (p.lat == null || !_puntoEnGeoJSON(p.lat, p.lng, gj)) return;
+    n += 1; ufv += (p.uf_v || 0); ufc += (p.uf_c || 0);
+  });
+  actuState.seleccion = n;
+  const km2 = _areaKm2(gj);
+  el.style.color = n ? '#166534' : '#b45309';
+  el.innerHTML = `<b>${n}</b> de ${pts.length} direcciones del relevamiento anterior dentro `
+    + `· UF ${ufv} viv / ${ufc} com · área ≈ ${km2.toFixed(2)} km²`
+    + (n ? '' : ' — el polígono no abarca ninguna dirección');
+}
+
+function actuEncuadrar() {
+  const m = actuState.map, g = actuState.ptsGroup;
+  if (!m) return;
+  if (g && g.getLayers().length) m.fitBounds(g.getBounds().pad(0.15), { maxZoom: 17 });
+}
+
+function actuBorrarZona() {
+  if (actuState.drawnLayer && actuState.map) actuState.map.removeLayer(actuState.drawnLayer);
+  actuState.drawnLayer = null;
+  document.getElementById('actu-btn-crear').disabled = true;
+  actuActualizarSeleccion();
+}
+
+function actuMapaGrande(btn) {
+  const el = document.getElementById('actu-mapa');
+  const grande = el.style.height === '520px' || !el.style.height;
+  el.style.height = grande ? '78vh' : '520px';
+  btn.textContent = grande ? '⛶ Reducir' : '⛶ Agrandar';
+  setTimeout(() => actuState.map && actuState.map.invalidateSize(), 80);
+}
+
 function actuRenderMapa(puntos) {
   document.getElementById('actu-mapa-wrap').style.display = '';
   if (actuState.map) { actuState.map.remove(); actuState.map = null; }
-  const map = L.map('actu-mapa');
+  const map = L.map('actu-mapa', { maxZoom: 22 });
   actuState.map = map;
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  actuState.drawnLayer = null;
+
+  // Capas base: SATÉLITE por default (para dibujar hay que ver el terreno, no un mapa
+  // esquemático) + OSM para leer nombres de calle + Google si hay API key.
+  const satelite = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Tiles © Esri', maxZoom: 22, maxNativeZoom: 20 });
+  const etiquetas = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 22, maxNativeZoom: 20, opacity: 0.8 });
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 22, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
+  satelite.addTo(map); etiquetas.addTo(map);
+  const layersCtl = L.control.layers({ '🛰 Satélite': satelite, '🗺 Mapa': osm },
+                                     { 'Etiquetas': etiquetas }, { position: 'topleft' }).addTo(map);
+  addGoogleLayers(map, layersCtl);      // reusa el helper del dashboard (si hay key)
+
   const pts = puntos.filter(p => p.lat != null && p.lng != null);
+  actuState.puntos = pts;
   // Relevamiento anterior en gris: un marcador por ubicación (con la cantidad de
   // direcciones si comparten punto). Se sigue viendo mientras dibujás el sector.
   const group = L.featureGroup();
   agruparPorUbicacion(pts).forEach(g => oldRelevMarker(g).addTo(group));
   group.addTo(map);
+  actuState.ptsGroup = group;
   // El contenedor recién se muestra: recalcular tamaño y ENTONCES encuadrar a los puntos.
   setTimeout(() => {
     map.invalidateSize();
@@ -865,11 +1001,13 @@ function actuRenderMapa(puntos) {
   // Herramienta de dibujo: solo polígono (la nueva zona). Un único polígono a la vez.
   map.pm.addControls({ position:'topright', drawPolygon:true, drawMarker:false, drawPolyline:false,
     drawCircle:false, drawCircleMarker:false, drawRectangle:true, drawText:false,
-    cutPolygon:false, rotateMode:false, dragMode:false, editMode:true, removalMode:true });
+    cutPolygon:false, rotateMode:false, dragMode:true, editMode:true, removalMode:true });
+  map.pm.setLang('es');
   const onShape = layer => {
     if (actuState.drawnLayer && actuState.drawnLayer !== layer) map.removeLayer(actuState.drawnLayer);
     actuState.drawnLayer = layer;
     document.getElementById('actu-btn-crear').disabled = false;
+    actuActualizarSeleccion();
   };
   // El RELLENO del polígono no debe capturar los clics: así seguís pudiendo abrir
   // el detalle de los puntos del relevamiento anterior que quedan dentro del sector.
@@ -880,16 +1018,30 @@ function actuRenderMapa(puntos) {
   };
   map.on('pm:create', e => {
     const layer = e.layer;
-    if (layer.setStyle) layer.setStyle({ color: '#22d3ee', weight: 2, fillOpacity: 0.08 });
+    if (layer.setStyle) layer.setStyle({ color: '#22d3ee', weight: 3, fillOpacity: 0.10 });
     onShape(layer);
     noBloquearClics(layer);
-    layer.on('pm:edit pm:markerdragend pm:update', () => noBloquearClics(layer));
+    // Re-contar en cada edición del polígono (vértice movido, arrastrado, etc.)
+    layer.on('pm:edit pm:markerdragend pm:update pm:dragend', () => {
+      noBloquearClics(layer); actuActualizarSeleccion();
+    });
   });
+  map.on('pm:remove', () => {
+    actuState.drawnLayer = null;
+    document.getElementById('actu-btn-crear').disabled = true;
+    actuActualizarSeleccion();
+  });
+  actuActualizarSeleccion();
 }
 
 async function actuCrearSurvey() {
   const msg = document.getElementById('actu-msg');
   if (!actuState.drawnLayer) { msg.style.color = '#b91c1c'; msg.textContent = 'Dibujá el polígono de la nueva zona primero.'; return; }
+  // Guarda: una zona que no abarca ninguna dirección del relevamiento anterior casi siempre
+  // es un polígono mal ubicado. Se puede seguir igual (quizás es zona nueva sin historial).
+  if (!actuState.seleccion &&
+      !confirm('El polígono no abarca ninguna dirección del relevamiento anterior.\n\n'
+               + '¿Crear la actualización igual?')) return;
   const gj = actuState.drawnLayer.toGeoJSON();
   const btn = document.getElementById('actu-btn-crear');
   btn.disabled = true; btn.textContent = '⟳ Creando…';
@@ -912,7 +1064,7 @@ async function actuCrearSurvey() {
 // El país se autodetecta al crear la zona; si no matchea, se usa el default.
 const PIPELINE_DEFAULT = [['osm', 'OSM'], ['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser']];
 const PIPELINE_BY_COUNTRY = {
-  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser'], ['shoppings', 'Shoppings'], ['categorias', 'Categorías'], ['hoteles', 'Hoteles'], ['hab_ia', 'Habitaciones IA']],
+  BRA: [['smartgis', 'SmartGIS'], ['bci', 'BCI PDF'], ['parser', 'Parser'], ['shoppings', 'Shoppings'], ['categorias', 'Categorías'], ['hoteles', 'Hoteles'], ['hab_ia', 'Habitaciones IA'], ['footprints', 'Footprints'], ['altura', 'Altura']],
 };
 
 /* ── Avance real del pipeline (barra de progreso) ─────────────────
@@ -940,6 +1092,8 @@ const STEP_MATCHERS = [
   ['categorias',         k => k.includes('categoria')],
   ['hab_ia',             k => k.includes('habitacion') || k.includes('_llm')],  // antes que 'hotel'
   ['hoteles',            k => k.includes('hotel')],
+  ['footprints',         k => k.includes('footprint')],
+  ['altura',             k => k.includes('altura')],
 ];
 // Plan esperado por flujo (CLAUDE.md): pasos que producen datos del relevamiento.
 const PLAN_STEPS = {
@@ -1016,10 +1170,32 @@ function renderProgressRow(s) {
           </div>`;
 }
 
+// Las claves REALES que guarda el runner/Hermes son los nombres de los agentes
+// ('smartgis_fetcher', 'varzea_bci_fetcher', 'parcela_categoria'…), no las canónicas del
+// plan ('smartgis', 'bci', 'categorias'). Sin esta traducción todas las etapas se veían
+// "pendiente" aunque hubieran corrido. Se reusa STEP_MATCHERS (ya ordenado: 'parser' antes
+// de 'bci', 'hab_ia' antes de 'hoteles').
+function pasosCanonicos(pasos) {
+  const out = {};
+  Object.keys(pasos || {}).forEach(k => {
+    const kl = String(k).toLowerCase();
+    for (const [canon, test] of STEP_MATCHERS) {
+      if (test(kl)) { if (out[canon] == null) out[canon] = pasos[k]; break; }
+    }
+  });
+  return out;
+}
+// Igual para el nombre del paso actual, que también viene como nombre de agente.
+function canonDe(key) {
+  const kl = String(key || '').toLowerCase();
+  for (const [canon, test] of STEP_MATCHERS) if (test(kl)) return canon;
+  return kl;
+}
+
 function renderPipelineSteps(pipeline, status, countryCode) {
   if (!pipeline || Object.keys(pipeline).length === 0) return '';
-  const actual = pipeline.paso_actual || '';
-  const pasos = pipeline.pasos || {};
+  const actual = canonDe(pipeline.paso_actual || '');
+  const pasos = pasosCanonicos(pipeline.pasos || {});
 
   function stepHtml(key, label) {
     const r = pasos[key];
@@ -1075,9 +1251,116 @@ function renderPipelineSteps(pipeline, status, countryCode) {
   if (actual === 'error') html += '<span class="step-arrow">→</span><span class="pipeline-step step-fail">✗ Error</span>';
   if (actual === 'sin_pipeline') html += '<span class="step-arrow">→</span><span class="pipeline-step step-idle">Sin pipeline</span>';
   html += '</div>';
+  html += renderEtapasDetalle(pipeline, status, countryCode);
   html += currentErrorHtml();
   html += '</div>';
   return html;
+}
+
+/* ── Detalle de ejecución por etapa, con % ────────────────────────────────────────
+   Cada agente reporta contadores distintos (`lotes_escaneados`, `pdfs_descargados`,
+   `parcelas_procesadas`…). Acá se traduce cada uno a un avance comparable:
+     - hecho / total conocido  → % real (ej. SmartGIS: parcelas guardadas de lotes hallados)
+     - paso ok sin denominador → 100%
+     - `parcial: true`         → el % que alcanzó + aviso de que falta reanudar
+   Así se ve DÓNDE está y CUÁNTO le falta, no solo un tilde. */
+function etapaAvance(key, r) {
+  if (!r) return { pct: null, txt: '' };
+  const n = (...ks) => { for (const k of ks) if (r[k] != null) return Number(r[k]); return null; };
+  let hecho = null, total = null, txt = '';
+
+  if (key === 'smartgis') {
+    hecho = (n('parcelas_insertadas') || 0) + (n('parcelas_actualizadas') || 0);
+    total = n('lotes_escaneados');
+    txt = total != null ? `${fmt(hecho)} de ~${fmt(total)} lotes hallados` : `${fmt(hecho)} parcelas`;
+  } else if (key === 'bci') {
+    const desc = n('pdfs_descargados') || 0, ya = n('pdfs_ya_existentes') || 0;
+    hecho = desc + ya; total = n('parcelas_procesadas');
+    txt = `${fmt(hecho)} PDF (${fmt(desc)} nuevos, ${fmt(ya)} reusados)`
+        + ((n('pdfs_pendientes') || 0) ? ` · ${fmt(n('pdfs_pendientes'))} pendientes` : '')
+        + ((n('pdfs_fallidos') || 0) ? ` · ${fmt(n('pdfs_fallidos'))} fallidos` : '');
+  } else if (key === 'parser') {
+    hecho = n('parcelas_actualizadas'); total = n('parcelas_procesadas');
+    txt = `${fmt(hecho || 0)} de ${fmt(total || 0)} parseadas`
+        + ((n('errores') || 0) ? ` · ${fmt(n('errores'))} con error` : '');
+  } else if (key === 'agrupador') {
+    txt = `${fmt(n('establecimientos_creados') || 0)} establecimientos · ${fmt(n('parcelas_agrupadas') || 0)} parcelas`;
+  } else if (key === 'shoppings') {
+    txt = `${fmt(n('comercios_encontrados') || 0)} encontrados`;
+  } else if (key === 'categorias') {
+    txt = `${fmt(n('parcelas_categorizadas') || 0)} categorizadas`;
+  } else if (key === 'hoteles') {
+    txt = `${fmt(n('hoteles_en_zona') || n('hoteles') || 0)} hoteles`
+        + ((n('sin_habitaciones') || 0) ? ` · ${fmt(n('sin_habitaciones'))} sin habitaciones` : '');
+  } else if (key === 'hab_ia') {
+    txt = `${fmt(n('resueltos') || n('completadas') || 0)} completadas por IA`
+        + ((n('desconocidos') || 0) ? ` · ${fmt(n('desconocidos'))} sin resultado` : '');
+  } else if (key === 'footprints') {
+    hecho = n('vinculados_a_parcela'); total = n('footprints_insertados');
+    txt = `${fmt(n('footprints_insertados') || 0)} huellas`
+        + ((n('vinculados_a_parcela') || 0) ? ` · ${fmt(n('vinculados_a_parcela'))} en parcelas` : '')
+        + (r.fuente_usada ? ` (${r.fuente_usada === 'osm' ? 'OSM' : 'Google Open Buildings'})` : '');
+  } else if (key === 'altura') {
+    hecho = n('con_altura'); total = n('parcelas_consultadas');
+    txt = `${fmt(n('con_altura') || 0)} medidas`
+        + ((n('discrepancias') || 0) ? ` · ${fmt(n('discrepancias'))} discrepancias vs catastro` : '');
+  }
+
+  let pct = null;
+  if (hecho != null && total) pct = Math.max(0, Math.min(100, Math.round(100 * hecho / total)));
+  else if (r.ok === true && !r.parcial) pct = 100;
+  else if (r.ok === false) pct = 0;
+  return { pct, txt };
+}
+
+function renderEtapasDetalle(pipeline, status, countryCode) {
+  const pasos = pasosCanonicos(pipeline.pasos || {});
+  if (!Object.keys(pasos).length) return '';
+  const actual = canonDe(pipeline.paso_actual || '');
+  // Los timestamps vienen con la clave del agente → canonicalizar igual que los pasos.
+  const ts = pasosCanonicos(pipeline.pasos_ts || {});
+  const stepsConfig = PIPELINE_BY_COUNTRY[countryCode] || PIPELINE_DEFAULT;
+
+  // Global: etapas terminadas (ok y no parciales) sobre el plan del país.
+  const cerradas = stepsConfig.filter(([k]) => { const r = pasos[k]; return r && r.ok === true && !r.parcial; }).length;
+  const pctGlobal = Math.round(100 * cerradas / stepsConfig.length);
+
+  let filas = '';
+  stepsConfig.forEach(([key, label]) => {
+    const r = pasos[key];
+    const corriendo = actual === key && (status === 'running' || status === 'stopping');
+    const { pct, txt } = etapaAvance(key, r);
+    let estado, color;
+    if (r && r.ok === false)      { estado = 'falló';     color = '#dc2626'; }
+    else if (r && r.parcial)      { estado = 'parcial';   color = '#d97706'; }
+    else if (r && r.saltado)      { estado = 'saltado';   color = '#9ca3af'; }
+    else if (r && r.ok === true)  { estado = 'listo';     color = '#16a34a'; }
+    else if (corriendo)           { estado = 'corriendo'; color = '#0284c7'; }
+    else                          { estado = 'pendiente'; color = '#9ca3af'; }
+    const ancho = pct != null ? pct : (corriendo ? 8 : 0);
+    const cuando = ts[key] ? fmtActTs(ts[key]) : '';
+    filas += `
+      <div class="etapa-row">
+        <div class="etapa-nom">${corriendo ? '<span class="spinner">⟳</span> ' : ''}${escHtml(label)}</div>
+        <div class="etapa-bar-bg"><div class="etapa-bar" style="width:${ancho}%;background:${color}"></div></div>
+        <div class="etapa-pct" style="color:${color}">${pct != null ? pct + '%' : (corriendo ? '…' : '—')}</div>
+        <div class="etapa-est" style="color:${color}">${estado}</div>
+        <div class="etapa-txt">${escHtml(txt)}${cuando ? ` <span style="color:#9ca3af">· ${cuando}</span>` : ''}</div>
+      </div>`;
+  });
+
+  const parciales = stepsConfig.filter(([k]) => (pasos[k] || {}).parcial).map(([, l]) => l);
+  return `
+    <div class="etapas-wrap">
+      <div class="etapas-head">
+        <span>Avance de etapas</span>
+        <span class="etapas-glob">${cerradas} de ${stepsConfig.length} completas · ${pctGlobal}%</span>
+      </div>
+      <div class="etapas-glob-bg"><div class="etapas-glob-bar" style="width:${pctGlobal}%"></div></div>
+      ${filas}
+      ${parciales.length ? `<div class="etapa-aviso">⚠ Quedó <b>parcial</b>: ${parciales.map(escHtml).join(', ')}.
+         Hay que <b>reanudar</b> para completarlo (reanudar acumula, no repite lo hecho).</div>` : ''}
+    </div>`;
 }
 
 /* ── Iniciar / Re-escanear relevamiento ────────────────────────── */
@@ -1527,7 +1810,7 @@ function renderCard(s) {
         </div>
         <div class="detail-body">
           <div class="detail-grid">
-            <div class="detail-kpi"><div class="detail-kpi-val">${fmt(s.total_parcelas)}</div><div class="detail-kpi-lbl">Parcelas</div></div>
+            <div class="detail-kpi"><div class="detail-kpi-val" id="kpi-parcelas-${sid}">${fmt(s.total_parcelas)}</div><div class="detail-kpi-lbl">Parcelas</div></div>
             <div class="detail-kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="detail-kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_vivienda)}</div><div class="detail-kpi-lbl">UF Vivienda${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
             <div class="detail-kpi${s.uf_estimado ? ' detail-kpi-help' : ''}"${s.uf_estimado ? ` title="${UF_KPI_TOOLTIP}"` : ''}><div class="detail-kpi-val">${s.uf_estimado ? '≈ ' : ''}${fmt(s.total_uf_comercio)}</div><div class="detail-kpi-lbl">UF Comercio${s.uf_estimado ? ' <span class="est-badge">est.</span>' : ''}</div></div>
             <div class="detail-kpi"><div class="detail-kpi-val">${areaKm}</div><div class="detail-kpi-lbl">Área relevada</div></div>
@@ -1535,7 +1818,7 @@ function renderCard(s) {
 
           ${renderProgressRow(s)}
 
-          ${OPERADOR ? renderPipelineSteps(s.pipeline, s.status, s.country_code) : ''}
+          <div id="steps-${sid}">${OPERADOR ? renderPipelineSteps(s.pipeline, s.status, s.country_code) : ''}</div>
 
           ${OPERADOR ? `
           <div class="actlog-section">
@@ -1567,6 +1850,18 @@ function renderCard(s) {
             ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
                title="Descargar CSV con layout de base de logradouros de operadora (solo Brasil)">⬇ CSV Operadora</a>` : ''}
+            ${OPERADOR ? `<button class="btn btn-sm btn-outline"
+               onclick="runFootprints('${sid}', this)"
+               title="Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.">🏗️ Footprints (revisión)</button>
+            <span id="footprints-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <button class="btn btn-sm btn-outline" onclick="runAltura('${sid}', this)"
+               title="Altura satelital de cada parcela (Google Solar − terreno) contrastada con los pisos que sugiere el catastro. Marca dónde hay más construido de lo declarado. Free tier 10k/mes.">📏 Altura (revisión)</button>
+            <span id="altura-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <button class="btn btn-sm btn-outline" onclick="runIncidencias('${sid}', this)"
+               title="Buscar los casos que necesitan resolución humana (hoteles sin habitaciones, construcción no declarada, UF imposible) y abrir el reporte para resolverlos.">🧾 Incidencias</button>
+            <span id="inc-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <a class="btn btn-sm btn-outline" href="/incidencias/${sid}" target="_blank"
+               style="text-decoration:none" title="Abrir el reporte de incidencias del relevamiento">↗</a>` : ''}
             ${OPERADOR && s.country_code === 'BRA' ? `<button class="btn btn-sm btn-outline"
                onclick="runHoteles('${sid}', this)"
                title="Buscar hoteles (Cadastur + Receita + OSM; Google si está tildado): habitaciones y abierto/cerrado; suma las habitaciones como UF comercio">🏨 Hoteles</button>
@@ -1588,30 +1883,63 @@ function renderCard(s) {
     </div>`;
 }
 
-// Pedidos de asistencia humana (hoteles abiertos sin habitaciones): los lista en el detalle
-// con el link a la página de carga manual (la misma que se avisa por Telegram).
-async function loadAsistencia(sid) {
+// Incidencias pendientes del relevamiento (casos que sólo un humano puede resolver:
+// hoteles sin habitaciones, construcción no declarada, UF imposible…). Muestra el desglose
+// por tipo y linkea a la página donde se resuelven. Absorbió la vieja asistencia de hoteles.
+const INCIDENCIA_LABEL = {
+  hotel_sin_habitaciones: '🏨 hoteles sin habitaciones',
+  altura_sin_declarar: '🏗 construcción no declarada',
+  altura_mas_alta: '🏢 más alto de lo declarado',
+  uf_imposible: '⚠ UF que no cabe en lo construido',
+  geocoding_dudoso: '📍 ubicación dudosa del relevamiento anterior',
+};
+
+async function loadIncidencias(sid) {
   const box = document.getElementById('asist-' + sid);
   if (!box) return;
   let d;
-  try { d = await fetch(`/api/surveys/${sid}/hoteles-asistencia`).then(r => r.json()); }
+  try { d = await fetch(`/api/surveys/${sid}/incidencias?estado=pendiente`).then(r => r.json()); }
   catch(_) { return; }
-  if (!d || !d.ok || !d.total) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  const items = d.hoteles.map(h =>
-    `<li>${escHtml(h.nombre || '(sin nombre)')}`
-    + (h.direccion ? ` — <span style="color:#6b7280">${escHtml(h.direccion)}</span>` : '')
-    + (h.telefono ? ` · ☎ ${escHtml(h.telefono)}` : '') + '</li>').join('');
+  if (!d || !d.ok || !d.pendientes) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const porTipo = d.resumen && d.resumen.por_tipo || {};
+  const items = Object.keys(porTipo).map(t => {
+    const n = porTipo[t].pendiente || 0;
+    if (!n) return '';
+    return `<li>${n} — ${escHtml(INCIDENCIA_LABEL[t] || t)}</li>`;
+  }).filter(Boolean).join('');
   box.style.display = '';
   box.innerHTML = `
     <div style="margin-top:.5rem;padding:.5rem .7rem;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;font-size:.78rem">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
-        <span>🆘 <b>Asistencia humana</b>: ${d.total} hotel(es) abierto(s) sin habitaciones por resolver.</span>
-        <a href="/asistencia-hoteles/${sid}" target="_blank"
+        <span>🧾 <b>Incidencias por resolver</b>: ${d.pendientes} caso(s) pendiente(s).</span>
+        <a href="/incidencias/${sid}" target="_blank"
            class="btn btn-sm" style="text-decoration:none;background:#f59e0b;color:#fff;border:1px solid #d97706">
-           Abrir página de carga →</a>
+           Abrir reporte →</a>
       </div>
       <ul style="margin:.4rem 0 0;padding-left:1.1rem;color:#374151">${items}</ul>
     </div>`;
+}
+
+// Re-escanea el relevamiento y abre el reporte.
+async function runIncidencias(sid, btn) {
+  const msg = document.getElementById('inc-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ escaneando…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'Buscando incidencias…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/incidencias/generar`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      if (msg) {
+        msg.style.color = d.pendientes ? '#b45309' : '#166534';
+        msg.textContent = `${d.pendientes} pendiente(s)`
+          + (d.creadas ? ` · ${d.creadas} nueva(s)` : '')
+          + (d.obsoletas ? ` · ${d.obsoletas} obsoleta(s)` : '');
+      }
+      await loadIncidencias(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
 }
 
 /* ── Map ───────────────────────────────────────────────────────── */
@@ -1687,6 +2015,12 @@ function initMap(sid) {
   map.createPane('criticasPane');
   map.getPane('criticasPane').style.zIndex = 450;
 
+  // Pane para la capa de revisión de footprints (🏗️): por DEBAJO de los marcadores de
+  // parcela (overlayPane=400) para no tapar los clics de las parcelas — se lee por su
+  // contorno/relleno alrededor del marcador, no en vez de él.
+  map.createPane('footprintsPane');
+  map.getPane('footprintsPane').style.zIndex = 380;
+
   // Google Maps (opcional): si hay API key configurada, se agregan como capas base
   // seleccionables vía Leaflet.GoogleMutant. Da imágenes de Google y más zoom nativo.
   addGoogleLayers(map, layersCtl);
@@ -1729,8 +2063,14 @@ function initMap(sid) {
       map._anteriorEnZona = res.enZona;
       map._anteriorEnZonaDist = res.enZonaDistintas;
       map._anteriorEnZonaUF = res.enZonaUF;
-      // Si todavía no hay parcelas nuevas, encuadrar al relevamiento anterior.
-      if (res.bounds && (!activeMarkers[sid] || !activeMarkers[sid].length)) {
+      // El encuadre manda la ZONA ESCANEADA, no el relevamiento anterior: el baseline suele
+      // cubrir toda la ciudad relevada antes, así que encuadrarlo alejaba el mapa y la zona
+      // quedaba diminuta. Además esto resolvía async y le ganaba la carrera al fitBounds de
+      // la zona hecho en initMap. Solo se encuadra al anterior si NO hay zona ni parcelas
+      // (o sea, no hay nada mejor a lo que apuntar) y el usuario no movió el mapa.
+      const hayZona = map._zoneBounds && map._zoneBounds.isValid();
+      const hayParcelas = activeMarkers[sid] && activeMarkers[sid].length;
+      if (res.bounds && !hayZona && !hayParcelas && !map._userMoved) {
         try { map.fitBounds(res.bounds, { padding: [24, 24], maxZoom: 17 }); } catch(_) {}
       }
       if (map._leyenda) loadParcelasMap(sid);   // refrescar leyenda con la línea "anterior"
@@ -1817,7 +2157,7 @@ async function loadHoteles(sid) {
       habByTipo[lbl] = (habByTipo[lbl] || 0) + h.habitaciones;
     });
     if (maps[sid]) maps[sid]._hotelHabByTipo = habByTipo;
-    loadAsistencia(sid);   // pedidos de asistencia humana (hoteles sin habitaciones) + link
+    loadIncidencias(sid);  // casos pendientes de resolución humana + link al reporte
     const msg = document.getElementById('hot-msg-' + sid);
     if (msg && d.total) msg.textContent = `${d.abiertos} hotel(es) · ${fmt(d.habitaciones_total)} hab.${d.cerrados ? ` · ${d.cerrados} cerrado(s)` : ''}`;
     // Pines 🏨 sobre el mapa (violeta=abierto, rojo=cerrado)
@@ -1906,6 +2246,133 @@ async function runCountry(sid, btn) {
     }
   } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
   btn.disabled = false; btn.textContent = t0;
+}
+
+async function runFootprints(sid, btn) {
+  const msg = document.getElementById('footprints-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ buscando…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'Google Open Buildings (fallback OSM)…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/footprints`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      const fuente = d.fuente_usada === 'osm' ? 'OSM' : d.fuente_usada === 'google_open_buildings' ? 'Google Open Buildings' : 'sin resultados';
+      if (msg) { msg.style.color = '#166534'; msg.textContent = `${fuente} · ${d.footprints_insertados} footprints · ${d.vinculados_a_parcela} en parcelas`; }
+      await loadFootprintsLayer(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+// Capa 🏗️ Footprints (revisión): polígonos reales de edificios (Google Open Buildings /
+// OSM) para comparar a ojo contra lo que dice el catastro. Se llena on-demand (al correr
+// el botón), no se carga en cada visita al mapa — evita pagar el peso del GeoJSON de arranque.
+const FOOTPRINTS_COLOR = { google_open_buildings: '#2563eb', osm: '#f97316' };
+
+async function loadFootprintsLayer(sid) {
+  const map = maps[sid];
+  if (!map) return;
+  let gj;
+  try { gj = await fetch(`/api/surveys/${sid}/footprints`).then(r => r.json()); }
+  catch(_) { return; }
+  if (map._footprintsLayer) {
+    try { map._layersCtl.removeLayer(map._footprintsLayer); map.removeLayer(map._footprintsLayer); } catch(_) {}
+    map._footprintsLayer = null;
+  }
+  if (!gj || !gj.features || !gj.features.length) return;
+
+  const layer = L.geoJSON(gj, {
+    pane: 'footprintsPane',
+    style: f => ({
+      color: FOOTPRINTS_COLOR[f.properties.source] || '#6b7280',
+      weight: 1, fillOpacity: .25, fillColor: FOOTPRINTS_COLOR[f.properties.source] || '#6b7280',
+    }),
+    onEachFeature: (f, lyr) => {
+      const p = f.properties;
+      const fuenteLabel = p.source === 'osm' ? 'OSM' : 'Google Open Buildings';
+      const conf = p.confidence != null ? ` · confianza ${p.confidence}` : '';
+      lyr.bindPopup(
+        `<b>🏗️ Footprint</b> (${fuenteLabel}${conf})<br>` +
+        `Área: ${p.area_m2} m²<br>` +
+        `<b>Catastro dice:</b> ${p.catastro_tipo_edificacion || '(sin dato)'}` +
+        (p.catastro_uf_vivienda != null ? ` (uf_vivienda=${p.catastro_uf_vivienda})` : '')
+      );
+    },
+  }).addTo(map);
+  map._footprintsLayer = layer;
+  if (map._layersCtl) map._layersCtl.addOverlay(layer, `🏗️ Footprints (revisión) (${gj.features.length})`);
+}
+
+async function runAltura(sid, btn) {
+  const msg = document.getElementById('altura-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ midiendo…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'Google Solar + Elevation…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/altura`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      if (msg) {
+        msg.style.color = d.discrepancias ? '#b45309' : '#166534';
+        msg.textContent = `${d.con_altura} con altura · ${d.discrepancias} discrepancia(s)`
+          + (d.disc_sin_declarar ? ` (${d.disc_sin_declarar} sin declarar)` : '')
+          + (d.parcial ? ' · parcial, re-ejecutar' : '');
+      }
+      await loadAlturaLayer(sid);
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+// Capa 📏 Altura (revisión): un marcador por parcela con altura satelital. Rojo/ámbar =
+// discrepancia con el catastro (más construido de lo declarado), gris = coincide. El popup
+// SIEMPRE muestra el año de la imagen: en VG es mayormente 2014, así que el dato no es
+// "estado actual" y el operador tiene que verlo antes de concluir.
+const ALTURA_COLOR = { sin_declarar: '#dc2626', mas_alto: '#f59e0b', ok: '#9ca3af' };
+const ALTURA_MOTIVO_LABEL = {
+  sin_declarar: 'catastro sin construcción declarada',
+  mas_alto: 'más pisos que lo declarado',
+};
+
+async function loadAlturaLayer(sid) {
+  const map = maps[sid];
+  if (!map) return;
+  let d;
+  try { d = await fetch(`/api/surveys/${sid}/altura`).then(r => r.json()); }
+  catch(_) { return; }
+  if (map._alturaLayer) {
+    try { map._layersCtl.removeLayer(map._alturaLayer); map.removeLayer(map._alturaLayer); } catch(_) {}
+    map._alturaLayer = null;
+  }
+  if (!d || !d.items || !d.items.length) return;
+
+  const grp = L.layerGroup();
+  d.items.forEach(it => {
+    const color = ALTURA_COLOR[it.motivo] || ALTURA_COLOR.ok;
+    const dir = [it.calle, it.numero].filter(Boolean).join(' ') || it.cca || '(sin dirección)';
+    const pisos = it.pisos_sat != null ? `${it.pisos_sat} piso(s)` : 'sin determinar';
+    const bci = it.pisos_bci != null ? `${it.pisos_bci} piso(s)` : 'sin construcción declarada';
+    L.circleMarker([it.lat, it.lng], {
+      pane: 'criticasPane', radius: it.discrepancia ? 9 : 5,
+      color: color, weight: it.discrepancia ? 3 : 1,
+      fillColor: color, fillOpacity: it.discrepancia ? .45 : .2,
+    }).bindPopup(
+      `<b>📏 ${dir}</b><br>` +
+      `Altura satelital: <b>${it.altura_m != null ? it.altura_m + ' m' : '—'}</b> → ${pisos}<br>` +
+      `Catastro (proxy): ${bci}` +
+      (it.area_c ? ` · ${it.area_c} m² constr.` : '') + '<br>' +
+      (it.motivo ? `<b style="color:${color}">⚠ ${ALTURA_MOTIVO_LABEL[it.motivo]}</b><br>` : '') +
+      `<span style="font-size:.72rem;color:#6b7280">Imagen ${it.imagery_year || '?'}` +
+      `${it.imagery_quality ? ' · ' + it.imagery_quality : ''}` +
+      `${it.ground_area_m2 ? ' · huella ' + it.ground_area_m2 + ' m²' : ''}</span>`
+    ).addTo(grp);
+  });
+  grp.addTo(map);
+  map._alturaLayer = grp;
+  if (map._layersCtl) {
+    map._layersCtl.addOverlay(grp, `📏 Altura (${d.discrepancias}/${d.total} discrepan)`);
+  }
 }
 
 async function runHabitacionesIA(sid, btn) {
@@ -2795,9 +3262,45 @@ function hayFormularioActivo() {
     });
 }
 
+// ── Refresh LIVIANO del progreso (no re-renderiza, no toca el mapa) ────────────────
+// `loadSurveys` reescribe todo el innerHTML de la lista, lo que destruye el div del mapa y
+// obliga a recrear Leaflet: cada refresh el mapa perdía zoom y posición (molesto y sin
+// sentido mientras mirás una zona). Con una tarjeta abierta se usa esto en su lugar: pide el
+// survey y actualiza SOLO los nodos de progreso/KPIs por DOM. El mapa se refresca a mano
+// con el botón 🔄 del propio mapa.
+async function refreshProgresoAbiertas() {
+  const abiertas = [...document.querySelectorAll('.card-detail.open')].map(el => el.id.replace('detail-', ''));
+  if (!abiertas.length) return false;
+  let list;
+  try { list = await fetch('/api/surveys').then(r => r.json()); } catch(_) { return true; }
+  let algunoCorriendo = false;
+  list.forEach(s => {
+    const sid = s.survey_id;
+    surveyCache[sid] = s;
+    if (s.status === 'running' || s.status === 'stopping') algunoCorriendo = true;
+    if (!abiertas.includes(sid)) return;
+    // Panel de etapas (incluye la barra global y el % por etapa)
+    const cont = document.getElementById('steps-' + sid);
+    if (cont && OPERADOR) cont.innerHTML = renderPipelineSteps(s.pipeline, s.status, s.country_code);
+    // KPIs del detalle
+    const kv = document.getElementById('kpi-parcelas-' + sid);
+    if (kv) kv.textContent = fmt(s.total_parcelas);
+    // Pill de estado y banner de paso actual
+    const pill = document.querySelector(`#card-${sid} .status-pill`);
+    if (pill) { pill.className = 'status-pill s-' + s.status; pill.textContent = statusLabel(s.status); }
+    const card = document.getElementById('card-' + sid);
+    if (card) card.dataset.status = s.status;
+  });
+  scheduleRefresh(algunoCorriendo ? 4000 : 30000);
+  return true;
+}
+
 async function loadSurveys() {
   if (document.fullscreenElement) { scheduleRefresh(5000); return; }
   if (hayFormularioActivo()) { scheduleRefresh(5000); return; }
+  // Con una tarjeta abierta NO se re-renderiza: se actualiza el progreso in situ para no
+  // matar el mapa. El re-render completo queda para el botón ↻ Actualizar / refreshCard.
+  if (await refreshProgresoAbiertas()) return;
   document.getElementById('status-dot').className = 'loading';
   try {
     let list = await fetch('/api/surveys').then(r => r.json());

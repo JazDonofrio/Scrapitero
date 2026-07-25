@@ -38,6 +38,7 @@ from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.baseline_geocoder import _HEADERS, _google, _mapbox, _nominatim, _tg
+from scrapitero.agents.catastro_geocoder import FUENTES_AUTORITATIVAS as _FUENTES_DIR_AUTORITATIVAS
 from scrapitero.db.engine import get_engine
 
 _CKAN_PACKAGE = "https://dados.turismo.gov.br/api/3/action/package_show?id=meios-de-hospedagem"
@@ -921,6 +922,24 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
               AND ST_Contains(p.geometry, h.location)
         """), {"rid": input.region_id, "ids": insertados})
 
+        # Dirección OFICIAL por reverse contra el catastro: si el pin del hotel cae dentro de
+        # una parcela, su dirección catastral manda sobre la que traía la fuente. Cadastur y
+        # Receita dan la dirección **fiscal**, que puede estar a cientos de metros del hotel
+        # (caso Amazon Aeroporto: fiscal "Ponce de Arruda 50" vs física "Filinto Müller 62",
+        # 909 m de diferencia) y confundía a la asistencia humana. `ST_Contains` no tiene
+        # ambigüedad: si el punto está en el lote, esa es la dirección.
+        conn.execute(text("""
+            UPDATE hoteles h
+               SET direccion = TRIM(CONCAT_WS(' ', p.calle, p.numero))
+                               || COALESCE(', ' || p.barrio, '')
+                               || COALESCE(' - CEP ' || p.codigo_postal, '')
+            FROM parcelas p
+            WHERE h.hotel_id::text = ANY(:ids)
+              AND p.parcela_id = h.parcela_id
+              AND p.calle IS NOT NULL
+              AND p.direccion_source = ANY(:fuentes)
+        """), {"ids": insertados, "fuentes": list(_FUENTES_DIR_AUTORITATIVAS)})
+
         # Enriquecer abierto/cerrado con el business_status de Google (comercios cercanos).
         # Exige NOMBRE similar además de proximidad: antes cualquier lodging a ≤60 m
         # pisaba el estado de un hotel ajeno (era otro vector de confusión hotel↔comercio).
@@ -1045,7 +1064,10 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
     # a la página de carga manual (operador autenticado).
     if out.sin_habitaciones and input.survey_id:
         base = os.environ.get("WEB_BASE_URL", "http://localhost:8765").rstrip("/")
-        link = f"{base}/asistencia-hoteles/{input.survey_id}"
+        # La asistencia de hoteles quedó absorbida por el reporte de incidencias (mig. 046):
+        # el link va al filtro de ese tipo. `/asistencia-hoteles/...` sigue redirigiendo,
+        # así que los avisos ya enviados por Telegram no se rompen.
+        link = f"{base}/incidencias/{input.survey_id}?tipo=hotel_sin_habitaciones"
         _tg(f"🆘 <b>Asistencia: {out.sin_habitaciones} hotel(es)</b> de {out.municipio} "
             "sin cantidad de habitaciones (Cadastur caído / sin dato).\n"
             "Hay que conseguirlas (llamando al hotel) y cargarlas a mano acá:\n"

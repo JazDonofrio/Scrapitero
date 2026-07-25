@@ -32,9 +32,16 @@ from scrapitero.agents._run import agent_run
 from scrapitero.db.engine import get_engine
 
 # Fuentes que apuntan al NÚMERO de casa puntual → sirven de ancla.
-_EXACTAS = ("g:numero", "mapbox", "google")
+_EXACTAS = ("catastro", "g:numero", "mapbox", "google")
 # Fuentes "gruesas" (a nivel calle / aproximado) → candidatas a reposicionar.
 _APROX = ("g:numero_aproximado", "g:logradouro", "g:cep", "nominatim")
+# Fuentes que este pase NO debe pisar, porque ya ubican mejor de lo que puede interpolar:
+#   - `catastro`: la dirección oficial de la parcela (0,4% de error medido en VG) — es la
+#     mejor ancla que existe, mejor que cualquier geocoder.
+#   - `catastro_interp`: interpolado entre números REALES del catastro (3,9%), contra el
+#     ~21% del interpolado sobre el eje OSM. Pisarlo empeoraba el resultado.
+#   - `g:numero`: exacta de geocodebr/CNEFE.
+_INTOCABLES = ("catastro", "catastro_interp", "g:numero")
 
 
 class BaselineInterpInput(BaseModel):
@@ -274,7 +281,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
     for r in rows:
         por_calle[r[1]].append(r)
         item_by_rid[r[0]] = r
-        if (r[5] or "") != "g:numero":   # exactas de geocodebr se respetan
+        if (r[5] or "") not in _INTOCABLES:   # exactas de geocodebr se respetan
             info[r[0]] = (_num(r[2]), r[1])
             calle_raw.setdefault(r[1], r[6])
 
@@ -309,14 +316,14 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
     # homónimo correcto de OSM y orientan el eje. Una sola llamada batch a geocodebr.
     anclas_cn: dict = defaultdict(list)
     for r in rows:
-        if (r[5] or "") == "g:numero" and _num(r[2]) is not None:
+        if (r[5] or "") in ("catastro", "g:numero") and _num(r[2]) is not None:
             anclas_cn[r[1]].append((_num(r[2]), float(r[3]), float(r[4])))
     gb_cn: dict = {}
     try:
         from scrapitero.agents.geocode_forward import geocodebr_lote
         reps = []
         for cn, items in por_calle.items():
-            tg = [it for it in items if (it[5] or "") != "g:numero" and _num(it[2]) is not None]
+            tg = [it for it in items if (it[5] or "") not in _INTOCABLES and _num(it[2]) is not None]
             if not tg:
                 continue
             md = sorted(tg, key=lambda r: _num(r[2]))[len(tg) // 2]
@@ -353,10 +360,10 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
         # sola al eje real). UNA consulta Overpass para toda la zona, cacheada por ciudad/calle.
         if input.usar_osm_fallback:
             con_target = [(cn, calle_raw.get(cn)) for cn, items in por_calle.items()
-                          if any((it[5] or "") != "g:numero" for it in items)]
+                          if any((it[5] or "") not in _INTOCABLES for it in items)]
             geoms = _osm_geometrias(engine, con_target, ciudad_g, bbox)
             for cn, items in por_calle.items():
-                tg = [(it[0], _num(it[2])) for it in items if (it[5] or "") != "g:numero"]
+                tg = [(it[0], _num(it[2])) for it in items if (it[5] or "") not in _INTOCABLES]
                 if not tg:
                     continue
                 for rid, (la, ln) in _osm_calle(geoms.get(cn, []), cn, tg).items():
@@ -366,7 +373,7 @@ def run(input: BaselineInterpInput) -> BaselineInterpOutput:
         if mapbox_on:
             for cn, items in por_calle.items():
                 tg = [it for it in items
-                      if (it[5] or "") != "g:numero" and it[0] not in aceptados]
+                      if (it[5] or "") not in _INTOCABLES and it[0] not in aceptados]
                 if tg:
                     for rid, p in _mapbox_calle(tg).items():
                         aceptados[rid] = (p[0], p[1], "mapbox")

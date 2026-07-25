@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Incidencias del relevamiento</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root{--bg:#0f172a;--panel:#1e293b;--card:#273449;--txt:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--accent:#0ea5e9;--warn:#f59e0b;--bad:#dc2626}
+    *{box-sizing:border-box} html,body{margin:0;height:100%;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+    #wrap{display:flex;height:100vh}
+    #side{width:420px;min-width:360px;display:flex;flex-direction:column;border-right:1px solid #334155;background:var(--panel)}
+    #head{padding:12px 14px;border-bottom:1px solid #334155}
+    #head h1{font-size:1rem;margin:0 0 4px} #head .sub{font-size:.78rem;color:var(--mut)}
+    #filtros{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+    .chip{font-size:.72rem;padding:3px 9px;border-radius:12px;border:1px solid #475569;background:#0f172a;color:var(--mut);cursor:pointer}
+    .chip:hover{border-color:var(--accent)} .chip.on{background:var(--accent);color:#04293b;font-weight:700;border-color:var(--accent)}
+    #estado-sel{margin-top:8px;width:100%;padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.78rem}
+    #list{flex:1;overflow:auto;padding:8px}
+    .card{background:var(--card);border:1px solid #334155;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:.82rem;line-height:1.5;cursor:pointer;border-left:3px solid #475569}
+    .card:hover{border-color:var(--accent)} .card.done{opacity:.55;border-color:var(--ok)}
+    .card .nm{font-weight:700;font-size:.88rem} .card .mut{color:var(--mut);font-size:.76rem}
+    .card .det{margin-top:4px;font-size:.78rem}
+    .card a{color:var(--accent);text-decoration:none}
+    .card .base{margin-top:5px;padding-top:5px;border-top:1px dashed #3b4860;color:#a5b4fc;font-size:.76rem}
+    .datos{margin-top:6px;font-size:.74rem;color:#cbd5e1;background:#1b2637;border-radius:6px;padding:5px 8px}
+    .datos b{color:#e2e8f0}
+    .row{display:flex;gap:6px;align-items:center;margin-top:7px;flex-wrap:wrap}
+    .row input,.row select,.row textarea{padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.82rem}
+    .row input[type=number]{width:88px}
+    .row textarea{flex:1;min-width:150px;resize:vertical;min-height:32px}
+    .row button{padding:5px 12px;border-radius:6px;border:0;background:var(--accent);color:#04293b;font-weight:700;cursor:pointer;font-size:.8rem}
+    .row button.warn{background:var(--warn);color:#3b2705} .row button.gris{background:#475569;color:#e2e8f0}
+    .row button:disabled{opacity:.5;cursor:default}
+    .acc-tog{color:var(--warn);font-size:.75rem;text-decoration:none;margin-right:10px}
+    #map{flex:1}
+    .tag{display:inline-block;font-size:.66rem;padding:1px 6px;border-radius:10px;background:#334155;color:#cbd5e1;margin-left:4px}
+    .tag.est{background:#14532d;color:#bbf7d0}
+    #empty{padding:24px;text-align:center;color:var(--mut)}
+    .warnbox{margin-top:5px;font-size:.72rem;color:#fbbf24}
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <div id="side">
+    <div id="head">
+      <h1>🧾 Incidencias del relevamiento</h1>
+      <div class="sub" id="sub">Cargando…</div>
+      <div id="filtros"></div>
+      <select id="estado-sel">
+        <option value="pendiente">Pendientes</option>
+        <option value="resuelta">Resueltas</option>
+        <option value="descartada">Descartadas</option>
+        <option value="obsoleta">Obsoletas</option>
+        <option value="todas">Todas</option>
+      </select>
+    </div>
+    <div id="list"></div>
+  </div>
+  <div id="map"></div>
+</div>
+<script>
+const SID = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop());
+const QS = new URLSearchParams(location.search);
+let filtroTipo = QS.get('tipo') || '';          // el link de Telegram llega con ?tipo=
+let filtroEstado = 'pendiente';
+
+// maxZoom 22 con maxNativeZoom = último nivel real de cada proveedor: Leaflet sigue
+// acercando (zoom digital) más allá del tile nativo, útil para mirar una construcción.
+const map = L.map('map', {maxZoom: 22}).setView([-15.65,-56.13], 13);
+const satelite = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {attribution:'Tiles © Esri', maxZoom:22, maxNativeZoom:20});
+const etiquetas = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  {maxZoom:22, maxNativeZoom:20, opacity:.8});
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {maxZoom:22, maxNativeZoom:19, attribution:'© OpenStreetMap'});
+// Satélite por default: estas incidencias se resuelven MIRANDO la construcción.
+satelite.addTo(map); etiquetas.addTo(map);
+const layersCtl = L.control.layers({'🛰 Satélite': satelite, '🗺 Mapa': osm},
+                                   {'Etiquetas': etiquetas}, {position:'topleft'}).addTo(map);
+
+// ── Google satélite/mapa (opcional, si hay API key) — mismo mecanismo que el dashboard ──
+function _loadScript(src){
+  return new Promise((res,rej)=>{ const s=document.createElement('script');
+    s.src=src; s.async=true; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+}
+async function addGoogleLayers(){
+  try{
+    const cfg = await fetch('/api/config').then(r=>r.json()).catch(()=>({}));
+    if(!cfg || !cfg.google_maps_key) return;       // sin key → se queda con Esri/OSM
+    await _loadScript(`https://maps.googleapis.com/maps/api/js?key=${cfg.google_maps_key}&v=weekly`);
+    await _loadScript('https://unpkg.com/leaflet.gridlayer.googlemutant@0.14.0/dist/Leaflet.GoogleMutant.js');
+    if(!(L.gridLayer && L.gridLayer.googleMutant)) return;
+    layersCtl.addBaseLayer(L.gridLayer.googleMutant({type:'hybrid',  maxZoom:22}), '🛰 Google (satélite)');
+    layersCtl.addBaseLayer(L.gridLayer.googleMutant({type:'roadmap', maxZoom:22}), '🗺 Google (mapa)');
+  }catch(e){ console.warn('Google Maps no disponible (se mantiene Esri/OSM):', e); }
+}
+addGoogleLayers();
+
+// Botón que abre Google Maps en la MISMA vista (centro + zoom actuales), en satélite
+// (`data=!3m1!1e3`), para mirar el caso con Street View / imagery de Google.
+const gmapsUrl = (lat, lng, z) => `https://www.google.com/maps/@${lat},${lng},${z}z/data=!3m1!1e3`;
+const BtnGMaps = L.Control.extend({
+  options: {position: 'topright'},
+  onAdd: function(m){
+    const a = L.DomUtil.create('a', '');
+    a.href = '#'; a.target = '_blank'; a.rel = 'noopener';
+    a.title = 'Abrir Google Maps centrado en esta misma vista';
+    a.textContent = '🌍 Abrir en Google Maps';
+    Object.assign(a.style, {background:'#fff', color:'#0f172a', padding:'6px 10px',
+      borderRadius:'6px', font:'600 12px system-ui', textDecoration:'none',
+      boxShadow:'0 1px 5px rgba(0,0,0,.4)', display:'inline-block'});
+    L.DomEvent.disableClickPropagation(a);
+    L.DomEvent.on(a, 'click', (e) => {
+      L.DomEvent.preventDefault(e);
+      const c = m.getCenter();
+      window.open(gmapsUrl(c.lat.toFixed(6), c.lng.toFixed(6), m.getZoom()), '_blank', 'noopener');
+    });
+    return a;
+  },
+});
+map.addControl(new BtnGMaps());
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
+  const u=Math.sin(x/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.sqrt(u));};
+
+// Metadata por tipo: etiqueta, color del marcador y qué acciones ofrece la tarjeta.
+const TIPOS = {
+  hotel_sin_habitaciones: {label:'🏨 Hoteles sin habitaciones', color:'#7c3aed',
+                           acciones:['habitaciones','no_es_hotel']},
+  altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['tipo_edificacion','uf']},
+  altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['tipo_edificacion','uf']},
+  uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['uf']},
+  // Ubicación dudosa del relevamiento anterior: se revisa ANTES de dibujar la zona (si el
+  // punto está mal, la zona sale mal). No hay acción de corrección automática: el operador
+  // verifica en el mapa / Google Maps y descarta si está bien.
+  geocoding_dudoso:       {label:'📍 Ubicación dudosa', color:'#06b6d4', acciones:[]},
+};
+const tipoMeta = t => TIPOS[t] || {label:t, color:'#94a3b8', acciones:[]};
+
+let TIPOS_HTML = '';
+async function cargarTipos(){
+  try{ const d = await fetch('/api/tipos-edificacion').then(r=>r.json());
+    if(d.ok){ TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
+      d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+
+        g.tipos.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')+'</optgroup>').join(''); }
+  }catch(e){}
+}
+
+let baselinePts = [], markers = {}, pendientes = 0;
+function nearestBaseline(lat,lng){
+  let best=null, bd=120;
+  for(const p of baselinePts){ const d=distM(lat,lng,p.lat,p.lng); if(d<bd){bd=d;best={...p,d:Math.round(d)};} }
+  return best;
+}
+
+async function resolver(id, accion, valor, nota, btn, card){
+  btn.disabled=true; const t0=btn.textContent; btn.textContent='…';
+  try{
+    const r = await fetch(`/api/incidencias/${id}/resolver`,{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({accion, valor, nota})}).then(r=>r.json());
+    if(r.ok){
+      // Se recarga la lista en vez de "tachar" la tarjeta a mano: así la resuelta queda
+      // con su estado real y con los controles para EDITARLA o reabrirla (una resolución
+      // puede estar mal y tiene que poder rehacerse).
+      await load();
+    } else { alert(r.error||'Error'); btn.disabled=false; btn.textContent=t0; }
+  }catch(e){ alert('Error de red'); btn.disabled=false; btn.textContent=t0; }
+}
+
+async function reabrir(id, btn){
+  if(!confirm('¿Reabrir esta incidencia?\n\nVuelve a "pendiente" para rehacerla.\n'
+    + 'Ojo: no deshace el dato ya aplicado — al resolverla de nuevo el valor nuevo lo reemplaza.')) return;
+  btn.disabled=true; const t0=btn.textContent; btn.textContent='…';
+  try{
+    const r = await fetch(`/api/incidencias/${id}/reabrir`,{method:'POST'}).then(r=>r.json());
+    if(r.ok){ await load(); }
+    else { alert(r.error||'Error'); btn.disabled=false; btn.textContent=t0; }
+  }catch(e){ alert('Error de red'); btn.disabled=false; btn.textContent=t0; }
+}
+
+function updateSub(){
+  document.getElementById('sub').textContent =
+    `${pendientes} pendiente(s) · relevamiento ${SID.slice(0,8)}`;
+}
+
+// Render de los datos del caso. `imagery_year` va SIEMPRE que exista: la imagen satelital
+// puede tener más de una década y el operador no debe leer el dato como estado actual.
+function datosHtml(t, d){
+  const p = [];
+  if(d.direccion) p.push(`📍 ${esc(d.direccion)}`);
+  if(d.telefono) p.push(`📞 <a href="tel:${esc(d.telefono)}">${esc(d.telefono)}</a>`);
+  if(d.cnpj) p.push(`CNPJ ${esc(d.cnpj)}`);
+  if(d.situacion) p.push(`estado ${esc(d.situacion)}`);
+  if(d.altura_m!=null) p.push(`altura <b>${d.altura_m} m</b>`);
+  if(d.pisos_satelital!=null) p.push(`satélite <b>${d.pisos_satelital} piso/s</b>`);
+  if(d.pisos_bci_proxy!=null) p.push(`catastro ${d.pisos_bci_proxy} piso/s`);
+  if(d.ground_area_m2!=null) p.push(`huella ${d.ground_area_m2} m²`);
+  if(d.area_m2_construida!=null) p.push(`constr. ${d.area_m2_construida} m²`);
+  if(d.uf_vivienda!=null) p.push(`UF viv <b>${d.uf_vivienda}</b>`);
+  if(d.uf_comercio!=null) p.push(`UF com ${d.uf_comercio}`);
+  if(d.m2_por_uf!=null) p.push(`<b>${d.m2_por_uf} m²/UF</b>`);
+  if(d.uf_fuente) p.push(`fuente UF ${esc(d.uf_fuente)}`);
+  if(d.geocode_source) p.push(`geocoding <b>${esc(d.geocode_source)}</b>`
+    + (d.geocode_confidence!=null?` (conf ${d.geocode_confidence})`:''));
+  if(d.calle_parcela) p.push(`cae en «${esc(d.calle_parcela)}${d.numero_parcela?' '+esc(d.numero_parcela):''}»`);
+  if(d.cca_code) p.push(`cca ${esc(d.cca_code)}`);
+  let html = p.length ? `<div class="datos">${p.join(' · ')}</div>` : '';
+  if(d.imagery_year) html += `<div class="warnbox">🛰 Imagen satelital de ${d.imagery_year}`+
+    `${d.imagery_quality?' ('+esc(d.imagery_quality)+')':''} — no refleja obra posterior.</div>`;
+  return html;
+}
+
+// Formulario + link de cada acción. La PRIMERA acción del tipo queda visible y el resto
+// detrás de su link. Se arma en un solo loop para que ninguna combinación quede sin acceso:
+// antes `uf` era la única acción de `uf_imposible`, estaba oculta y su link solo aparecía
+// `if acc.length>1` ⇒ no había forma de corregir la UF en esos 34 casos.
+const ACC_DEF = {
+  habitaciones:     { link: '🛏 Cargar habitaciones',
+                      form: () => `<input type="number" min="0" placeholder="habitaciones"><button>Guardar</button>` },
+  tipo_edificacion: { link: '🏷 Etiquetar tipo',
+                      form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Etiquetar</button>` },
+  uf:               { link: '🔢 Corregir UF',
+                      form: () => `<input type="number" min="0" placeholder="UF viv">`
+                                + `<input type="number" min="0" placeholder="UF com">`
+                                + `<button class="warn">Corregir UF</button>` },
+  no_es_hotel:      { link: '🚫 No es hotel',
+                      form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Confirmar</button>` },
+  descartar:        { link: '✖ No es un problema', color: '#94a3b8',
+                      form: () => `<textarea placeholder="por qué no es un problema (opcional)"></textarea>`
+                                + `<button class="gris">Descartar</button>` },
+};
+
+function accionesHtml(t){
+  const acc = [...tipoMeta(t).acciones, 'descartar'];
+  const filas = [], togs = [];
+  acc.forEach((a, i) => {
+    const def = ACC_DEF[a];
+    if(!def) return;
+    const visible = i === 0;            // la primera acción del tipo, abierta
+    filas.push(`<div class="row" data-a="${a}"${visible ? '' : ' style="display:none"'}>${def.form()}</div>`);
+    if(!visible) togs.push(`<a href="#" class="acc-tog" data-t="${a}"`
+      + (def.color ? ` style="color:${def.color}"` : '') + `>${def.link}</a>`);
+  });
+  return filas.join('') + (togs.length ? `<div style="margin-top:7px">${togs.join('')}</div>` : '');
+}
+
+function renderFiltros(resumen){
+  const cont = document.getElementById('filtros');
+  const totalPend = (t) => (resumen.por_tipo[t]||{})['pendiente'] || 0;
+  const chips = [`<span class="chip ${filtroTipo?'':'on'}" data-t="">Todos</span>`];
+  Object.keys(TIPOS).forEach(t=>{
+    if(!resumen.por_tipo[t]) return;
+    chips.push(`<span class="chip ${filtroTipo===t?'on':''}" data-t="${t}">`+
+               `${esc(tipoMeta(t).label)} (${totalPend(t)})</span>`);
+  });
+  cont.innerHTML = chips.join('');
+  cont.querySelectorAll('.chip').forEach(ch=>ch.onclick=()=>{ filtroTipo=ch.dataset.t; load(); });
+}
+
+async function load(){
+  if(!TIPOS_HTML) await cargarTipos();
+  const q = new URLSearchParams({estado:filtroEstado}); if(filtroTipo) q.set('tipo', filtroTipo);
+  const d = await fetch(`/api/surveys/${SID}/incidencias?`+q).then(r=>r.json());
+  if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
+  pendientes = d.pendientes; updateSub(); renderFiltros(d.resumen);
+
+  if(d.baseline_id && !baselinePts.length){
+    try{ const b=await fetch(`/api/baselines/${d.baseline_id}/puntos`).then(r=>r.json());
+      if(b.ok){ baselinePts=b.puntos||[];
+        baselinePts.forEach(p=>L.circleMarker([p.lat,p.lng],{radius:3,color:'#7c3aed',
+          fillColor:'#c4b5fd',fillOpacity:.7,weight:1})
+          .bindPopup(`<b>Relevamiento anterior</b><br>${esc(p.direccion)}<br>UF: ${p.uf_total}`).addTo(map)); }
+    }catch(e){}
+  }
+
+  Object.values(markers).forEach(m=>map.removeLayer(m)); markers={};
+  const list = document.getElementById('list'); list.innerHTML='';
+  if(!d.incidencias.length){
+    list.innerHTML = '<div id="empty">✅ Sin incidencias para este filtro.</div>'; return;
+  }
+  const bounds=[];
+  d.incidencias.forEach(it=>{
+    const meta = tipoMeta(it.tipo);
+    const abierta = it.estado === 'pendiente';
+    // Las cerradas (resuelta/descartada) siguen siendo EDITABLES: se muestran sus acciones
+    // para corregir el valor y un botón para reabrirlas. Las `obsoleta` no, porque la
+    // condición que las originó ya no se cumple (no hay nada que resolver).
+    const editable = abierta || it.estado === 'resuelta' || it.estado === 'descartada';
+    const nb = (it.lat!=null)?nearestBaseline(it.lat,it.lng):null;
+    const card=document.createElement('div');
+    card.className='card'+(abierta?'':' done'); card.style.borderLeftColor=meta.color;
+    card.innerHTML =
+      `<div class="nm">${esc(it.titulo)}`+
+      (abierta?'':` <span class="tag est">${esc(it.estado)}</span>`)+`</div>`+
+      `<div class="mut">${esc(meta.label)}</div>`+
+      `<div class="det">${esc(it.detalle||'')}</div>`+
+      datosHtml(it.tipo, it.datos||{})+
+      (nb?`<div class="base">↩ Anterior (${nb.d} m): ${esc(nb.direccion)} · UF ${nb.uf_total}</div>`:'')+
+      (it.lat!=null?`<div style="margin-top:5px"><a href="${gmapsUrl(it.lat.toFixed(6), it.lng.toFixed(6), 19)}"`+
+        ` target="_blank" rel="noopener" title="Ver este punto en Google Maps (satélite / Street View)"`+
+        ` style="font-size:.74rem">🌍 Ver en Google Maps</a></div>`:'')+
+      (it.nota?`<div class="mut">📝 ${esc(it.nota)}</div>`:'')+
+      (!abierta && it.resolucion
+        ? `<div class="mut">✔ resuelta con <b>${esc(it.resolucion)}</b>`
+          + (it.autor?` · ${esc(it.autor)}`:'') + `</div>` : '')+
+      (!abierta && editable
+        ? `<div style="margin-top:6px"><a href="#" class="acc-tog reabrir-lnk"
+             style="color:#0ea5e9">↩ Reabrir / corregir</a></div>` : '')+
+      (editable?accionesHtml(it.tipo):'');
+    // Cablear acciones
+    card.querySelectorAll('.row').forEach(row=>{
+      row.onclick=(e)=>e.stopPropagation();
+      const btn=row.querySelector('button'); if(!btn) return;
+      btn.onclick=(e)=>{
+        e.stopPropagation();
+        const a=row.dataset.a;
+        if(a==='habitaciones'){
+          const n=parseInt(row.querySelector('input').value,10);
+          if(isNaN(n)||n<0){ alert('Ingresá un número válido de habitaciones'); return; }
+          resolver(it.incidencia_id,'habitaciones',n,null,btn,card);
+        } else if(a==='tipo_edificacion'||a==='no_es_hotel'){
+          const v=row.querySelector('select').value;
+          if(!v){ alert('Elegí una etiqueta'); return; }
+          if(a==='no_es_hotel' && !confirm(`Marcar como NO hotel y etiquetar "${v}"?`)) return;
+          resolver(it.incidencia_id,a,v,null,btn,card);
+        } else if(a==='uf'){
+          const ins=row.querySelectorAll('input');
+          const uv=parseInt(ins[0].value,10), uc=parseInt(ins[1].value,10);
+          if(isNaN(uv)||isNaN(uc)||uv<0||uc<0){ alert('Ingresá UF vivienda y comercio (≥ 0)'); return; }
+          resolver(it.incidencia_id,'uf',{uf_vivienda:uv,uf_comercio:uc},null,btn,card);
+        } else if(a==='descartar'){
+          resolver(it.incidencia_id,'descartar',null,row.querySelector('textarea').value,btn,card);
+        }
+      };
+    });
+    // el link a Google Maps no debe además re-centrar el mapa (el card entero es clickeable)
+    card.querySelectorAll('a[target="_blank"]').forEach(a=>a.onclick=(e)=>e.stopPropagation());
+    const lnkReabrir = card.querySelector('.reabrir-lnk');
+    if(lnkReabrir) lnkReabrir.onclick = (e)=>{
+      e.preventDefault(); e.stopPropagation(); reabrir(it.incidencia_id, lnkReabrir);
+    };
+    card.querySelectorAll('.acc-tog:not(.reabrir-lnk)').forEach(tog=>{
+      tog.onclick=(e)=>{ e.preventDefault(); e.stopPropagation();
+        const row=card.querySelector(`.row[data-a="${tog.dataset.t}"]`);
+        if(row) row.style.display = row.style.display==='none' ? 'flex' : 'none'; };
+    });
+    if(it.lat!=null){
+      const mk=L.circleMarker([it.lat,it.lng],{radius:8,color:meta.color,fillColor:meta.color,
+        fillOpacity:.5,weight:2}).addTo(map).bindPopup(`${esc(it.titulo)}`);
+      markers[it.incidencia_id]=mk; bounds.push([it.lat,it.lng]);
+      card.onclick=()=>{ map.setView([it.lat,it.lng],18); mk.openPopup(); };
+    }
+    list.appendChild(card);
+  });
+  if(bounds.length) map.fitBounds(bounds,{padding:[40,40],maxZoom:16});
+}
+
+document.getElementById('estado-sel').onchange=(e)=>{ filtroEstado=e.target.value; load(); };
+load();
+</script>
+</body>
+</html>

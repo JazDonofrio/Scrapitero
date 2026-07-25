@@ -75,6 +75,9 @@ class BaselineGeocoderInput(BaseModel):
     batch_size: Optional[int] = None   # tope opcional de direcciones por corrida
     usar_cache: bool = True     # False → NO reusar geocode_cache (geocodifica todo de nuevo)
     regeocodificar: bool = False  # True → resetea lat/lng del baseline para reprocesar TODO
+    # Paso 0a: el CATASTRO como geocoder (match contra la dirección oficial de la parcela).
+    # Es la fuente MÁS precisa y gratis; va antes que todo. Ver catastro_geocoder.py.
+    usar_catastro: bool = True
     usar_geocodebr: bool = True   # Brasil: geocodebr (CNEFE, gratis/offline) como paso 0
     geocodebr_max_desvio_m: float = 300.0   # escribir coord de geocodebr solo si desvío ≤ esto
     usar_mapbox: bool = True       # capa paga barata Nominatim→**Mapbox**→Google
@@ -112,13 +115,41 @@ def _query(calle: str, numero: Optional[str], barrio: Optional[str] = None,
            cep: Optional[str] = None) -> str:
     """Texto a geocodificar: 'calle número, bairro, ciudad, UF, CEP'. El bairro, la ciudad,
     el estado (UF) y el CEP desambiguan (sin ellos la dirección cae en cualquier parte del
-    país). El CEP es la señal de mayor precisión en Brasil."""
-    base = " ".join(x for x in (calle or "", numero or "") if x).strip()
-    extra = ", ".join(x for x in (barrio or "", ciudad or "", estado or "", cep or "")
-                      if x and x.strip())
+    país). El CEP es la señal de mayor precisión en Brasil.
+
+    **Saneo de la entrada** (medido: sin esto el 25% de las consultas iba sin número y el
+    16,5% llevaba el loteamento pegado al nombre de la vía, y el geocoder devolvía el centro
+    de la calle — que después cae en una parcela arbitraria):
+      - la anotación entre paréntesis del CSV del cliente ("AV DA FEB(RES ALAMEDA)") se
+        **saca del nombre de la calle** y se usa como bairro si no vino uno;
+      - se ignoran valores basura ('none', 'null', 's/d') en cualquier componente.
+    """
+    from scrapitero.agents.direccion_norm import limpiar_calle_anotacion
+    calle_limpia, anot = limpiar_calle_anotacion(calle)
+    barrio = _limpio(barrio) or anot          # el loteamento es un barrio, no parte de la vía
+    base = " ".join(x for x in (calle_limpia, _limpio(numero)) if x).strip()
+    extra = ", ".join(x for x in (barrio, _limpio(ciudad), _limpio(estado), _limpio(cep)) if x)
     if base and extra:
         return f"{base}, {extra}"
     return base or extra
+
+
+_BASURA = {"none", "null", "nan", "s/d", "sd", "-", "n/a", "na", "sem", "sin"}
+
+# Piso de confianza para REUSAR una coordenada de `geocode_cache`: 0.8 = Google
+# RANGE_INTERPOLATED / Mapbox high. Por debajo de eso la entrada ubica una calle o un barrio,
+# no una dirección, y reusarla reintroduce el error que se acaba de eliminar.
+_CACHE_CONF_MIN = 0.8
+# Fuentes exactas que pueden tener `geocode_confidence` NULL y aun así son válidas
+# (geocodebr a nivel de número, y el catastro).
+_CACHE_SRC_EXACTAS = ("catastro", "g:numero")
+
+
+def _limpio(v) -> str:
+    """Componente de dirección usable, o '' — filtra los sentinelas que llegan del CSV
+    (y el 'None' que produce interpolar un valor nulo en un f-string)."""
+    s = str(v or "").strip()
+    return "" if s.lower() in _BASURA else s
 
 
 def _norm_ciudad(ciudad: Optional[str]) -> str:
@@ -180,8 +211,18 @@ def _google(query: str, iso2: Optional[str], client: httpx.Client):
                 if "lat" in loc and "lng" in loc:
                     # "ROOFTOP">"RANGE_INTERPOLATED">"GEOMETRIC_CENTER">"APPROXIMATE"
                     loc_type = (res.get("geometry") or {}).get("location_type", "")
-                    conf = {"ROOFTOP": 0.95, "RANGE_INTERPOLATED": 0.8,
-                            "GEOMETRIC_CENTER": 0.6, "APPROXIMATE": 0.4}.get(loc_type, 0.5)
+                    # Solo se aceptan los tipos que ubican una DIRECCIÓN. `GEOMETRIC_CENTER`
+                    # es el centro de la vía y `APPROXIMATE` el del barrio/localidad: no son
+                    # la dirección pedida y, guardados como si lo fueran, caen en una parcela
+                    # arbitraria (eran el 65% de lo que Google resolvía en VG). Devolver None
+                    # los deja sin resolver para que escalen o queden como incidencia, en vez
+                    # de contaminar el relevamiento con una ubicación inventada.
+                    conf = {"ROOFTOP": 0.95, "RANGE_INTERPOLATED": 0.8}.get(loc_type)
+                    if conf is None:
+                        logger.debug(f"Google descartado por location_type={loc_type!r}: {query!r}")
+                        continue
+                    if res.get("partial_match"):
+                        conf -= 0.1      # Google avisa que no matcheó la dirección completa
                     return float(loc["lat"]), float(loc["lng"]), conf
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         pass
@@ -258,12 +299,50 @@ def _geocodebr_step(engine, pendientes: list, municipio_codigo: Optional[str],
     return ids_ok
 
 
+def _catastro_step(engine, pendientes: list, region_id: Optional[str],
+                   municipio_codigo: Optional[str], ciudad: Optional[str] = None) -> set:
+    """Paso 0 — el CATASTRO como geocoder (lo más preciso y gratis que hay).
+
+    En vez de dirección → API → coordenada → ¿qué parcela?, matchea la dirección contra la
+    dirección oficial de la parcela (BCI) y usa el centroide de ESA parcela. Medido en VG:
+    baja el error de "cae en parcela de otra calle" de **19,3% → 2,3%** (0,4% en el match
+    exacto), y resuelve el 91% de las direcciones sin pegarle a ninguna API.
+
+    Devuelve el set de ids resueltos. Si no hay catastro cargado para esa ciudad, devuelve
+    set() y el flujo sigue con geocodebr/Nominatim/Mapbox/Google como antes."""
+    from scrapitero.agents.catastro_geocoder import CatastroIndex
+    try:
+        idx = CatastroIndex(region_id=region_id, municipio_codigo=municipio_codigo,
+                            ciudad=ciudad)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"CatastroIndex no disponible ({exc!r}) — se sigue con las APIs")
+        return set()
+    if not idx.por_calle:
+        return set()
+
+    ids_ok: set = set()
+    with engine.begin() as conn:
+        for pid, calle, numero, _barrio, _ciu, _est, _cep in pendientes:
+            hit = idx.buscar(calle, numero)
+            if not hit:
+                continue
+            conn.execute(text("""
+                UPDATE baseline_direcciones
+                SET lat=:lat, lng=:lng, geocode_source=:src, geocode_confidence=:conf
+                WHERE id=:id
+            """), {"lat": hit["lat"], "lng": hit["lng"], "src": hit["fuente"],
+                   "conf": hit["confidence"], "id": pid})
+            ids_ok.add(pid)
+    return ids_ok
+
+
 @agent_run
 def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     engine = get_engine()
     with engine.connect() as conn:
         meta = conn.execute(text(
-            "SELECT b.nombre, r.country_code, b.ciudad, r.municipio_codigo, r.zone_geojson "
+            "SELECT b.nombre, r.country_code, b.ciudad, r.municipio_codigo, r.zone_geojson, "
+            "       r.region_id "
             "FROM baselines b JOIN regions r ON r.region_id = b.region_id "
             "WHERE b.baseline_id = :bid"),
             {"bid": input.baseline_id}).fetchone()
@@ -271,7 +350,7 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
             return BaselineGeocoderOutput(ok=False, baseline_id=input.baseline_id,
                                           error="baseline no encontrado")
         nombre, country_code, ciudad, municipio_codigo = meta[0], meta[1], meta[2], meta[3]
-        zone_geojson = meta[4]
+        zone_geojson, region_id = meta[4], meta[5]
 
     # Guarda anti "otro estado": centroide de la zona de la región. Cualquier coordenada
     # geocodificada a más de `_GUARDA_KM` del centroide se descarta (típico cuando una calle
@@ -309,7 +388,22 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     geocodificadas = fallidas = reusadas = 0
     por_fuente: dict = {}
 
-    # ── Paso 0 (Brasil): geocodebr — CNEFE/IBGE, gratis y offline. Resuelve la mayoría
+    # ── Paso 0a: CATASTRO — la fuente más precisa (y gratis). Matchea la dirección contra la
+    # dirección oficial de la parcela y usa SU centroide, en vez de geocodificar y después ver
+    # dónde cayó el punto. Va PRIMERO porque su match exacto es, por construcción, la parcela
+    # correcta (medido en VG: 0,4% de error vs 12-36% de las APIs).
+    if input.usar_catastro and pendientes:
+        ids_cat = _catastro_step(engine, pendientes, region_id, municipio_codigo, ciudad)
+        if ids_cat:
+            geocodificadas += len(ids_cat)
+            por_fuente["catastro"] = len(ids_cat)
+            pendientes = [t for t in pendientes if t[0] not in ids_cat]
+            logger.info(f"catastro paso 0a: {len(ids_cat)} ubicadas por dirección catastral "
+                        f"(exacto/interpolado), {len(pendientes)} restantes")
+            _tg(f"📍 <b>Catastro</b> (gratis, el más preciso): {len(ids_cat)} ubicadas, "
+                f"{len(pendientes)} siguen a geocodebr/APIs.")
+
+    # ── Paso 0b (Brasil): geocodebr — CNEFE/IBGE, gratis y offline. Resuelve la mayoría
     # sin pegarle a Nominatim/Google; lo que no ubique con desvío aceptable cae al resto.
     if iso2 == "br" and input.usar_geocodebr and pendientes:
         ids_ok = _geocodebr_step(engine, pendientes, municipio_codigo, ciudad,
@@ -334,8 +428,17 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
         with engine.connect() as conn:
             for row in conn.execute(text("""
                 SELECT clave, lat, lng, geocode_source, geocode_confidence
-                FROM geocode_cache WHERE clave = ANY(:claves)
-            """), {"claves": list(claves)}):
+                FROM geocode_cache
+                WHERE clave = ANY(:claves)
+                  -- Solo se reusa lo que ubica una DIRECCIÓN. La caché acumuló coordenadas
+                  -- de la estrategia anterior (en VG: 81% por debajo de este umbral — 949 de
+                  -- Nominatim con conf 0,05 y 412 de Google que son GEOMETRIC_CENTER /
+                  -- APPROXIMATE, hoy descartados en `_google`). Sin este filtro la caché
+                  -- volvería a servir justo las coordenadas que estamos dejando de aceptar.
+                  AND (geocode_confidence >= :conf_min
+                       OR geocode_source = ANY(:src_exactas))
+            """), {"claves": list(claves), "conf_min": _CACHE_CONF_MIN,
+                   "src_exactas": list(_CACHE_SRC_EXACTAS)}):
                 cache[row[0]] = (row[1], row[2], row[3], row[4])
 
     _tg(f"📍 <b>Geocodificando «{nombre}»</b>\n{len(pendientes)} direcciones del "
@@ -456,9 +559,10 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     try:
         from scrapitero.agents.baseline_interp import run as _interp_run, BaselineInterpInput
         ip = _interp_run(BaselineInterpInput(baseline_id=input.baseline_id))
-        if ip.ok and (ip.interpoladas or ip.por_osm):
-            logger.info(f"BaselineGeocoder: interpolación repositionó {ip.interpoladas} "
-                        f"(+{ip.por_osm} por OSM) direcciones apiladas")
+        # (el output no tiene `interpoladas`: los contadores son por_mapbox/por_osm/por_ciudad)
+        if ip.ok and (ip.por_mapbox or ip.por_osm or ip.por_ciudad):
+            logger.info(f"BaselineGeocoder: interpolación ubicó {ip.por_mapbox} por Mapbox, "
+                        f"{ip.por_osm} por eje OSM, {ip.por_ciudad} al centro de la ciudad")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"BaselineGeocoder: pase de interpolación falló (no crítico): {e}")
 

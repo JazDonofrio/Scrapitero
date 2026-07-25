@@ -26,9 +26,11 @@ from loguru import logger
 from pydantic import BaseModel
 
 from scrapitero.agents import (
+    altura_fetcher,
     bci_parser,
     country_fetcher,
     establecimiento_agrupador,
+    footprint_fetcher,
     hotel_fetcher,
     hotel_habitaciones_llm,
     parcela_categoria,
@@ -185,6 +187,23 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
         # Opcional/best-effort; pago por hotel (tope max_hoteles).
         ("hotel_habitaciones_llm", hotel_habitaciones_llm.run,
          lambda s: hotel_habitaciones_llm.HotelHabLLMInput(
+             region_id=input.region_id, survey_id=input.survey_id),
+         None, True),
+        # ── Capas de REVISIÓN de edificios (no tocan `parcelas` ni el relevamiento) ──
+        # Van al final porque necesitan las parcelas ya cargadas y con su dirección/áreas
+        # del BCI para poder contrastar. Ambas opcionales/best-effort.
+        # 1) Huella 2D del edificio (Google Open Buildings, gratis; fallback OSM).
+        ("footprint_fetcher", footprint_fetcher.run,
+         lambda s: footprint_fetcher.FootprintInput(
+             region_id=input.region_id, survey_id=input.survey_id),
+         None, True),
+        # 2) ALTURA/pisos por satélite (Google Solar − Elevation). El footprint 2D no
+        # distingue una casa de una torre con la misma huella: la altura es lo que delata
+        # al edificio y las construcciones no declaradas. Solar tiene 10.000 llamadas/mes
+        # gratis y el paso es resumible (`solo_faltantes`), así que un corte por cuota se
+        # reanuda sin re-pagar.
+        ("altura_fetcher", altura_fetcher.run,
+         lambda s: altura_fetcher.AlturaInput(
              region_id=input.region_id, survey_id=input.survey_id),
          None, True),
     ]
