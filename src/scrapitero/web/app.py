@@ -1672,6 +1672,37 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                     uf_vivienda = :uv, uf_comercio = :uc, actualizado_at = now()
             """), {"p": parcela_id, "uv": uf_v, "uc": uf_c})
 
+        elif accion == "numero":
+            # Número de puerta cargado a mano (tipo `numero_faltante`): el catastro no lo trae y
+            # la interpolación se negó a inventarlo. Va a `numero_estimado` con método 'manual'
+            # y confianza 1,0 — `parcelas.numero` es lo que publicó el municipio y no se toca.
+            num = str(valor or "").strip()[:20]
+            if not num or not any(ch.isdigit() for ch in num):
+                return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
+            if not parcela_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
+                                    status_code=400)
+            conn.execute(text("""
+                UPDATE parcelas SET numero_estimado = :n, numero_estimado_metodo = 'manual',
+                       numero_estimado_confianza = 1.0
+                WHERE parcela_id = CAST(:p AS uuid)
+            """), {"n": num, "p": parcela_id})
+            # Override durable por inscrição (mig. 051): sobrevive al re-scrape, donde el
+            # `parcela_id` cambia pero el `cca_code` no. Sin cca_code sólo queda en la parcela.
+            row_cca = conn.execute(text(
+                "SELECT region_id, cca_code FROM parcelas WHERE parcela_id = CAST(:p AS uuid)"),
+                {"p": parcela_id}).fetchone()
+            if row_cca and row_cca[1]:
+                conn.execute(text("""
+                    INSERT INTO parcela_numero_manual
+                        (region_id, cca_code, numero, nota, autor, parcela_id)
+                    VALUES (:r, :c, :n, :nota, 'operador', CAST(:p AS uuid))
+                    ON CONFLICT (region_id, cca_code) DO UPDATE SET
+                        numero = :n, nota = :nota, parcela_id = CAST(:p AS uuid),
+                        actualizado_at = now()
+                """), {"r": row_cca[0], "c": row_cca[1], "n": num, "nota": nota,
+                       "p": parcela_id})
+
         elif accion == "descartar":
             estado_final = "descartada"
 

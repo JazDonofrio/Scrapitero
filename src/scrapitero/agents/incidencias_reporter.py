@@ -9,6 +9,9 @@ Tipos que genera hoy:
     Google no las trae). Misma condición que la vieja asistencia de hoteles.
   - `altura_sin_declarar`: el catastro no declara construcción pero el satélite ve un edificio.
   - `altura_mas_alta`: el satélite ve más pisos que los que sugiere el catastro.
+  - `numero_faltante`: el catastro no trae el número de puerta y `NumeroEstimator` tampoco pudo
+    estimarlo (calle con numeración incoherente o sin anclas). Se carga a mano y queda en
+    `parcela_numero_manual` (mig. 051), que sobrevive al re-scrape.
   - `uf_imposible`: la UF declarada no cabe en el volumen visible (m²/UF absurdo) — detecta
     errores de carga tanto del baseline como del BCI. El umbral vive acá (no en
     `altura_fetcher`) para no tocar el criterio de una capa ya corrida.
@@ -47,6 +50,9 @@ _PRIORIDAD = {
     # equivocadas. Es el que más temprano hay que atender.
     "geocoding_dudoso": 1,
     "hotel_sin_habitaciones": 2,
+    # Sin número la parcela no aparea contra el relevamiento anterior ni entra al CSV de
+    # operadora, pero se resuelve mirando el frente: importante, no urgente.
+    "numero_faltante": 2,
     "altura_mas_alta": 3,
 }
 
@@ -172,6 +178,62 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
                 # Obligatorio mostrarlo: en VG el 89% de la imagen es de 2014, así que el
                 # dato NO es "estado actual" y el operador tiene que saberlo.
                 "imagery_year": img_year, "imagery_quality": img_q,
+            },
+        })
+    return casos
+
+
+def _casos_numero_faltante(conn, survey_id: str) -> list[dict]:
+    """Parcelas sin número de puerta que `NumeroEstimator` tampoco pudo estimar.
+
+    El catastro no trae la altura (campo en `0` o vacío) y la interpolación se negó a inventarla:
+    o la calle no tiene anclas suficientes, o su numeración no sigue el orden espacial
+    (coherencia < 0,6 — en VG `CLOVIS HUGNEY` 0,42 · `JOAO LIBANIO` 0,41 · `MAL RONDON` 0,55 ·
+    `SÃO BERNARDO` 0,56, donde el error medido llega a ~220 números en el p90). Sin número la
+    parcela no aparea por dirección contra el relevamiento anterior y sale con `NUMERO` vacío en
+    el CSV de operadora, así que es un caso para resolver a mano mirando el frente en Street View.
+
+    Se incluyen los vecinos con número al alcance de la mano: son la referencia con la que el
+    operador deduce la altura sin salir de la tarjeta."""
+    rows = conn.execute(text("""
+        SELECT p.parcela_id::text, p.calle, p.numero, p.cca_code, p.barrio,
+               p.centroid_lat, p.centroid_lng, p.uso_principal, p.area_m2_terreno,
+               -- vecinos CON número más cercanos de la misma calle (referencia para el humano)
+               (SELECT string_agg(v.numero, ' · ' ORDER BY v.d)
+                  FROM (SELECT q.numero,
+                               ST_Distance(q.geometry::geography, p.geometry::geography) AS d
+                        FROM parcelas q
+                        WHERE q.survey_id = p.survey_id AND q.parcela_id <> p.parcela_id
+                          AND q.calle = p.calle
+                          AND q.numero IS NOT NULL AND q.numero <> '' AND q.numero <> '0'
+                        ORDER BY d LIMIT 4) v) AS vecinos
+        FROM parcelas p
+        WHERE p.survey_id = :sid
+          AND p.calle IS NOT NULL AND p.calle <> ''
+          AND (p.numero IS NULL OR p.numero = '' OR p.numero = '0')
+          AND p.numero_estimado IS NULL
+    """), {"sid": survey_id}).fetchall()
+
+    casos = []
+    for r in rows:
+        pid, calle, _numero, cca, barrio = r[0], r[1], r[2], r[3], r[4]
+        lat, lng, uso, area_t, vecinos = r[5], r[6], r[7], r[8], r[9]
+        casos.append({
+            "tipo": "numero_faltante",
+            "clave": f"numero_faltante:{pid}",
+            "titulo": f"🔢 {calle} (sin número) — cargar la altura",
+            "detalle": ("El catastro no declara el número de puerta y la numeración de esta calle "
+                        "no permite interpolarlo con confianza. "
+                        + (f"Vecinos con número: {vecinos}. " if vecinos else "")
+                        + "Cargá la altura mirando el frente."),
+            "lat": float(lat) if lat is not None else None,
+            "lng": float(lng) if lng is not None else None,
+            "parcela_id": pid,
+            "hotel_cnpj": None,
+            "datos": {
+                "direccion": f"{calle} (sin número)", "cca_code": cca, "barrio": barrio,
+                "uso": uso, "vecinos_con_numero": vecinos,
+                "area_m2_terreno": round(float(area_t), 0) if area_t else None,
             },
         })
     return casos
@@ -355,6 +417,7 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
         casos = (_casos_hoteles(conn, input.region_id, input.survey_id)
                  + _casos_altura(conn, input.survey_id)
                  + _casos_uf_imposible(conn, input.survey_id, input.m2_por_uf_min)
+                 + _casos_numero_faltante(conn, input.survey_id)
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
                                     input.lejos_calle_m))
 

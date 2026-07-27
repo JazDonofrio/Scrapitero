@@ -2843,17 +2843,24 @@ async function loadParcelasMap(sid) {
       eje_osm_extrap: 'extrapolado más allá del último lindero con número (eje OSM)',
       eje_pca: 'interpolado sobre un eje sintético (OSM no tiene esta calle)',
       eje_pca_extrap: 'extrapolado sobre un eje sintético (OSM no tiene esta calle)',
+      manual: 'cargado a mano por el operador desde el panel de incidencias',
     };
+    // Cargado a mano (verificado por un humano) vs interpolado: se distinguen a propósito.
+    const numManual = numEst && p.numero_est_metodo === 'manual';
     const numEstTitle = numEst
-      ? 'Número ESTIMADO, no está en el catastro: '
+      ? (numManual ? 'Número CARGADO A MANO (no está en el catastro): '
+                   : 'Número ESTIMADO, no está en el catastro: ')
         + (NUM_EST_METODO[p.numero_est_metodo] || p.numero_est_metodo)
-        + (p.numero_est_conf != null ? ' · confianza ' + p.numero_est_conf : '')
+        + (!numManual && p.numero_est_conf != null ? ' · confianza ' + p.numero_est_conf : '')
       : '';
     const addr = [p.calle, numOficial].filter(Boolean).join(' ') || '—';
     const addrHtml = escHtml(addr)
       + (numEst
-          ? ' <span style="color:#b45309;font-weight:600;cursor:help;border-bottom:1px dotted #d97706"'
-            + ' title="' + escHtml(numEstTitle) + '">≈ ' + escHtml(numEst) + ' est.</span>'
+          ? ' <span style="color:' + (numManual ? '#15803d' : '#b45309') + ';font-weight:600;'
+            + 'cursor:help;border-bottom:1px dotted ' + (numManual ? '#16a34a' : '#d97706') + '"'
+            + ' title="' + escHtml(numEstTitle) + '">'
+            + (numManual ? escHtml(numEst) + ' (manual)' : '≈ ' + escHtml(numEst) + ' est.')
+            + '</span>'
           : '');
     const UF_FUENTE_LBL = {
       bci:   'exacto (BCI)',

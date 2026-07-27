@@ -27,6 +27,16 @@ posición→número): una calle es una línea y las alturas crecen de forma mon�
 5. **Sin colisiones**: si el número cae en uno ya usado en la calle (real o estimado en esta misma
    corrida) se desplaza al siguiente libre de la misma paridad.
 
+**Se niega a inventar:** si la numeración de la calle no sigue el orden espacial (coherencia
+< `min_coherencia`) o no hay anclas suficientes, la calle se saltea y se reporta en
+`calles_descartadas`. Esas parcelas van al panel de incidencias como `numero_faltante`, donde el
+operador carga el número a mano mirando el frente.
+
+**Los números cargados a mano mandan:** al arrancar lee `parcela_numero_manual` (mig. 051, clave
+`(region_id, cca_code)` para sobrevivir al re-scrape) y los usa como **anclas** — mejoran la
+estimación de las vecinas — además de re-escribirlos con `metodo='manual'` y confianza 1,0, para
+que un re-run nunca pise el trabajo humano.
+
 **Nunca pisa el catastro:** escribe en `parcelas.numero_estimado` / `numero_estimado_metodo` /
 `numero_estimado_confianza` (mig. 050). `parcelas.numero` queda intacto, y la UI/CSV muestran el
 valor marcado como estimado. Idempotente por survey/región (recalcula y reescribe; limpia las
@@ -300,6 +310,12 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
             WHERE {scope} AND p.calle IS NOT NULL AND p.calle <> ''
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
         """), params).fetchall()
+        # Números cargados a mano por el operador desde el panel de incidencias (mig. 051).
+        # Son trabajo humano: valen MÁS que cualquier interpolación. Entran como anclas (mejoran
+        # la estimación de sus vecinas) y se re-escriben al final para que un re-run no los pise.
+        manual = {c: n for c, n in conn.execute(text(
+            "SELECT cca_code, numero FROM parcela_numero_manual WHERE region_id = :r"),
+            {"r": input.region_id or (rows[0][7] if rows else None)}).fetchall()}
 
     if not rows:
         return NumeroEstimatorOutput(ok=False, survey_id=input.survey_id,
@@ -311,6 +327,7 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
 
     # Agrupar por núcleo de calle (tolerante a "RUA - X" vs "X", títulos, acentos).
     por_calle: dict = defaultdict(lambda: {"anclas": [], "targets": [], "raw": None})
+    updates: list = []
     for pid, calle, numero, lat, lng, cca, _mun, _reg in rows:
         nuc = nucleo_calle(calle)
         if not nuc:
@@ -318,12 +335,19 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
         g = por_calle[nuc]
         g["raw"] = g["raw"] or calle
         num = normalizar_numero(numero)          # '' cubre NULL, '', '0', 'S/N'
+        if not num and cca and cca in manual:
+            # Cargado a mano: ancla (no target) y se re-aplica tal cual.
+            num = normalizar_numero(manual[cca])
+            if num:
+                updates.append((pid, str(manual[cca]).strip()[:20], "manual", 1.0))
         if num:
             g["anclas"].append((int(num), float(lat), float(lng)))
         else:
             g["targets"].append((pid, float(lat), float(lng), cca, calle))
 
-    out.candidatas = sum(len(g["targets"]) for g in por_calle.values())
+    # `candidatas` = las que siguen sin número (las cargadas a mano ya están resueltas y
+    # entraron como anclas, pero cuentan como estimadas por método 'manual').
+    out.candidatas = sum(len(g["targets"]) for g in por_calle.values()) + len(updates)
     if not out.candidatas:
         logger.info("NumeroEstimator: no hay parcelas sin número en el alcance")
         return out
@@ -341,8 +365,7 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
             logger.warning(f"NumeroEstimator: ejes OSM no disponibles ({exc}); se usa PCA")
             geoms = {}
 
-    updates: list = []
-    por_metodo: Counter = Counter()
+    por_metodo: Counter = Counter({"manual": len(updates)}) if updates else Counter()
     calles_ok = 0
 
     for cn, g in por_calle.items():
