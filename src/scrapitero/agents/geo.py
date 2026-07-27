@@ -65,7 +65,7 @@ def area_km2(geom: "_shp_base.BaseGeometry") -> Optional[float]:
 
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 _GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
-_HEADERS = {"User-Agent": "ScrapiteroResearch/1.0 (+https://github.com/Meter0r0/Scrapitero)"}
+_HEADERS = {"User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/Scrapitero)"}
 
 # ISO 3166-1 alpha-2 → alpha-3 (el esquema usa country_code de 3 letras: BRA, ARG…).
 _ISO2_TO_3 = {

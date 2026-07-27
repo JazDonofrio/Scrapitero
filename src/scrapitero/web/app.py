@@ -1,4 +1,4 @@
-"""Web app de Scrapitero — gestión de relevamientos."""
+"""Web app de Scraper GIS — gestión de relevamientos."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from sqlalchemy import text
 from scrapitero.agents.logradouro_br import descomponer_logradouro
 from scrapitero.db.engine import get_engine
 
-app = FastAPI(title="Scrapitero")
+app = FastAPI(title="Scraper GIS")
 STATIC_DIR = Path(__file__).parent / "static"
 
 # FOS (Factor de Ocupación del Suelo): fracción máxima del terreno que puede ocupar
@@ -58,7 +58,8 @@ _AUTH_SECRET = (os.getenv("WEB_AUTH_SECRET") or WEBHOOK_SECRET
                 or "scrapitero-dev-secret-cambiar-en-prod")
 _AUTH_COOKIE = "scrap_auth"
 _AUTH_MAX_AGE = 7 * 24 * 3600          # 7 días
-_AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico"}
+# El logo se pide ANTES de autenticar (lo usa la pantalla de login), así que va público.
+_AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico", "/logo.svg", "/logo-mark.svg"}
 # Única escritura permitida al rol cliente: dejar comentarios (sugerencias/correcciones)
 # en puntos del mapa de un relevamiento.
 _CLIENTE_POST_RE = re.compile(r"^/api/surveys/[0-9a-fA-F-]+/comentarios$")
@@ -336,6 +337,24 @@ def _serve_spa() -> FileResponse:
     )
 
 
+@app.get("/logo.svg")
+async def logo_svg() -> FileResponse:
+    """Logo completo (caracará de perfil) — pantalla de login, 118 px."""
+    return FileResponse(STATIC_DIR / "logo.svg", media_type="image/svg+xml")
+
+
+@app.get("/logo-mark.svg")
+async def logo_mark_svg() -> FileResponse:
+    """Glifo del logo (cabeza) — favicon y header, donde el ave entera no se leería."""
+    return FileResponse(STATIC_DIR / "logo-mark.svg", media_type="image/svg+xml")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    """La ruta ya estaba permitida en el middleware de auth pero no la servía nadie (404)."""
+    return FileResponse(STATIC_DIR / "logo-mark.svg", media_type="image/svg+xml")
+
+
 @app.get("/")
 async def root() -> FileResponse:
     """Raíz = vista CLIENTE (solo lectura): lista de relevamientos con progreso/estado y
@@ -354,7 +373,8 @@ async def operador() -> FileResponse:
 def _login_page(error: bool = False, next_url: str = "/") -> HTMLResponse:
     err_html = ('<p class="err">Contraseña incorrecta o sin permiso.</p>' if error else "")
     html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scrapitero — Acceso</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scraper GIS — Acceso</title>
+<link rel="icon" type="image/svg+xml" href="/logo-mark.svg">
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; }}
   body {{ background: #0f172a; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
@@ -366,38 +386,11 @@ def _login_page(error: bool = False, next_url: str = "/") -> HTMLResponse:
   button {{ width:100%; margin-top:1rem; padding:.65rem; border:0; border-radius:8px; background:#38bdf8; color:#0f172a; font-weight:700; font-size:.95rem; cursor:pointer; }}
   button:hover {{ background:#0ea5e9; }}
   .err {{ color:#fca5a5; font-size:.82rem; margin-bottom:.75rem; }}
-  .tero {{ display:block; margin:0 auto .85rem; width:118px; height:auto; }}
+  .marca {{ display:block; margin:0 auto .85rem; width:118px; height:auto; }}
 </style></head><body>
   <form class="card" method="post" action="/login">
-    <svg class="tero" viewBox="0 0 240 210" aria-label="Tero">
-      <!-- patas -->
-      <g stroke="#fb7185" stroke-width="5" stroke-linecap="round" fill="none">
-        <path d="M120 140 L108 186"/>
-        <path d="M142 142 L152 186"/>
-        <path d="M96 186 h24 M140 186 h24"/>
-      </g>
-      <!-- cola -->
-      <path d="M190 98 q34 -6 44 -22 q-6 26 -30 36 z" fill="#64748b"/>
-      <!-- cuerpo -->
-      <ellipse cx="140" cy="110" rx="62" ry="40" fill="#94a3b8"/>
-      <!-- ala -->
-      <path d="M98 98 q54 -12 94 6 q-20 32 -72 24 q-26 -6 -22 -30 z" fill="#64748b"/>
-      <!-- pecho negro -->
-      <path d="M90 94 q-6 28 12 46 q16 -6 20 -24 q-10 -18 -32 -22 z" fill="#0b1220"/>
-      <!-- cuello + cabeza -->
-      <path d="M98 98 q-22 -30 -8 -60 q20 6 24 42 z" fill="#cbd5e1"/>
-      <circle cx="80" cy="46" r="21" fill="#e2e8f0"/>
-      <!-- corona / antifaz negro -->
-      <path d="M62 38 q18 -18 38 -8 q-2 16 -20 20 q-12 2 -18 -12 z" fill="#0b1220"/>
-      <!-- copete (penacho hacia atrás) -->
-      <path d="M94 26 q42 -16 66 -4 q-30 12 -66 12 z" fill="#0b1220"/>
-      <!-- pico -->
-      <path d="M60 48 l-32 4 l32 9 z" fill="#fb7185"/>
-      <!-- ojo -->
-      <circle cx="74" cy="42" r="4.6" fill="#0b1220"/>
-      <circle cx="75.6" cy="40.4" r="1.5" fill="#fff"/>
-    </svg>
-    <h1>Scrapi<span>tero</span></h1>
+    <img class="marca" src="/logo.svg" alt="Scraper GIS">
+    <h1>Scraper <span>GIS</span></h1>
     <p class="sub">Ingresá tu contraseña para continuar</p>
     {err_html}
     <input type="hidden" name="next" value="{next_url}">

@@ -1,4 +1,4 @@
-# Scrapitero — Estado de Implementación y Arquitectura
+# Scraper GIS — Estado de Implementación y Arquitectura
 
 > **Leer este archivo al inicio de cada sesión** para entender el sistema sin re-explorar el código.
 > Última actualización: 2026-06-01

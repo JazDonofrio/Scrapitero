@@ -1,7 +1,7 @@
 [project]
 name = "scrapitero"
 version = "0.1.0"
-description = "Plataforma multi-agente de relevamiento catastral geoestructurado"
+description = "Scraper GIS — plataforma multi-agente de relevamiento catastral geoestructurado"
 requires-python = ">=3.11"
 dependencies = [
     # Geo vectorial

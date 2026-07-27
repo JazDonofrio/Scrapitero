@@ -21,7 +21,7 @@ async def obtener_direccion_por_coordenadas(lat: float, lon: float) -> Dict[str,
     
     # Nominatim exige un User-Agent identificatorio
     headers = {
-        "User-Agent": "Scrapitero/1.0 (test_project)"
+        "User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/Scrapitero)"
     }
 
     try:

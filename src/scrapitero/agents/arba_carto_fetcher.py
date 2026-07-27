@@ -36,6 +36,8 @@ from scrapitero.agents.arba_cadastral_fetcher import (
 # ── Config ────────────────────────────────────────────────────────────────────
 
 CARTO_BASE       = "https://carto.arba.gov.ar/cartoArba"
+# UA identificable con contacto: Nominatim lo exige y ARBA lo registra en sus logs.
+_UA_HEADERS      = {"User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/Scrapitero)"}
 GMAPS_GEO        = "https://maps.googleapis.com/maps/api/geocode/json"
 NOMINATIM        = "https://nominatim.openstreetmap.org/reverse"
 COCHERA_M2       = 25   # subparcela < 25 m² → cochera; >= 25 m² → unidad funcional
@@ -278,7 +280,7 @@ def _geocodificar(client: httpx.Client, lat: float, lon: float) -> tuple[str, st
     try:
         r = client.get(NOMINATIM, params={
             "lat": lat, "lon": lon, "format": "json", "zoom": 18,
-        }, headers={"User-Agent": "Scrapitero/1.0"}, timeout=10)
+        }, headers=_UA_HEADERS, timeout=10)
         if r.status_code == 200:
             addr = r.json().get("address", {})
             road = addr.get("road") or addr.get("pedestrian") or ""

@@ -1,4 +1,4 @@
-"""Modelos SQLAlchemy para Scrapitero."""
+"""Modelos SQLAlchemy para Scraper GIS."""
 
 import uuid
 from datetime import datetime, date

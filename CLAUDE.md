@@ -1,4 +1,7 @@
-# Scrapitero — Instrucciones para Claude Code
+# Scraper GIS — Instrucciones para Claude Code
+
+> El producto se llama **Scraper GIS**. El paquete Python, la DB, el container y el
+> servicio siguen llamándose `scrapitero` a propósito: son identidad técnica, no marca.
 
 > **Al inicio de cada sesión:** leer `ARCHITECTURE.md` para entender el sistema completo sin re-explorar código.
 

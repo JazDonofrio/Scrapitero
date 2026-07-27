@@ -48,7 +48,7 @@ OVERPASS_MIRRORS_TOR = [
 OVERPASS_TIMEOUT = 120  # segundos
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; ScrapiteroResearch/1.0; +https://github.com/scrapitero)",
+    "User-Agent": "Mozilla/5.0 (compatible; ScraperGIS/1.0; +https://github.com/Meter0r0/Scrapitero)",
     "Accept": "*/*",
 }
 

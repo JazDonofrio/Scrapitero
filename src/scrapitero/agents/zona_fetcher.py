@@ -62,7 +62,7 @@ def _reverse_geocode(lat: float, lng: float) -> str:
         r = httpx.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat": lat, "lon": lng, "format": "json"},
-            headers={"User-Agent": "Scrapitero/1.0"},
+            headers={"User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/Scrapitero)"},
             timeout=8,
         )
         r.raise_for_status()

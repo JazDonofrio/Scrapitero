@@ -146,7 +146,7 @@ async def procesar_manzana(partido: str, circ: str, secc: str, manzana: str):
 if __name__ == "__main__":
     import sys
 
-    print("\n--- Scrapitero: Sistema de Relevamiento ---")
+    print("\n--- Scraper GIS: Sistema de Relevamiento ---")
     print("Búsqueda interactiva por Nomenclatura (Manzana)")
     
     try:

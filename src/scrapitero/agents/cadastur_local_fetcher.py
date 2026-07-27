@@ -39,7 +39,7 @@ from scrapitero.agents._run import agent_run
 from scrapitero.agents.hotel_fetcher import _CKAN_PACKAGE, _col, _entero, _norm
 from scrapitero.db.engine import get_engine
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (scrapitero CadasturLocal)"}
+_HEADERS = {"User-Agent": "Mozilla/5.0 (ScraperGIS CadasturLocal)"}
 _XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 

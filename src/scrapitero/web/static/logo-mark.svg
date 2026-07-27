@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Scraper GIS">
+  <title>Scraper GIS</title>
+  <!-- Glifo para 16-24 px (favicon + header): el ave entera no se lee a ese tamaño, así que
+       queda sólo la cabeza. Es la MISMA cabeza de logo.svg reescalada (x'=(x-38)*0.58+6,
+       y'=(y-12)*0.58+10), no un dibujo distinto: capuchón negro, cara pálida, ojo oscuro,
+       piel facial roja y pico ganchudo. -->
+  <circle cx="32" cy="32" r="32" fill="#0f172a"/>
+
+  <!-- busto: la cabeza de perfil es ancha y baja, y sola dejaba el cuadro medio vacío (a 16 px
+       se leía diminuta). El pecho llena la mitad inferior y cierra la composición. -->
+  <path d="M16 64 q0 -20 14 -26 q16 -6 22 8 q6 12 6 18 z" fill="#94a3b8"/>
+  <path d="M22 64 q-2 -14 8 -20" stroke="#0b1220" stroke-width="2.6" fill="none" opacity=".45"/>
+  <path d="M32 64 q-1 -13 7 -18" stroke="#0b1220" stroke-width="2.6" fill="none" opacity=".45"/>
+
+  <!-- cabeza -->
+  <circle cx="30.4" cy="29.7" r="12.8" fill="#e2e8f0"/>
+
+  <!-- capuchón negro con la punta hacia la nuca -->
+  <path d="M17.6 26.2 Q21.1 13.5 32.7 13.5 Q44.3 13.5 46.6 23.9 Q54.7 27.4 58.2 33.2
+           Q47.8 32.6 40.8 28.6 Q26.9 30.9 17.6 26.2 Z" fill="#0b1220"/>
+
+  <!-- piel facial desnuda -->
+  <path d="M18.8 33.2 Q25.7 36.7 31.5 35.5 Q30.4 42.5 22.2 42.5 Q17.6 40.2 18.8 33.2 Z" fill="#fb7185"/>
+
+  <!-- pico ganchudo -->
+  <path d="M23.4 26.8 L9.5 30.9 Q4.3 33.2 4.3 37.8 Q4.3 41.9 8.9 42.5 Q7.2 37.3 11.2 34.9 L23.4 36.7 Z"
+        fill="#cbd5e1"/>
+  <path d="M9.5 30.9 Q4.3 33.2 4.3 37.8 Q4.3 41.9 8.9 42.5 Q7.2 37.3 11.2 34.9 Z" fill="#94a3b8"/>
+
+  <!-- ojo -->
+  <circle cx="24.6" cy="33.2" r="2.7" fill="#0b1220"/>
+  <circle cx="25.5" cy="32.3" r="0.9" fill="#fff"/>
+</svg>

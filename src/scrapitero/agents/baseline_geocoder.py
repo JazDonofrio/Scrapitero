@@ -32,7 +32,7 @@ from scrapitero.agents._run import agent_run
 from scrapitero.db.engine import get_engine
 
 _NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
-_HEADERS = {"User-Agent": "ScrapiteroResearch/1.0 (+https://github.com/Meter0r0/Scrapitero)"}
+_HEADERS = {"User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/Scrapitero)"}
 
 # Radio máximo (km) entre una coord geocodificada y el centroide de la zona de la región.
 # Generoso para cubrir el municipio + alrededores, pero atrapa los errores de "otro estado"

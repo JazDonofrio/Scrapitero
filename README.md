@@ -1,4 +1,4 @@
-# Scrapitero - Sistema Multi-Agente de Relevamiento Domiciliario
+# Scraper GIS - Sistema Multi-Agente de Relevamiento Domiciliario
 
 Este es un prototipo inicial para la identificación de unidades funcionales geolocalizadas en Argentina.
 
