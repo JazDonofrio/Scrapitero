@@ -130,7 +130,7 @@ const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
 // Metadata por tipo: etiqueta, color del marcador y qué acciones ofrece la tarjeta.
 const TIPOS = {
   hotel_sin_habitaciones: {label:'🏨 Hoteles sin habitaciones', color:'#7c3aed',
-                           acciones:['habitaciones','no_es_hotel']},
+                           acciones:['habitaciones','cerrado','no_es_hotel']},
   altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['tipo_edificacion','uf']},
   altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['tipo_edificacion','uf']},
   uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['uf']},
@@ -193,6 +193,11 @@ function updateSub(){
 function datosHtml(t, d){
   const p = [];
   if(d.direccion) p.push(`📍 ${esc(d.direccion)}`);
+  // El «≈ N» del título/dirección NO es el número del catastro: es una inferencia de
+  // NumeroEstimator (interpolación entre los linderos con número real). Se aclara siempre.
+  if(d.numero_estimado) p.push(`<span style="color:#b45309" title="El catastro no trae el`
+    + ` número de esta parcela. El ≈${esc(d.numero_estimado)} está interpolado sobre el eje de la`
+    + ` calle entre los linderos que sí lo tienen.">nº ≈${esc(d.numero_estimado)} <b>estimado</b></span>`);
   if(d.telefono) p.push(`📞 <a href="tel:${esc(d.telefono)}">${esc(d.telefono)}</a>`);
   if(d.cnpj) p.push(`CNPJ ${esc(d.cnpj)}`);
   if(d.situacion) p.push(`estado ${esc(d.situacion)}`);
@@ -228,6 +233,11 @@ const ACC_DEF = {
                       form: () => `<input type="number" min="0" placeholder="UF viv">`
                                 + `<input type="number" min="0" placeholder="UF com">`
                                 + `<button class="warn">Corregir UF</button>` },
+  // Es un hotel, pero ya no opera: la fila se CONSERVA (pin rojo en el mapa) y la nota
+  // cuenta qué hay hoy en su lugar. Distinto de `no_es_hotel`, que borra la fila.
+  cerrado:          { link: '🔒 Está cerrado',
+                      form: () => `<input placeholder="qué opera hoy ahí (opcional)">`
+                                + `<button class="warn">Marcar cerrado</button>` },
   no_es_hotel:      { link: '🚫 No es hotel',
                       form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Confirmar</button>` },
   descartar:        { link: '✖ No es un problema', color: '#94a3b8',
@@ -323,6 +333,10 @@ async function load(){
           const n=parseInt(row.querySelector('input').value,10);
           if(isNaN(n)||n<0){ alert('Ingresá un número válido de habitaciones'); return; }
           resolver(it.incidencia_id,'habitaciones',n,null,btn,card);
+        } else if(a==='cerrado'){
+          const v=row.querySelector('input').value.trim();
+          if(!confirm('Marcar el hotel como CERRADO? Sigue en el mapa, con el pin rojo.')) return;
+          resolver(it.incidencia_id,'cerrado',v,null,btn,card);
         } else if(a==='tipo_edificacion'||a==='no_es_hotel'){
           const v=row.querySelector('select').value;
           if(!v){ alert('Elegí una etiqueta'); return; }

@@ -71,8 +71,16 @@ class IncidenciasOutput(BaseModel):
     por_tipo: dict = {}
 
 
-def _direccion(calle, numero) -> str:
-    d = " ".join(x for x in [(calle or "").strip(), (numero or "").strip()] if x)
+def _direccion(calle, numero, numero_est=None) -> str:
+    """Dirección para el título de la incidencia.
+
+    Cuando el catastro no trae altura (`0` o vacío) y `NumeroEstimator` infirió una, se muestra
+    **marcada con ≈** — el operador tiene que poder ubicar el caso en la calle sin confundir el
+    número inferido con el oficial. Antes estas tarjetas decían «SALIN NADAF 0», que no ubica nada."""
+    num = (numero or "").strip()
+    if num in ("", "0") and (numero_est or "").strip():
+        num = f"≈{str(numero_est).strip()}"
+    d = " ".join(x for x in [(calle or "").strip(), num] if x)
     return d or "(sin dirección)"
 
 
@@ -121,7 +129,7 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
         SELECT a.parcela_id::text, a.motivo, a.altura_m, a.pisos_satelital, a.pisos_bci_proxy,
                a.ground_area_m2, a.imagery_year, a.imagery_quality,
                p.calle, p.numero, p.uso_principal, p.area_m2_construida, p.cca_code,
-               p.centroid_lat, p.centroid_lng
+               p.centroid_lat, p.centroid_lng, p.numero_estimado
         FROM parcela_altura a
         JOIN parcelas p ON p.parcela_id = a.parcela_id
         WHERE a.survey_id = :sid AND a.motivo IN ('sin_declarar', 'mas_alto')
@@ -132,7 +140,7 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
         pid, motivo, altura, pisos_sat, pisos_bci, huella, img_year, img_q = r[0:8]
         calle, numero, uso, area_c, cca = r[8], r[9], r[10], r[11], r[12]
         tipo = "altura_sin_declarar" if motivo == "sin_declarar" else "altura_mas_alta"
-        dir_txt = _direccion(calle, numero)
+        dir_txt = _direccion(calle, numero, r[15])
         if motivo == "sin_declarar":
             titulo = f"🏗 {dir_txt} — construcción no declarada"
             detalle = (f"El catastro no declara área construida (uso «{uso or 's/d'}»), pero el "
@@ -154,6 +162,9 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
             "hotel_cnpj": None,
             "datos": {
                 "direccion": dir_txt, "cca_code": cca, "uso": uso,
+                # Número inferido (NumeroEstimator) cuando el catastro no lo trae: va aparte
+                # para que la tarjeta pueda aclarar que el ≈ del título es una estimación.
+                "numero_estimado": r[15] or None,
                 "altura_m": round(float(altura), 1) if altura is not None else None,
                 "pisos_satelital": pisos_sat, "pisos_bci_proxy": pisos_bci,
                 "ground_area_m2": round(float(huella), 0) if huella else None,
@@ -172,7 +183,8 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
         SELECT p.parcela_id::text, p.calle, p.numero, p.uf_vivienda, p.uf_comercio, p.uf_fuente,
                p.area_m2_construida, p.cca_code, p.centroid_lat, p.centroid_lng,
                a.altura_m, a.pisos_satelital, a.ground_area_m2, a.imagery_year,
-               (a.ground_area_m2 * a.pisos_satelital / p.uf_vivienda) AS m2_por_uf
+               (a.ground_area_m2 * a.pisos_satelital / p.uf_vivienda) AS m2_por_uf,
+               p.numero_estimado
         FROM parcela_altura a
         JOIN parcelas p ON p.parcela_id = a.parcela_id
         WHERE a.survey_id = :sid
@@ -187,7 +199,7 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
         pid, calle, numero, uf_v, uf_c, uf_fuente = r[0], r[1], r[2], r[3], r[4], r[5]
         area_c, cca, lat, lng = r[6], r[7], r[8], r[9]
         altura, pisos, huella, img_year, m2_uf = r[10], r[11], r[12], r[13], float(r[14])
-        dir_txt = _direccion(calle, numero)
+        dir_txt = _direccion(calle, numero, r[15])
         casos.append({
             "tipo": "uf_imposible",
             "clave": f"uf_imposible:{pid}",
@@ -200,7 +212,7 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
             "parcela_id": pid,
             "hotel_cnpj": None,
             "datos": {
-                "direccion": dir_txt, "cca_code": cca,
+                "direccion": dir_txt, "cca_code": cca, "numero_estimado": r[15] or None,
                 "uf_vivienda": uf_v, "uf_comercio": uf_c, "uf_fuente": uf_fuente,
                 "m2_por_uf": round(m2_uf, 1),
                 "altura_m": round(float(altura), 1) if altura is not None else None,

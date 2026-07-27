@@ -739,7 +739,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
                    p.es_country,
                    (SELECT COUNT(*) FROM parcela_unidades pu
                     WHERE pu.parcela_id = p.parcela_id) AS n_unidades,
-                   ptm.tipo_edificacion AS tipo_manual
+                   ptm.tipo_edificacion AS tipo_manual,
+                   -- Número de puerta ESTIMADO (NumeroEstimator, mig. 050): sólo lo tienen las
+                   -- parcelas que el catastro dejó sin altura. Se muestra marcado como estimado.
+                   p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
@@ -800,6 +803,11 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
                                      n_unidades=int(r[31] or 0),
                                      descripcion=r[28], es_country=bool(r[30])),
+            # Número inferido para las parcelas sin altura en el catastro. NUNCA reemplaza a
+            # `numero`: el front lo dibuja aparte y marcado (≈ N est.).
+            "numero_est": r[33] or "",
+            "numero_est_metodo": r[34] or "",
+            "numero_est_conf": round(float(r[35]), 2) if r[35] is not None else None,
         })
     return out
 
@@ -893,6 +901,28 @@ async def run_country(survey_id: str) -> JSONResponse:
         _thread_job_id.value = survey_id
         return run_country_agent(CountryFetcherInput(region_id=region_id,
                                                      survey_id=survey_id)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 422)
+
+
+@app.post("/api/surveys/{survey_id}/numeros")
+async def run_numeros(survey_id: str) -> JSONResponse:
+    """Corre NumeroEstimator: infiere el número de puerta de las parcelas que el catastro dejó
+    sin altura (`numero` en `0` o vacío), interpolando sobre el eje de la calle entre los
+    linderos con número real. Escribe SOLO `parcelas.numero_estimado*` (mig. 050) — el `numero`
+    del municipio nunca se toca, y la UI/CSV lo muestran marcado como estimado."""
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+
+    from scrapitero.agents.numero_estimator import NumeroEstimatorInput
+    from scrapitero.agents.numero_estimator import run as run_numeros_agent
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_numeros_agent(NumeroEstimatorInput(region_id=row[0], survey_id=survey_id,
+                                                      max_detalle=0)).model_dump()
 
     data = await asyncio.to_thread(_job)
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
@@ -1096,7 +1126,7 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
                    h.habitaciones, h.leitos, h.cerrado_def,
                    COALESCE(h.business_status, h.situacion_cadastur) AS estado,
                    ST_Y(h.location) AS lat, ST_X(h.location) AS lng, h.fuente,
-                   h.habitaciones_fuente, h.direccion
+                   h.habitaciones_fuente, h.direccion, h.nota
             FROM hoteles h
             WHERE h.region_id = (SELECT region_id FROM surveys WHERE survey_id = CAST(:sid AS uuid))
               AND (h.survey_id = CAST(:sid AS uuid) OR h.survey_id IS NULL)
@@ -1114,6 +1144,7 @@ async def survey_hoteles(survey_id: str) -> JSONResponse:
         "habitaciones_estimadas": (r[11] == "bci_proxy"),
         "habitaciones_fuente": r[11],
         "direccion": r[12],
+        "nota": r[13],          # comentario del operador (mig. 048), se ve en el popup
     } for r in rows]
     abiertos = [h for h in hoteles if not h["cerrado"]]
     return JSONResponse({
@@ -1192,6 +1223,122 @@ async def set_habitaciones_manual(hotel_id: str, request: Request) -> JSONRespon
                 DO UPDATE SET habitaciones = :n, actualizado_at = now()
             """), {"r": region_id, "c": cnpj, "n": n})
     return JSONResponse({"ok": True, "habitaciones": n})
+
+
+def _marcar_cerrado(conn, hotel_id: str, cerrado: bool, nota: str | None) -> tuple[bool, object]:
+    """Fuerza a mano el abierto/cerrado de un hotel y le deja una nota (mig. 048).
+
+    Extraído para que lo compartan el endpoint del mapa y el del reporte de incidencias
+    (misma transacción del caller). El override se guarda por `(region_id, cnpj)` en
+    `hotel_cerrado_manual`, que `HotelFetcher` re-aplica al final de cada corrida — si no,
+    el próximo botón 🏨 lo reabriría porque Receita lo sigue dando ATIVA.
+
+    Devuelve (ok, region_id | mensaje_error)."""
+    row = conn.execute(text(
+        "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+        {"h": hotel_id}).fetchone()
+    if not row:
+        return False, "Hotel no encontrado"
+    region_id, cnpj = row
+    conn.execute(text(
+        "UPDATE hoteles SET cerrado_def = :cerr, nota = :nota WHERE hotel_id::text = :h"),
+        {"cerr": cerrado, "nota": nota, "h": hotel_id})
+    # Sin CNPJ (típico de Google) el override no tiene clave natural durable: el cambio vale
+    # para el estado actual pero un re-corte del botón 🏨 lo pierde. Mismo límite que las
+    # habitaciones manuales.
+    if cnpj:
+        conn.execute(text("""
+            INSERT INTO hotel_cerrado_manual (region_id, cnpj, cerrado, nota, autor)
+            VALUES (:r, :c, :cerr, :nota, 'operador')
+            ON CONFLICT (region_id, cnpj)
+            DO UPDATE SET cerrado = :cerr, nota = :nota, actualizado_at = now()
+        """), {"r": region_id, "c": cnpj, "cerr": cerrado, "nota": nota})
+    return True, region_id
+
+
+@app.post("/api/hoteles/{hotel_id}/ubicacion")
+async def set_ubicacion_manual(hotel_id: str, request: Request) -> JSONResponse:
+    """El operador corrige la coordenada y/o la dirección de un hotel (mig. 049).
+
+    Hace falta cuando la fuente no trae coordenada y el geocoder externo erra sobre la dirección
+    fiscal: REAL VILLES quedaba a 419 m del hotel real, en una cuadra sin ningún alojamiento.
+    Re-vincula la parcela en el acto por `ST_Contains` con el punto corregido, y persiste el
+    override para que el próximo botón 🏨 no lo pierda."""
+    try:
+        body = await request.json()
+        lat = body.get("lat")
+        lng = body.get("lng")
+        lat = float(lat) if lat is not None else None
+        lng = float(lng) if lng is not None else None
+        direccion = (body.get("direccion") or "").strip() or None
+        nota = (body.get("nota") or "").strip() or None
+    except (ValueError, TypeError):
+        return JSONResponse({"ok": False, "error": "lat/lng inválidos"}, status_code=400)
+    if lat is None and lng is None and direccion is None:
+        return JSONResponse({"ok": False, "error": "nada para corregir"}, status_code=400)
+    if (lat is None) != (lng is None):
+        return JSONResponse({"ok": False, "error": "lat y lng van juntos"}, status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+            {"h": hotel_id}).fetchone()
+        if not row:
+            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
+        region_id, cnpj = row
+        conn.execute(text("""
+            UPDATE hoteles
+               SET location = COALESCE(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), location),
+                   direccion = COALESCE(:dir, direccion)
+             WHERE hotel_id::text = :h
+        """), {"lat": lat, "lng": lng, "dir": direccion, "h": hotel_id})
+        # Re-vincular la parcela con el punto ya corregido (el motivo de fondo de la corrección).
+        conn.execute(text("""
+            UPDATE hoteles h SET parcela_id = p.parcela_id
+            FROM parcelas p
+            WHERE h.hotel_id::text = :h AND p.region_id = h.region_id
+              AND p.geometry IS NOT NULL AND h.location IS NOT NULL
+              AND ST_Contains(p.geometry, h.location)
+        """), {"h": hotel_id})
+        if cnpj:
+            conn.execute(text("""
+                INSERT INTO hotel_ubicacion_manual (region_id, cnpj, lat, lng, direccion, nota, autor)
+                VALUES (:r, :c, :lat, :lng, :dir, :nota, 'operador')
+                ON CONFLICT (region_id, cnpj) DO UPDATE SET
+                    lat = COALESCE(:lat, hotel_ubicacion_manual.lat),
+                    lng = COALESCE(:lng, hotel_ubicacion_manual.lng),
+                    direccion = COALESCE(:dir, hotel_ubicacion_manual.direccion),
+                    nota = COALESCE(:nota, hotel_ubicacion_manual.nota),
+                    actualizado_at = now()
+            """), {"r": region_id, "c": cnpj, "lat": lat, "lng": lng,
+                   "dir": direccion, "nota": nota})
+        pid = conn.execute(text(
+            "SELECT parcela_id::text FROM hoteles WHERE hotel_id::text = :h"),
+            {"h": hotel_id}).scalar()
+    return JSONResponse({"ok": True, "lat": lat, "lng": lng, "direccion": direccion,
+                         "parcela_id": pid})
+
+
+@app.post("/api/hoteles/{hotel_id}/cerrado")
+async def set_cerrado_manual(hotel_id: str, request: Request) -> JSONResponse:
+    """El operador marca un hotel como cerrado (o lo reabre) y le deja un comentario.
+
+    Necesario porque ninguna fuente lo resuelve: un CNPJ puede seguir ATIVA en Receita años
+    después de que el hotel dejó de operar (caso MONTANA PALACE en Filinto Müller 1059, donde
+    hoy opera el Zazori). A diferencia de "no es hotel", la fila se conserva: sigue en el mapa
+    con el pin rojo y la nota explica qué hay hoy en su lugar."""
+    try:
+        body = await request.json()
+        cerrado = bool(body.get("cerrado", True))
+        nota = (body.get("nota") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "body inválido"}, status_code=400)
+    engine = get_engine()
+    with engine.begin() as conn:
+        ok, detalle = _marcar_cerrado(conn, hotel_id, cerrado, nota)
+    if not ok:
+        return JSONResponse({"ok": False, "error": detalle}, status_code=404)
+    return JSONResponse({"ok": True, "cerrado": cerrado, "nota": nota})
 
 
 @app.get("/api/tipos-edificacion")
@@ -1403,6 +1550,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
     `accion` despacha a la escritura correspondiente, reusando las tablas de override que ya
     existen para que un re-scrape no pierda la corrección:
       - `habitaciones`      → `hoteles` + `hotel_habitaciones_manual` (durable por CNPJ)
+      - `cerrado`           → helper `_marcar_cerrado` (+ `hotel_cerrado_manual`, `valor`=nota)
       - `no_es_hotel`       → helper `_descartar_hotel` (4 tablas)
       - `tipo_edificacion`  → `parcela_tipo_manual`
       - `uf`                → `parcelas` (uf_fuente='manual') + `parcela_uf_manual`
@@ -1456,6 +1604,19 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                     ON CONFLICT (region_id, cnpj)
                     DO UPDATE SET habitaciones = :n, actualizado_at = now()
                 """), {"r": h[0], "c": h[1], "n": n})
+
+        elif accion == "cerrado":
+            # El hotel SÍ es un hotel, pero ya no opera. A diferencia de `no_es_hotel` la fila
+            # se conserva (pin rojo en el mapa) y `valor` lleva el comentario que explica qué
+            # hay hoy en su lugar.
+            hotel_id = datos.get("hotel_id")
+            if not hotel_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene hotel_id"},
+                                    status_code=400)
+            comentario = (str(valor or "")).strip() or nota
+            ok, detalle = _marcar_cerrado(conn, hotel_id, True, comentario)
+            if not ok:
+                return JSONResponse({"ok": False, "error": detalle}, status_code=409)
 
         elif accion == "no_es_hotel":
             tipo_ed = (str(valor or "")).strip()
@@ -1955,7 +2116,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                     WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
                     ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
                 (SELECT ptm.tipo_edificacion FROM parcela_tipo_manual ptm
-                    WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual
+                    WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual,
+                numero_estimado, numero_estimado_metodo, numero_estimado_confianza
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -2001,6 +2163,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Categoría (R/C/E)", "Descripción (CNPJ)",
             "DSC_NOME_DO_IMOVEL", "DSC_LOGRADOURO_NO",
             "Tipo de edificación",
+            # Número inferido para las parcelas que el catastro dejó sin altura. Va en columnas
+            # PROPIAS y no se mezcla con la dirección: es una inferencia, no dato del municipio.
+            "Número estimado", "Número est. método", "Número est. confianza",
         ])
 
         def _fila(r, direccion, unidad, codigo, uso, uf_v, uf_c, total, area_con):
@@ -2035,6 +2200,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
                 # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38], override manual=r[39]
                 _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39]),
+                r[40] or "", r[41] or "",
+                f"{r[42]:.2f}" if r[42] is not None else "",
             ]
 
         # Letra secuencial (A, B, C…) para direcciones repetidas sin complemento propio.

@@ -1857,6 +1857,9 @@ function renderCard(s) {
             <button class="btn btn-sm btn-outline" onclick="runAltura('${sid}', this)"
                title="Altura satelital de cada parcela (Google Solar − terreno) contrastada con los pisos que sugiere el catastro. Marca dónde hay más construido de lo declarado. Free tier 10k/mes.">📏 Altura (revisión)</button>
             <span id="altura-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
+            <button class="btn btn-sm btn-outline" onclick="runNumeros('${sid}', this)"
+               title="Estimar el número de puerta de las parcelas que el catastro dejó sin altura, interpolando sobre el eje de la calle entre los linderos con número real. No pisa el número del catastro: se guarda aparte y se muestra marcado «≈ N est.».">🔢 Nº estimado</button>
+            <span id="num-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
             <button class="btn btn-sm btn-outline" onclick="runIncidencias('${sid}', this)"
                title="Buscar los casos que necesitan resolución humana (hoteles sin habitaciones, construcción no declarada, UF imposible) y abrir el reporte para resolverlos.">🧾 Incidencias</button>
             <span id="inc-msg-${sid}" style="font-size:.72rem;color:#6b7280"></span>
@@ -2186,6 +2189,8 @@ async function loadHoteles(sid) {
           + (h.direccion ? `<br><span style="color:#6b7280;font-size:.74rem">📍 ${escHtml(h.direccion)}</span>` : '')
           + `<br>${habTxt}`
           + (h.leitos != null ? ` · ${fmt(h.leitos)} leitos` : '') + `<br>${estado}`
+          // Nota del operador (mig. 048): explica por qué está cerrado y qué opera hoy ahí.
+          + (h.nota ? `<br><span style="color:#b45309;font-size:.74rem">📝 ${escHtml(h.nota)}</span>` : '')
           + (h.cnpj ? `<br><span style="color:#6b7280;font-size:.72rem">CNPJ ${escHtml(h.cnpj)}</span>` : '')
           + `<br><span style="color:#9ca3af;font-size:.7rem">fuente: ${escHtml(h.fuente || '')}</span></div>`, { maxWidth: 260 });
         mk.addTo(grp);
@@ -2243,6 +2248,31 @@ async function runCountry(sid, btn) {
     } else {
       if (msg) { msg.style.color = '#166534'; msg.textContent = `${d.areas} área(s) · ${d.parcelas_marcadas} parcelas`; }
       await loadParcelasMap(sid);   // re-pinta parcelas + capa 🏘 Country con el flag actualizado
+    }
+  } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
+  btn.disabled = false; btn.textContent = t0;
+}
+
+async function runNumeros(sid, btn) {
+  const msg = document.getElementById('num-msg-' + sid);
+  const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ estimando…';
+  if (msg) { msg.style.color = '#6b7280'; msg.textContent = 'interpolando sobre el eje de cada calle…'; }
+  try {
+    const d = await fetch(`/api/surveys/${sid}/numeros`, { method: 'POST' }).then(r => r.json());
+    if (!d.ok) {
+      if (msg) { msg.style.color = '#b91c1c'; msg.textContent = '⚠ ' + (d.error || 'error'); }
+    } else {
+      // Las calles descartadas importan: son parcelas que quedan SIN número estimado a
+      // propósito (numeración del catastro incoherente / sin anclas), no un fallo silencioso.
+      const desc = Object.entries(d.calles_descartadas || {})
+        .map(([c, r]) => `${c} (${r})`).join(', ');
+      if (msg) {
+        msg.style.color = '#166534';
+        msg.textContent = `${d.estimadas}/${d.candidatas} estimadas en ${d.calles} calles`
+          + (d.sin_estimar ? ` · ${d.sin_estimar} sin estimar` : '');
+        msg.title = desc ? 'Calles sin estimación: ' + desc : '';
+      }
+      if (typeof loadParcelasMap === 'function') await loadParcelasMap(sid);
     }
   } catch(err) { if (msg) { msg.style.color = '#b91c1c'; msg.textContent = 'Error de red: ' + err.message; } }
   btn.disabled = false; btn.textContent = t0;
@@ -2803,7 +2833,28 @@ async function loadParcelasMap(sid) {
       color: '#0f172a', weight: 1.5, fillOpacity: 0.9,
     });
 
-    const addr = [p.calle, p.numero].filter(Boolean).join(' ') || '—';
+    // Número de puerta: el del catastro manda. Si no lo trae y hay uno estimado
+    // (NumeroEstimator: interpolación sobre el eje de la calle entre los linderos con número
+    // real), se muestra SIEMPRE marcado «≈ N est.» — nunca como si fuera oficial.
+    const numOficial = (p.numero && p.numero !== '0') ? p.numero : '';
+    const numEst = (!numOficial && p.numero_est) ? p.numero_est : '';
+    const NUM_EST_METODO = {
+      eje_osm: 'interpolado sobre el eje real de la calle (OSM) entre los linderos con número',
+      eje_osm_extrap: 'extrapolado más allá del último lindero con número (eje OSM)',
+      eje_pca: 'interpolado sobre un eje sintético (OSM no tiene esta calle)',
+      eje_pca_extrap: 'extrapolado sobre un eje sintético (OSM no tiene esta calle)',
+    };
+    const numEstTitle = numEst
+      ? 'Número ESTIMADO, no está en el catastro: '
+        + (NUM_EST_METODO[p.numero_est_metodo] || p.numero_est_metodo)
+        + (p.numero_est_conf != null ? ' · confianza ' + p.numero_est_conf : '')
+      : '';
+    const addr = [p.calle, numOficial].filter(Boolean).join(' ') || '—';
+    const addrHtml = escHtml(addr)
+      + (numEst
+          ? ' <span style="color:#b45309;font-weight:600;cursor:help;border-bottom:1px dotted #d97706"'
+            + ' title="' + escHtml(numEstTitle) + '">≈ ' + escHtml(numEst) + ' est.</span>'
+          : '');
     const UF_FUENTE_LBL = {
       bci:   'exacto (BCI)',
       osm:   'estimado (OSM)',
@@ -2822,7 +2873,7 @@ async function loadParcelasMap(sid) {
           : '');
     const baseHtml =
       '<div style="font-size:.83rem;line-height:1.8;min-width:165px">' +
-      '<b>' + escHtml(addr) + '</b>' +
+      '<b>' + addrHtml + '</b>' +
       (p.barrio ? '<br><span style="color:#9ca3af">' + escHtml(p.barrio) + '</span>' : '') +
       '<br><span style="color:' + color + ';font-weight:700;text-transform:capitalize">' + escHtml(CAT_LABEL[cat] || uso) + '</span>' +
       (p.tipo_edificacion ? '<br><span style="color:#0ea5e9;font-weight:700;font-size:.8rem" title="Tipo de edificación (taxonomía del cliente)">🏢 ' + escHtml(p.tipo_edificacion) + '</span>' : '') +
