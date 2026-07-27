@@ -92,6 +92,7 @@ class HotelFetcherOutput(BaseModel):
     parcelas_con_hotel: int = 0
     total_uf_comercio: int = 0
     sin_habitaciones: int = 0        # abiertos sin habitaciones → asistencia humana
+    cadastur_enriquecidos: int = 0   # fichas de Cadastur que tomaron la altura de Receita
 
 
 def _norm(s: Optional[str]) -> str:
@@ -389,6 +390,55 @@ def _fetch_cadastur(mun_nombre: str, uf: str, client: httpx.Client) -> list[dict
     return hoteles
 
 
+def _enriquecer_cadastur_con_receita(engine, hoteles: list[dict]) -> int:
+    """Completa con Receita la altura que Cadastur no publica, por CNPJ.
+
+    Cadastur trae la columna `numero` vacía (en Várzea Grande, los 39 registros). Cuando la
+    altura tampoco viene embebida en el `logradouro`, la dirección queda como
+    «Filinto Müller, Centro-Norte» y eso rompe DOS cosas a la vez:
+
+      1. el geocoder resuelve sobre la calle sola y deja el pin a cientos de metros — REAL
+         VILLES quedó a 1.205 m y HOTEL TAINÁ a 698 m, los dos sobre el mismo punto genérico
+         de la avenida, que es la firma del problema;
+      2. `_clave_dir` no puede armar la clave `calle|número` (no se deduplica por calle sola,
+         a propósito), así que el criterio principal de `_mismo_hotel` tampoco corre y el
+         hotel entra duplicado cuando además cambió de CNPJ.
+
+    Receita tiene esa altura y comparte la clave. Se toma de ahí el domicilio fiscal
+    **completo** —logradouro, número y bairro— como unidad coherente, en vez de mezclar la
+    calle de una fuente con el número de la otra. Solo se toca la dirección: las UH, el
+    nombre y la situação siguen siendo los de Cadastur, que es la fuente autoritativa de eso.
+    """
+    faltan = {h["cnpj"]: h for h in hoteles
+              if h.get("cnpj") and not re.search(
+                  r"\d", f"{h.get('logradouro') or ''} {h.get('numero') or ''}")}
+    if not faltan:
+        return 0
+    with engine.connect() as conn:
+        filas = conn.execute(text("""
+            SELECT cnpj, tipo_logradouro, logradouro, numero, bairro
+              FROM receita_estabelecimentos_hospedagem
+             WHERE cnpj = ANY(:cnpjs)
+        """), {"cnpjs": list(faltan)}).fetchall()
+    n = 0
+    for f in filas:
+        # "S/N", "SN" y vacíos no aportan altura: se ignoran como si Receita no la tuviera.
+        if not re.search(r"\d", f.numero or ""):
+            continue
+        h = faltan.get(re.sub(r"\D", "", f.cnpj or "")[:20])
+        if not h:
+            continue
+        logr = " ".join(x for x in (f.tipo_logradouro, f.logradouro) if x) or h.get("logradouro")
+        h["logradouro"], h["numero"] = logr, f.numero
+        h["bairro"] = f.bairro or h.get("bairro")
+        h["direccion"] = " ".join(x for x in (logr, f.numero, h["bairro"]) if x) or None
+        n += 1
+    if n:
+        logger.info(f"Cadastur: {n} de {len(faltan)} ficha(s) sin altura completadas con el "
+                    f"domicilio fiscal de Receita (match por CNPJ)")
+    return n
+
+
 # ── Fuente: Receita (CNPJ; universo + situação cadastral; sin habitaciones) ────
 
 _CNAE_TIPO = {"5510801": "hotel", "5510802": "apart-hotel", "5510803": "motel",
@@ -595,6 +645,10 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 try:
                     hc = _fetch_cadastur(mun_nombre, uf, client)
                     out.por_fuente["cadastur"] = len(hc)
+                    # Cadastur no publica la altura. Se la toma de Receita por CNPJ ANTES de
+                    # geocodificar y de deduplicar, que son los dos pasos que sin número
+                    # fallan (ver `_enriquecer_cadastur_con_receita`).
+                    out.cadastur_enriquecidos = _enriquecer_cadastur_con_receita(engine, hc)
                     crudos.extend(hc)
                 except (httpx.HTTPError, RuntimeError) as e:
                     out.fuentes_fallidas["cadastur"] = str(e)
@@ -914,6 +968,20 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
 
         # Los updates de abajo van por hotel_id insertado (no por fuente): un grupo mergeado
         # puede conservar la fuente de una semilla que no corrió en este run (p.ej. cadastur).
+
+        # Ubicación corregida a MANO (mig. 049). Va PRIMERO, antes de vincular la parcela, para
+        # que el ST_Contains de abajo corra sobre la coordenada buena y el parcela_id salga
+        # bien solo. Necesario cuando la fuente no trae coordenada y el geocoder externo erra
+        # sobre la dirección fiscal (caso REAL VILLES: 419 m de desvío).
+        conn.execute(text("""
+            UPDATE hoteles h
+               SET location = COALESCE(ST_SetSRID(ST_MakePoint(m.lng, m.lat), 4326), h.location),
+                   direccion = COALESCE(m.direccion, h.direccion)
+            FROM hotel_ubicacion_manual m
+            WHERE h.hotel_id::text = ANY(:ids)
+              AND m.region_id = :rid AND h.cnpj = m.cnpj
+        """), {"rid": input.region_id, "ids": insertados})
+
         conn.execute(text("""
             UPDATE hoteles h SET parcela_id = p.parcela_id
             FROM parcelas p
@@ -938,6 +1006,13 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
               AND p.parcela_id = h.parcela_id
               AND p.calle IS NOT NULL
               AND p.direccion_source = ANY(:fuentes)
+              -- pero NO pisa una dirección corregida a mano (mig. 049): el catastro y la calle
+              -- pueden numerar distinto el mismo lote y ambas ser válidas (REAL VILLES es 750
+              -- para el BCI y 710 para la calle/correo); si el operador eligió una, manda.
+              AND NOT EXISTS (
+                    SELECT 1 FROM hotel_ubicacion_manual m
+                     WHERE m.region_id = h.region_id AND m.cnpj = h.cnpj
+                       AND m.direccion IS NOT NULL)
         """), {"ids": insertados, "fuentes": list(_FUENTES_DIR_AUTORITATIVAS)})
 
         # Enriquecer abierto/cerrado con el business_status de Google (comercios cercanos).
@@ -970,6 +1045,20 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             UPDATE hoteles SET cerrado_def = TRUE
             WHERE hotel_id::text = ANY(:ids) AND business_status = 'CLOSED_PERMANENTLY'
         """), {"ids": insertados})
+
+        # Abierto/cerrado forzado a MANO (mig. 048). Va DESPUÉS de todas las fuentes —el
+        # criterio humano gana— y ANTES de agregar `uf_comercio`, para que un hotel cerrado a
+        # mano deje de aportar UF a su parcela. Resuelve el CNPJ que Receita sigue dando ATIVA
+        # mucho después de que el hotel dejó de operar (caso MONTANA PALACE en Filinto Müller
+        # 1059, donde hoy opera el Zazori). `cerrado=false` permite además reabrir un hotel que
+        # una fuente cerró por error. La `nota` explica el por qué y se ve en el popup del mapa.
+        conn.execute(text("""
+            UPDATE hoteles h
+            SET cerrado_def = m.cerrado, nota = m.nota
+            FROM hotel_cerrado_manual m
+            WHERE h.hotel_id::text = ANY(:ids)
+              AND m.region_id = :rid AND h.cnpj = m.cnpj
+        """), {"rid": input.region_id, "ids": insertados})
 
         # Habitaciones cargadas a MANO (asistencia humana): rellenan donde no hay dato
         # exacto (Cadastur UHs / OSM rooms). Sobreviven a re-cortes (tabla por CNPJ).
