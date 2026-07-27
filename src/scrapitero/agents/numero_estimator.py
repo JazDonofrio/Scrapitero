@@ -32,14 +32,17 @@ posición→número): una calle es una línea y las alturas crecen de forma mon�
 `calles_descartadas`. Esas parcelas van al panel de incidencias como `numero_faltante`, donde el
 operador carga el número a mano mirando el frente.
 
-**Los números cargados a mano mandan:** al arrancar lee `parcela_numero_manual` (mig. 051, clave
-`(region_id, cca_code)` para sobrevivir al re-scrape) y los usa como **anclas** — mejoran la
-estimación de las vecinas — además de re-escribirlos con `metodo='manual'` y confianza 1,0, para
-que un re-run nunca pise el trabajo humano.
+**Las correcciones humanas mandan:** al arrancar **re-aplica** `parcela_direccion_manual`
+(mig. 052, clave `(region_id, cca_code)` — la inscrição es estable entre relevamientos, el
+`parcela_id` no) sobre las parcelas del alcance. Así una corrección hecha desde el panel de
+incidencias sobrevive a un re-scrape del BCI, que si no la pisaría con el dato viejo. Como el
+número corregido queda en `parcelas.numero`, además entra solo como **ancla** de la
+interpolación: cada número que carga el operador mejora la estimación de sus vecinas.
 
-**Nunca pisa el catastro:** escribe en `parcelas.numero_estimado` / `numero_estimado_metodo` /
-`numero_estimado_confianza` (mig. 050). `parcelas.numero` queda intacto, y la UI/CSV muestran el
-valor marcado como estimado. Idempotente por survey/región (recalcula y reescribe; limpia las
+**Nunca pisa el catastro con una inferencia:** escribe en `parcelas.numero_estimado` / `numero_estimado_metodo` /
+`numero_estimado_confianza` (mig. 050); `parcelas.numero` sólo lo cambia una corrección humana
+explícita (acción `direccion`/`numero` del panel, que además marca `direccion_source='manual'`).
+La UI/CSV muestran el valor inferido marcado como estimado. Idempotente por survey/región (recalcula y reescribe; limpia las
 parcelas que ya no aplican). `dry_run=True` devuelve el detalle sin tocar la DB.
 """
 
@@ -86,6 +89,8 @@ class NumeroEstimatorOutput(BaseModel):
     estimadas: int = 0
     sin_estimar: int = 0
     calles: int = 0                # calles con al menos una estimación
+    # correcciones de dirección del operador re-aplicadas al arrancar (mig. 052)
+    overrides_reaplicados: int = 0
     por_metodo: dict = {}
     # calles salteadas y por qué: {calle: 'pocas_anclas' | 'numeracion_incoherente:0.42' | 'sin_eje'}
     calles_descartadas: dict = {}
@@ -302,6 +307,29 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
     scope = "p.survey_id::text = :sid" if input.survey_id else "p.region_id = :rid"
     params = {"sid": input.survey_id} if input.survey_id else {"rid": input.region_id}
 
+    # Correcciones de dirección hechas a mano por el operador (mig. 052). Se RE-APLICAN antes
+    # de estimar: son trabajo humano y un re-scrape del BCI las habría pisado con el dato viejo.
+    # Como quedan en `parcelas.numero`, después entran solas como anclas de la interpolación —
+    # cada número que carga el operador mejora la estimación de sus vecinas.
+    with engine.begin() as conn:
+        out.overrides_reaplicados = conn.execute(text(f"""
+            UPDATE parcelas p SET
+                calle = COALESCE(m.calle, p.calle),
+                numero = COALESCE(m.numero, p.numero),
+                complemento = COALESCE(m.complemento, p.complemento),
+                barrio = COALESCE(m.barrio, p.barrio),
+                codigo_postal = COALESCE(m.codigo_postal, p.codigo_postal),
+                direccion_source = 'manual'
+            FROM parcela_direccion_manual m
+            WHERE m.region_id = p.region_id AND m.cca_code = p.cca_code
+              AND {scope}
+              AND (p.calle IS DISTINCT FROM COALESCE(m.calle, p.calle)
+                OR p.numero IS DISTINCT FROM COALESCE(m.numero, p.numero)
+                OR p.complemento IS DISTINCT FROM COALESCE(m.complemento, p.complemento)
+                OR p.barrio IS DISTINCT FROM COALESCE(m.barrio, p.barrio)
+                OR p.codigo_postal IS DISTINCT FROM COALESCE(m.codigo_postal, p.codigo_postal))
+        """), params).rowcount or 0
+
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT p.parcela_id::text, p.calle, p.numero, p.centroid_lat, p.centroid_lng,
@@ -310,12 +338,6 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
             WHERE {scope} AND p.calle IS NOT NULL AND p.calle <> ''
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
         """), params).fetchall()
-        # Números cargados a mano por el operador desde el panel de incidencias (mig. 051).
-        # Son trabajo humano: valen MÁS que cualquier interpolación. Entran como anclas (mejoran
-        # la estimación de sus vecinas) y se re-escriben al final para que un re-run no los pise.
-        manual = {c: n for c, n in conn.execute(text(
-            "SELECT cca_code, numero FROM parcela_numero_manual WHERE region_id = :r"),
-            {"r": input.region_id or (rows[0][7] if rows else None)}).fetchall()}
 
     if not rows:
         return NumeroEstimatorOutput(ok=False, survey_id=input.survey_id,
@@ -335,19 +357,12 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
         g = por_calle[nuc]
         g["raw"] = g["raw"] or calle
         num = normalizar_numero(numero)          # '' cubre NULL, '', '0', 'S/N'
-        if not num and cca and cca in manual:
-            # Cargado a mano: ancla (no target) y se re-aplica tal cual.
-            num = normalizar_numero(manual[cca])
-            if num:
-                updates.append((pid, str(manual[cca]).strip()[:20], "manual", 1.0))
         if num:
             g["anclas"].append((int(num), float(lat), float(lng)))
         else:
             g["targets"].append((pid, float(lat), float(lng), cca, calle))
 
-    # `candidatas` = las que siguen sin número (las cargadas a mano ya están resueltas y
-    # entraron como anclas, pero cuentan como estimadas por método 'manual').
-    out.candidatas = sum(len(g["targets"]) for g in por_calle.values()) + len(updates)
+    out.candidatas = sum(len(g["targets"]) for g in por_calle.values())
     if not out.candidatas:
         logger.info("NumeroEstimator: no hay parcelas sin número en el alcance")
         return out
@@ -365,7 +380,7 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
             logger.warning(f"NumeroEstimator: ejes OSM no disponibles ({exc}); se usa PCA")
             geoms = {}
 
-    por_metodo: Counter = Counter({"manual": len(updates)}) if updates else Counter()
+    por_metodo: Counter = Counter()
     calles_ok = 0
 
     for cn, g in por_calle.items():

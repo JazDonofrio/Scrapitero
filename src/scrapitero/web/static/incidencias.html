@@ -130,13 +130,13 @@ const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
 // Metadata por tipo: etiqueta, color del marcador y qué acciones ofrece la tarjeta.
 const TIPOS = {
   hotel_sin_habitaciones: {label:'🏨 Hoteles sin habitaciones', color:'#7c3aed',
-                           acciones:['habitaciones','cerrado','no_es_hotel']},
-  altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['tipo_edificacion','uf']},
-  altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['tipo_edificacion','uf']},
-  uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['uf']},
+                           acciones:['habitaciones','cerrado','no_es_hotel','direccion']},
+  altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['tipo_edificacion','uf','direccion']},
+  altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['tipo_edificacion','uf','direccion']},
+  uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['uf','direccion']},
   // El catastro no trae el número de puerta y la interpolación se negó a estimarlo (calle con
   // numeración incoherente). Sólo se resuelve mirando el frente: se carga a mano.
-  numero_faltante:        {label:'🔢 Sin número',    color:'#0ea5e9', acciones:['numero']},
+  numero_faltante:        {label:'🔢 Sin número',    color:'#0ea5e9', acciones:['numero','direccion']},
   // Ubicación dudosa del relevamiento anterior: se revisa ANTES de dibujar la zona (si el
   // punto está mal, la zona sale mal). No hay acción de corrección automática: el operador
   // verifica en el mapa / Google Maps y descarta si está bien.
@@ -145,13 +145,20 @@ const TIPOS = {
 const tipoMeta = t => TIPOS[t] || {label:t, color:'#94a3b8', acciones:[]};
 
 let TIPOS_HTML = '';
+// Mismo catálogo agrupado, pero con el tipo ACTUAL preseleccionado (form de corrección).
+let TIPOS_GRUPOS = [];
 async function cargarTipos(){
   try{ const d = await fetch('/api/tipos-edificacion').then(r=>r.json());
-    if(d.ok){ TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
+    if(d.ok){ TIPOS_GRUPOS = d.grupos || [];
+      TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
       d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+
         g.tipos.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')+'</optgroup>').join(''); }
   }catch(e){}
 }
+const tiposOptions = (sel) => '<option value="">— sin cambiar —</option>' +
+  TIPOS_GRUPOS.map(g=>`<optgroup label="${esc(g.titulo)}">`+
+    g.tipos.map(t=>`<option value="${esc(t)}"${t===sel?' selected':''}>${esc(t)}</option>`).join('')
+    +'</optgroup>').join('');
 
 let baselinePts = [], markers = {}, pendientes = 0;
 function nearestBaseline(lat,lng){
@@ -243,12 +250,66 @@ const ACC_DEF = {
                                 + `<button class="warn">Marcar cerrado</button>` },
   numero:           { link: '🔢 Cargar número',
                       form: () => `<input placeholder="nº de puerta"><button>Guardar</button>` },
+  // Corregir TODAS las variables de la dirección. El form se completa al abrirlo con los
+  // valores actuales de la parcela (GET /api/parcelas/{id}): el operador corrige sobre lo que
+  // hay, y lo que deje igual no se toca.
+  direccion:        { link: '✏️ Corregir dirección', color: '#38bdf8',
+                      form: () => `<div class="dirform" style="width:100%">`
+                        + `<div class="mut" style="margin-bottom:4px">Cargando datos…</div></div>` },
   no_es_hotel:      { link: '🚫 No es hotel',
                       form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Confirmar</button>` },
   descartar:        { link: '✖ No es un problema', color: '#94a3b8',
                       form: () => `<textarea placeholder="por qué no es un problema (opcional)"></textarea>`
                                 + `<button class="gris">Descartar</button>` },
 };
+
+// Trae los valores actuales de la parcela y arma los campos editables. El operador corrige
+// sobre lo que hay; lo que deja igual se manda igual y no cambia nada. Sin parcela (p.ej.
+// `geocoding_dudoso`, que apunta al relevamiento anterior) no hay nada que corregir acá.
+async function llenarFormDireccion(row, parcelaId, onSubmit){
+  const cont = row.querySelector('.dirform');
+  if(!cont || cont.dataset.listo) return;
+  if(!parcelaId){ cont.innerHTML = '<div class="mut">Esta incidencia no está asociada a una parcela.</div>'; return; }
+  let d;
+  try{ d = await fetch('/api/parcelas/'+parcelaId).then(r=>r.json()); }catch(e){ d = null; }
+  if(!d || !d.ok){ cont.innerHTML = '<div class="mut">No se pudieron cargar los datos.</div>'; return; }
+  const inp = (n,lbl,v,extra='') => `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">`
+    + `${esc(lbl)}<input name="${n}" value="${esc(v??'')}" ${extra} style="width:100%"></label>`;
+  const opts = tiposOptions(d.tipo_edificacion);
+  cont.innerHTML =
+    `<div style="display:grid;grid-template-columns:2fr 1fr;gap:6px">`
+    + inp('calle','Calle', d.calle) + inp('numero','Número', d.numero) + `</div>`
+    + `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:5px">`
+    + inp('complemento','Complemento', d.complemento) + inp('barrio','Bairro', d.barrio)
+    + inp('codigo_postal','CEP', d.codigo_postal) + `</div>`
+    + `<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;margin-top:5px">`
+    + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Tipo de edificación`
+    + `<select name="tipo_edificacion" style="width:100%">${opts}</select></label>`
+    + inp('uf_vivienda','UF vivienda', d.uf_vivienda, 'type="number" min="0"')
+    + inp('uf_comercio','UF comercio', d.uf_comercio, 'type="number" min="0"') + `</div>`
+    + `<div class="row" style="margin-top:6px">`
+    + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
+    + `<button>Guardar dirección</button></div>`
+    + `<div class="mut" style="margin-top:4px;font-size:.68rem">Origen actual: `
+    + `dirección «${esc(d.direccion_source||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
+    + (d.numero_estimado ? ` · nº estimado ≈${esc(d.numero_estimado)}` : '') + `</div>`;
+  cont.dataset.listo = '1';
+  // El botón se crea recién ahora (el form llega por fetch), así que se cablea acá y no en el
+  // loop de acciones del card, que corrió antes de que existiera.
+  cont.querySelectorAll('.row').forEach(r => r.onclick = (e)=>e.stopPropagation());
+  const btn = cont.querySelector('button');
+  if(btn) btn.onclick = (e)=>{ e.stopPropagation(); onSubmit(btn); };
+}
+
+// Lee el form de corrección y arma el payload: sólo los campos con valor. `resolver` aplica
+// cada uno en su tabla de override (dirección / tipo / UF).
+function payloadDireccion(row){
+  const g = k => { const el=row.querySelector(`[name="${k}"]`); return el ? el.value.trim() : ''; };
+  const p = {};
+  ['calle','numero','complemento','barrio','codigo_postal','tipo_edificacion',
+   'uf_vivienda','uf_comercio'].forEach(k=>{ const v=g(k); if(v!=='') p[k]=v; });
+  return {payload:p, nota:g('nota_dir')||null};
+}
 
 function accionesHtml(t){
   const acc = [...tipoMeta(t).acciones, 'descartar'];
@@ -327,6 +388,12 @@ async function load(){
         ? `<div style="margin-top:6px"><a href="#" class="acc-tog reabrir-lnk"
              style="color:#0ea5e9">↩ Reabrir / corregir</a></div>` : '')+
       (editable?accionesHtml(it.tipo):'');
+    // Guardado del form de corrección de dirección (se cablea cuando el form ya existe).
+    const submitDir = (row) => (btn) => {
+      const {payload, nota} = payloadDireccion(row);
+      if(!Object.keys(payload).length){ alert('No cambiaste ningún campo'); return; }
+      resolver(it.incidencia_id,'direccion',payload,nota,btn,card);
+    };
     // Cablear acciones
     card.querySelectorAll('.row').forEach(row=>{
       row.onclick=(e)=>e.stopPropagation();
@@ -370,8 +437,15 @@ async function load(){
     card.querySelectorAll('.acc-tog:not(.reabrir-lnk)').forEach(tog=>{
       tog.onclick=(e)=>{ e.preventDefault(); e.stopPropagation();
         const row=card.querySelector(`.row[data-a="${tog.dataset.t}"]`);
-        if(row) row.style.display = row.style.display==='none' ? 'flex' : 'none'; };
+        if(!row) return;
+        const abriendo = row.style.display==='none';
+        row.style.display = abriendo ? 'flex' : 'none';
+        if(abriendo && tog.dataset.t==='direccion') llenarFormDireccion(row, it.parcela_id, submitDir(row));
+      };
     });
+    // si el form de dirección quedó abierto de entrada (único de su tipo), llenarlo ya
+    const rowDir = card.querySelector('.row[data-a="direccion"]');
+    if(rowDir && rowDir.style.display!=='none') llenarFormDireccion(rowDir, it.parcela_id, submitDir(rowDir));
     if(it.lat!=null){
       const mk=L.circleMarker([it.lat,it.lng],{radius:8,color:meta.color,fillColor:meta.color,
         fillOpacity:.5,weight:2}).addTo(map).bindPopup(`${esc(it.titulo)}`);

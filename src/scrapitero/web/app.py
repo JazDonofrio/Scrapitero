@@ -1543,6 +1543,81 @@ async def reabrir_incidencia(incidencia_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "estado": "pendiente", "tipo": row[0], "nota": row[1]})
 
 
+# Campos de la dirección que el operador puede corregir desde una incidencia. El valor va a
+# `parcelas` (dato vigente del relevamiento) + `parcela_direccion_manual` (respaldo durable).
+_CAMPOS_DIRECCION = ("calle", "numero", "complemento", "barrio", "codigo_postal")
+
+
+@app.get("/api/parcelas/{parcela_id}")
+async def get_parcela_editable(parcela_id: str) -> JSONResponse:
+    """Valores actuales de una parcela para precargar el formulario de corrección.
+
+    Devuelve la dirección + las variables derivadas que también se editan desde la tarjeta
+    (tipo de edificación y UF), para que el operador vea qué está cambiando."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        r = conn.execute(text("""
+            SELECT p.parcela_id::text, p.cca_code, p.calle, p.numero, p.complemento, p.barrio,
+                   p.codigo_postal, p.uso_principal, p.uf_vivienda, p.uf_comercio, p.uf_fuente,
+                   p.direccion_source, p.numero_estimado, p.numero_estimado_metodo,
+                   p.area_m2_terreno, p.area_m2_construida,
+                   ptm.tipo_edificacion,
+                   COALESCE((SELECT h.tipo FROM hoteles h
+                       WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
+                       ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
+                   p.descripcion_uso
+            FROM parcelas p
+            LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
+            WHERE p.parcela_id = CAST(:p AS uuid)
+        """), {"p": parcela_id}).fetchone()
+    if not r:
+        return JSONResponse({"ok": False, "error": "Parcela no encontrada"}, status_code=404)
+    uf_v, uf_c = r[8], r[9]
+    return JSONResponse({
+        "ok": True, "parcela_id": r[0], "cca_code": r[1] or "",
+        "calle": r[2] or "", "numero": r[3] or "", "complemento": r[4] or "",
+        "barrio": r[5] or "", "codigo_postal": r[6] or "",
+        "uso_principal": r[7] or "", "uf_vivienda": uf_v, "uf_comercio": uf_c,
+        "uf_fuente": r[10] or "", "direccion_source": r[11] or "",
+        "numero_estimado": r[12] or "", "numero_estimado_metodo": r[13] or "",
+        # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro)
+        "tipo_edificacion": _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]) or "",
+        "tipo_manual": r[16] or "",
+    })
+
+
+def _guardar_direccion_manual(conn, parcela_id: str, campos: dict, nota: Optional[str]) -> int:
+    """Aplica la corrección de dirección a `parcelas` y la respalda en `parcela_direccion_manual`.
+
+    Sólo toca los campos presentes en `campos` (los vacíos = "no lo toqué"). Marca
+    `direccion_source='manual'` para no perder el lineage: la dirección dejó de ser la que
+    publicó el municipio. Devuelve la cantidad de campos aplicados."""
+    campos = {k: v for k, v in campos.items() if k in _CAMPOS_DIRECCION and v is not None}
+    if not campos:
+        return 0
+    sets = ", ".join(f"{k} = :{k}" for k in campos)
+    conn.execute(text(f"UPDATE parcelas SET {sets}, direccion_source = 'manual' "
+                      f"WHERE parcela_id = CAST(:p AS uuid)"),
+                 {**campos, "p": parcela_id})
+    row = conn.execute(text(
+        "SELECT region_id, cca_code FROM parcelas WHERE parcela_id = CAST(:p AS uuid)"),
+        {"p": parcela_id}).fetchone()
+    # Respaldo durable por inscrição: sobrevive al re-scrape del BCI, donde el parcela_id
+    # cambia. Sin cca_code la corrección igual queda aplicada en la parcela.
+    if row and row[1]:
+        cols = ", ".join(campos)
+        vals = ", ".join(f":{k}" for k in campos)
+        upd = ", ".join(f"{k} = :{k}" for k in campos)
+        conn.execute(text(f"""
+            INSERT INTO parcela_direccion_manual
+                (region_id, cca_code, {cols}, nota, autor, parcela_id)
+            VALUES (:r, :c, {vals}, :nota, 'operador', CAST(:p AS uuid))
+            ON CONFLICT (region_id, cca_code) DO UPDATE SET
+                {upd}, nota = :nota, parcela_id = CAST(:p AS uuid), actualizado_at = now()
+        """), {**campos, "r": row[0], "c": row[1], "nota": nota, "p": parcela_id})
+    return len(campos)
+
+
 @app.post("/api/incidencias/{incidencia_id}/resolver")
 async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONResponse:
     """Aplica la resolución del operador y cierra la incidencia.
@@ -1673,35 +1748,71 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
             """), {"p": parcela_id, "uv": uf_v, "uc": uf_c})
 
         elif accion == "numero":
-            # Número de puerta cargado a mano (tipo `numero_faltante`): el catastro no lo trae y
-            # la interpolación se negó a inventarlo. Va a `numero_estimado` con método 'manual'
-            # y confianza 1,0 — `parcelas.numero` es lo que publicó el municipio y no se toca.
+            # Atajo de las tarjetas `numero_faltante`: cargar sólo el número. Misma escritura
+            # que `direccion` — el número corregido a mano ES la dirección vigente y tiene que
+            # llegar al CSV, al CSV Operadora y al apareo contra el relevamiento anterior.
             num = str(valor or "").strip()[:20]
             if not num or not any(ch.isdigit() for ch in num):
                 return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
             if not parcela_id:
                 return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
                                     status_code=400)
-            conn.execute(text("""
-                UPDATE parcelas SET numero_estimado = :n, numero_estimado_metodo = 'manual',
-                       numero_estimado_confianza = 1.0
-                WHERE parcela_id = CAST(:p AS uuid)
-            """), {"n": num, "p": parcela_id})
-            # Override durable por inscrição (mig. 051): sobrevive al re-scrape, donde el
-            # `parcela_id` cambia pero el `cca_code` no. Sin cca_code sólo queda en la parcela.
-            row_cca = conn.execute(text(
-                "SELECT region_id, cca_code FROM parcelas WHERE parcela_id = CAST(:p AS uuid)"),
-                {"p": parcela_id}).fetchone()
-            if row_cca and row_cca[1]:
+            _guardar_direccion_manual(conn, parcela_id, {"numero": num}, nota)
+
+        elif accion == "direccion":
+            # Corrección de la dirección COMPLETA + las variables derivadas que muestra la web.
+            # Cada concepto va a su tabla de override: dirección → parcela_direccion_manual,
+            # tipo → parcela_tipo_manual, UF → parcela_uf_manual. Así no hay dos lugares donde
+            # se guarde lo mismo y un re-scrape puede re-aplicar todo.
+            if not parcela_id:
+                return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
+                                    status_code=400)
+            v = valor if isinstance(valor, dict) else {}
+            campos = {k: str(v[k]).strip()[:200] for k in _CAMPOS_DIRECCION
+                      if v.get(k) is not None and str(v[k]).strip() != ""}
+            if campos.get("numero") and not any(c.isdigit() for c in campos["numero"]):
+                return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
+            aplicados = _guardar_direccion_manual(conn, parcela_id, campos, nota)
+
+            tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
+            if tipo_ed:
+                if tipo_ed not in _TIPO_CATEGORIA:
+                    return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
+                                        status_code=400)
                 conn.execute(text("""
-                    INSERT INTO parcela_numero_manual
-                        (region_id, cca_code, numero, nota, autor, parcela_id)
-                    VALUES (:r, :c, :n, :nota, 'operador', CAST(:p AS uuid))
-                    ON CONFLICT (region_id, cca_code) DO UPDATE SET
-                        numero = :n, nota = :nota, parcela_id = CAST(:p AS uuid),
-                        actualizado_at = now()
-                """), {"r": row_cca[0], "c": row_cca[1], "n": num, "nota": nota,
-                       "p": parcela_id})
+                    INSERT INTO parcela_tipo_manual (parcela_id, tipo_edificacion, categoria, autor)
+                    VALUES (CAST(:p AS uuid), :t, :cat, 'operador')
+                    ON CONFLICT (parcela_id) DO UPDATE SET
+                        tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
+                """), {"p": parcela_id, "t": tipo_ed, "cat": _TIPO_CATEGORIA[tipo_ed]})
+                aplicados += 1
+
+            if v.get("uf_vivienda") not in (None, "") or v.get("uf_comercio") not in (None, ""):
+                try:
+                    uf_v = int(v.get("uf_vivienda") or 0)
+                    uf_c = int(v.get("uf_comercio") or 0)
+                except (ValueError, TypeError):
+                    return JSONResponse({"ok": False, "error": "uf_vivienda/uf_comercio inválidos"},
+                                        status_code=400)
+                if uf_v < 0 or uf_c < 0:
+                    return JSONResponse({"ok": False, "error": "las UF deben ser ≥ 0"},
+                                        status_code=400)
+                conn.execute(text("""
+                    UPDATE parcelas SET uf_vivienda = :uv, uf_comercio = :uc,
+                           unidades_funcionales_estimadas = :ut, uf_fuente = 'manual'
+                    WHERE parcela_id = CAST(:p AS uuid)
+                """), {"uv": uf_v, "uc": uf_c, "ut": uf_v + uf_c, "p": parcela_id})
+                conn.execute(text("""
+                    INSERT INTO parcela_uf_manual (parcela_id, uf_vivienda, uf_comercio, autor)
+                    VALUES (CAST(:p AS uuid), :uv, :uc, 'operador')
+                    ON CONFLICT (parcela_id) DO UPDATE SET
+                        uf_vivienda = :uv, uf_comercio = :uc, actualizado_at = now()
+                """), {"p": parcela_id, "uv": uf_v, "uc": uf_c})
+                aplicados += 1
+
+            if not aplicados:
+                return JSONResponse({"ok": False, "error": "no enviaste ningún cambio"},
+                                    status_code=400)
 
         elif accion == "descartar":
             estado_final = "descartada"
