@@ -35,6 +35,12 @@
     .row button.warn{background:var(--warn);color:#3b2705} .row button.gris{background:#475569;color:#e2e8f0}
     .row button:disabled{opacity:.5;cursor:default}
     .acc-tog{color:var(--warn);font-size:.75rem;text-decoration:none;margin-right:10px}
+    /* Marcar la coordenada en el mapa: es la acción principal del bloque, va ancha y visible.
+       Vive fuera de `.row`, así que no hereda el estilo de los botones de acción. */
+    .mover-btn{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #38bdf8;
+      background:#0b2b3d;color:#7dd3fc;font-weight:700;cursor:pointer;font-size:.8rem}
+    .mover-btn:hover{background:#123c53}
+    .mover-btn.picking{background:#38bdf8;color:#04293b;border-color:#38bdf8}
     #map{flex:1}
     .tag{display:inline-block;font-size:.66rem;padding:1px 6px;border-radius:10px;background:#334155;color:#cbd5e1;margin-left:4px}
     .tag.est{background:#14532d;color:#bbf7d0}
@@ -260,24 +266,66 @@ const ACC_DEF = {
 };
 
 // ── Mover el punto en el mapa ───────────────────────────────────────────────────────────
-// Marcador arrastrable, uno solo a la vez. Al soltarlo escribe lat/lng en los inputs del
-// formulario abierto: el operador ubica mirando el satélite y guarda con el resto de los
-// campos, en el mismo botón.
-let dragMk = null;
-function activarArrastre(row, lat, lng){
-  if(dragMk){ map.removeLayer(dragMk); dragMk = null; }
-  const inLat = row.querySelector('[name="lat"]'), inLng = row.querySelector('[name="lng"]');
-  const p0 = [lat!=null?lat:map.getCenter().lat, lng!=null?lng:map.getCenter().lng];
-  dragMk = L.marker(p0, {draggable:true, autoPan:true, zIndexOffset:1000}).addTo(map)
-    .bindTooltip('Arrastrame a la posición correcta', {permanent:true, direction:'top'});
-  const set = (ll)=>{ inLat.value = ll.lat.toFixed(6); inLng.value = ll.lng.toFixed(6);
-                      const av = row.querySelector('.coord-aviso');
-                      if(av) av.textContent = '📍 Punto movido — se guarda con el botón de abajo.'; };
-  dragMk.on('dragend', ()=>set(dragMk.getLatLng()));
-  map.setView(p0, Math.max(map.getZoom(), 19));
-  set(dragMk.getLatLng());
+// ── Marcar la coordenada EN EL MAPA ─────────────────────────────────────────────────────
+// Modo de selección: se clickea directo sobre el satélite donde va el punto (y después se
+// puede afinar arrastrando el pin). Escribir lat/lng a mano sigue disponible, pero es el
+// camino secundario: nadie tipea coordenadas mirando una foto aérea.
+// Uno solo activo a la vez — el estado vive acá y no en la tarjeta, porque el mapa es único.
+let pick = null;   // {mk, row, btn, onClick, capas}
+
+function _pickSet(ll){
+  if(!pick) return;
+  pick.row.querySelector('[name="lat"]').value = ll.lat.toFixed(6);
+  pick.row.querySelector('[name="lng"]').value = ll.lng.toFixed(6);
+  if(!pick.mk){
+    pick.mk = L.marker(ll, {draggable:true, autoPan:true, zIndexOffset:1000}).addTo(map);
+    pick.mk.on('dragend', ()=>_pickSet(pick.mk.getLatLng()));
+  } else pick.mk.setLatLng(ll);
+  pick.mk.bindTooltip('Arrastrame para afinar', {permanent:true, direction:'top'}).openTooltip();
+  const av = pick.row.querySelector('.coord-aviso');
+  if(av) av.innerHTML = '📍 Punto marcado — clickeá de nuevo para corregirlo. '
+                      + 'Se guarda con «Guardar cambios».';
 }
-function limpiarArrastre(){ if(dragMk){ map.removeLayer(dragMk); dragMk = null; } }
+
+function activarSeleccionMapa(row, lat, lng, btn){
+  const yaActivo = pick && pick.row === row;
+  salirSeleccionMapa();
+  if(yaActivo) return;                       // el botón alterna: segundo click apaga el modo
+  pick = {mk:null, row, btn, onClick:(e)=>_pickSet(e.latlng), capas:[]};
+  map.on('click', pick.onClick);
+  // Leaflet NO propaga al mapa el click que cae sobre una capa interactiva, y el mapa está
+  // lleno de marcadores (las incidencias y los puntos del relevamiento anterior). Sin esto,
+  // clickear justo encima de uno abre su popup en vez de marcar el punto — y son justamente
+  // esos puntos los que uno quiere reubicar. Se engancha el mismo handler en cada capa
+  // mientras dure el modo, y se desengancha al salir.
+  map.eachLayer(l => {
+    if((l instanceof L.CircleMarker || l instanceof L.Marker) && l !== pick.mk){
+      l.on('click', pick.onClick); pick.capas.push(l);
+    }
+  });
+  map.getContainer().style.cursor = 'crosshair';
+  if(btn){ btn.textContent = '✓ Listo'; btn.classList.add('picking'); }
+  const av = row.querySelector('.coord-aviso');
+  if(av) av.innerHTML = '<b style="color:#38bdf8">Clickeá en el mapa</b> dónde va el punto.';
+  // Acercar a lo que hay hoy, para que el click caiga sobre la construcción y no a ciegas.
+  if(lat!=null && lng!=null){
+    map.setView([lat,lng], Math.max(map.getZoom(), 19));
+    _pickSet(L.latLng(lat,lng));             // pin de arranque en la posición actual
+    const av2 = row.querySelector('.coord-aviso');
+    if(av2) av2.innerHTML = '<b style="color:#38bdf8">Clickeá en el mapa</b> dónde va el punto '
+                          + '(o arrastrá el pin).';
+  }
+}
+
+function salirSeleccionMapa(){
+  if(!pick) return;
+  if(pick.mk) map.removeLayer(pick.mk);
+  map.off('click', pick.onClick);
+  (pick.capas||[]).forEach(l => l.off('click', pick.onClick));
+  map.getContainer().style.cursor = '';
+  if(pick.btn){ pick.btn.textContent = '📍 Marcar en el mapa'; pick.btn.classList.remove('picking'); }
+  pick = null;
+}
 
 // Trae los valores actuales y arma TODOS los campos editables de la ubicación. El operador
 // corrige sobre lo que hay; lo que deja igual no se manda y no se toca. Un único botón guarda
@@ -288,14 +336,19 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
   if(!cont || cont.dataset.listo) return;
   const inp = (n,lbl,v,extra='') => `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">`
     + `${esc(lbl)}<input name="${n}" value="${esc(v??'')}" ${extra} style="width:100%"></label>`;
+  // La ubicación se marca EN EL MAPA: el botón va primero y ancho, y los campos numéricos
+  // quedan abajo como salida/ajuste fino (se llenan solos al clickear).
   const bloqueCoord = (lat,lng,fuente) =>
       `<div style="margin-top:7px;padding-top:6px;border-top:1px dashed #3b4860">`
-    + `<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:end">`
+    + `<div style="font-size:.68rem;color:var(--mut);margin-bottom:4px">Ubicación en el mapa</div>`
+    + `<button type="button" class="mover-btn">📍 Marcar en el mapa</button>`
+    + `<div class="mut coord-aviso" style="margin:4px 0;font-size:.68rem">`
+    + (fuente==='manual' ? 'Coordenada ya corregida a mano.'
+                         : 'Clickeá el botón y después el punto exacto sobre el satélite.')
+    + `</div>`
+    + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">`
     + inp('lat','Latitud', lat!=null?Number(lat).toFixed(6):'', 'type="number" step="any"')
     + inp('lng','Longitud', lng!=null?Number(lng).toFixed(6):'', 'type="number" step="any"')
-    + `<button type="button" class="gris mover-btn" title="Arrastrar el punto sobre el mapa">📍 Mover</button></div>`
-    + `<div class="mut coord-aviso" style="margin-top:3px;font-size:.68rem">`
-    + (fuente==='manual' ? 'Coordenada ya corregida a mano.' : 'Arrastrá el punto o escribí las coordenadas.')
     + `</div></div>`;
 
   // Las habitaciones sólo existen si el caso trae un hotel.
@@ -355,7 +408,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
   if(mover) mover.onclick = (e)=>{ e.preventDefault(); e.stopPropagation();
     const g = k => parseFloat((cont.querySelector(`[name="${k}"]`)||{}).value);
     const la = g('lat'), ln = g('lng');
-    activarArrastre(cont, isNaN(la)?(ctx&&ctx.lat):la, isNaN(ln)?(ctx&&ctx.lng):ln);
+    activarSeleccionMapa(cont, isNaN(la)?(ctx&&ctx.lat):la, isNaN(ln)?(ctx&&ctx.lng):ln, mover);
   };
   const btn = cont.querySelector('.row button');
   if(btn) btn.onclick = (e)=>{ e.stopPropagation(); onSubmit(btn); };
@@ -402,7 +455,7 @@ function renderFiltros(resumen){
 }
 
 async function load(){
-  limpiarArrastre();          // la lista se re-arma: el marcador de arrastre queda huérfano
+  salirSeleccionMapa();          // la lista se re-arma: el pin de selección queda huérfano
   if(!TIPOS_HTML) await cargarTipos();
   const q = new URLSearchParams({estado:filtroEstado}); if(filtroTipo) q.set('tipo', filtroTipo);
   const d = await fetch(`/api/surveys/${SID}/incidencias?`+q).then(r=>r.json());
@@ -461,7 +514,7 @@ async function load(){
     const submitDir = (row) => (btn) => {
       const {payload, nota} = payloadDireccion(row);
       if(!Object.keys(payload).length){ alert('No cambiaste ningún campo'); return; }
-      limpiarArrastre();
+      salirSeleccionMapa();
       resolver(it.incidencia_id,'ubicacion',payload,nota,btn,card);
     };
     // Cablear acciones
@@ -498,7 +551,7 @@ async function load(){
         const abriendo = row.style.display==='none';
         row.style.display = abriendo ? 'flex' : 'none';
         if(abriendo && tog.dataset.t==='editar') llenarFormDireccion(row, it.parcela_id, submitDir(row), ctxEdit);
-        if(!abriendo && tog.dataset.t==='editar') limpiarArrastre();
+        if(!abriendo && tog.dataset.t==='editar') salirSeleccionMapa();
       };
     });
     // si el editor quedó abierto de entrada (primera acción del tipo), llenarlo ya
