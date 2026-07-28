@@ -357,39 +357,53 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
       + inp('habitaciones','Habitaciones del hotel', ctx.habitaciones ?? '', 'type="number" min="0"')
       + `</div>` : '';
 
-  // Sin parcela: la coordenada (del hotel o de la dirección anterior) + habitaciones si es hotel.
-  // 16 de los 20 hoteles sin habitaciones NO tienen parcela vinculada, así que este camino tiene
-  // que seguir permitiendo cargarlas.
+  // Etiqueta + UF: mismos campos para parcela y para dirección del relevamiento anterior; lo
+  // único que cambia es contra qué fila se guardan.
+  const bloqueTipoUf = (tipo, ufv, ufc) =>
+      `<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;margin-top:5px">`
+    + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Tipo de edificación`
+    + `<select name="tipo_edificacion" style="width:100%">${tiposOptions(tipo)}</select></label>`
+    + inp('uf_vivienda','UF vivienda', ufv, 'type="number" min="0"')
+    + inp('uf_comercio','UF comercio', ufc, 'type="number" min="0"') + `</div>`;
+
+  // Sin parcela: la coordenada (del hotel o de la dirección anterior) + habitaciones si es
+  // hotel + etiqueta/UF si el caso apunta al relevamiento anterior. 16 de los 20 hoteles sin
+  // habitaciones NO tienen parcela vinculada, así que este camino tiene que seguir
+  // permitiendo cargarlas.
   if(!parcelaId){
+    const bid = ctx && ctx.baseline_direccion_id;
+    let b = null;
+    if(bid){ try{ b = await fetch('/api/baseline-direcciones/'+bid).then(r=>r.json()); }catch(e){} }
+    if(b && !b.ok) b = null;
     cont.innerHTML =
       `<div class="mut" style="font-size:.72rem">`
       + (ctx && ctx.hotel_id
           ? `Este hotel no está vinculado a ninguna parcela. Se puede corregir su ubicación —al `
             + `moverlo se re-vincula solo con la parcela que lo contenga— y sus habitaciones.`
           : `Esta incidencia no tiene parcela del relevamiento nuevo: apunta a una dirección del `
-            + `relevamiento anterior. Lo que se corrige es dónde está.`)
+            + `relevamiento anterior, y se corrige sobre ella.`)
       + `</div>`
       + campoHab
-      + bloqueCoord(ctx && ctx.lat, ctx && ctx.lng, '')
+      + (b ? bloqueTipoUf(b.tipo_edificacion, b.uf_vivienda, b.uf_comercio) : '')
+      + bloqueCoord(b ? b.lat : (ctx && ctx.lat), b ? b.lng : (ctx && ctx.lng), '')
       + `<div class="row" style="margin-top:6px">`
       + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
-      + `<button>💾 Guardar cambios</button></div>`;
+      + `<button>💾 Guardar cambios</button></div>`
+      + (b ? `<div class="mut" style="margin-top:4px;font-size:.68rem">Relevamiento anterior: `
+             + `«${esc(b.direccion_raw)}» · uso «${esc(b.uso||'s/d')}»`
+             + (b.geocode_source ? ` · geocoding «${esc(b.geocode_source)}»` : '')
+             + (b.tipo_manual ? ' · etiqueta corregida a mano' : '') + `</div>` : '');
   } else {
     let d;
     try{ d = await fetch('/api/parcelas/'+parcelaId).then(r=>r.json()); }catch(e){ d = null; }
     if(!d || !d.ok){ cont.innerHTML = '<div class="mut">No se pudieron cargar los datos.</div>'; return; }
-    const opts = tiposOptions(d.tipo_edificacion);
     cont.innerHTML =
       `<div style="display:grid;grid-template-columns:2fr 1fr;gap:6px">`
       + inp('calle','Calle', d.calle) + inp('numero','Número', d.numero) + `</div>`
       + `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:5px">`
       + inp('complemento','Complemento', d.complemento) + inp('barrio','Bairro', d.barrio)
       + inp('codigo_postal','CEP', d.codigo_postal) + `</div>`
-      + `<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;margin-top:5px">`
-      + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Tipo de edificación`
-      + `<select name="tipo_edificacion" style="width:100%">${opts}</select></label>`
-      + inp('uf_vivienda','UF vivienda', d.uf_vivienda, 'type="number" min="0"')
-      + inp('uf_comercio','UF comercio', d.uf_comercio, 'type="number" min="0"') + `</div>`
+      + bloqueTipoUf(d.tipo_edificacion, d.uf_vivienda, d.uf_comercio)
       + campoHab
       + bloqueCoord(d.lat, d.lng, d.ubicacion_source)
       + `<div class="row" style="margin-top:6px">`
@@ -509,7 +523,8 @@ async function load(){
     // (para los que no tienen parcela) y el hotel, si lo hay.
     const ctxEdit = {lat: it.lat, lng: it.lng,
                      hotel_id: (it.datos||{}).hotel_id,
-                     habitaciones: (it.datos||{}).habitaciones};
+                     habitaciones: (it.datos||{}).habitaciones,
+                     baseline_direccion_id: (it.datos||{}).baseline_direccion_id};
     // Guardado ÚNICO del editor (se cablea cuando el form ya existe).
     const submitDir = (row) => (btn) => {
       const {payload, nota} = payloadDireccion(row);

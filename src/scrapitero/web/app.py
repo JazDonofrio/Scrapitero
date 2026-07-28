@@ -1667,6 +1667,56 @@ def _guardar_ubicacion_manual(conn, parcela_id: str, lat: float, lng: float,
     return 1
 
 
+@app.get("/api/baseline-direcciones/{direccion_id}")
+async def get_baseline_direccion(direccion_id: str) -> JSONResponse:
+    """Valores actuales de una dirección del relevamiento anterior, para precargar el editor.
+
+    Es el equivalente de `/api/parcelas/{id}` para los casos que no tienen parcela del
+    relevamiento nuevo (`geocoding_dudoso`)."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        r = conn.execute(text("""
+            SELECT direccion_raw, calle, numero, uso, uf_vivienda, uf_comercio,
+                   tipo_edificacion, lat, lng, geocode_source
+            FROM baseline_direcciones WHERE id = :i
+        """), {"i": direccion_id}).fetchone()
+    if not r:
+        return JSONResponse({"ok": False, "error": "Dirección no encontrada"}, status_code=404)
+    return JSONResponse({
+        "ok": True, "direccion_raw": r[0] or "", "calle": r[1] or "", "numero": r[2] or "",
+        "uso": r[3] or "", "uf_vivienda": r[4], "uf_comercio": r[5],
+        # sin etiqueta cargada a mano se ofrece la que se deduce del uso, para no arrancar vacío
+        "tipo_edificacion": r[6] or _tipo_edificacion(r[3], r[4], 1, None, None),
+        "tipo_manual": r[6] or "",
+        "lat": float(r[7]) if r[7] is not None else None,
+        "lng": float(r[8]) if r[8] is not None else None,
+        "geocode_source": r[9] or "",
+    })
+
+
+def _guardar_datos_baseline(conn, baseline_direccion_id, tipo: Optional[str],
+                            uf_v: Optional[int], uf_c: Optional[int]) -> int:
+    """Etiqueta y UF de una dirección del relevamiento anterior.
+
+    `uso` NO se escribe a mano: se **deriva** de las UF resultantes con la misma regla que la
+    importación (`_agregar_por_direccion`), porque es lo que consumen la comparativa y el CSV.
+    Si se tocan sólo las UF, la etiqueta queda como estaba, y viceversa."""
+    sets, params = [], {"i": baseline_direccion_id}
+    if tipo:
+        sets.append("tipo_edificacion = :t")
+        params["t"] = tipo
+    if uf_v is not None or uf_c is not None:
+        sets += ["uf_vivienda = :uv", "uf_comercio = :uc",
+                 "uso = CASE WHEN :uv > 0 AND :uc > 0 THEN 'mixto' "
+                 "WHEN :uc > 0 THEN 'comercial' ELSE 'residencial' END"]
+        params["uv"], params["uc"] = uf_v or 0, uf_c or 0
+    if not sets:
+        return 0
+    r = conn.execute(text(f"UPDATE baseline_direcciones SET {', '.join(sets)} WHERE id = :i"),
+                     params)
+    return r.rowcount or 0
+
+
 def _guardar_ubicacion_baseline(conn, baseline_direccion_id, lat: float, lng: float) -> int:
     """Mueve una dirección del relevamiento ANTERIOR (caso `geocoding_dudoso`).
 
@@ -1914,13 +1964,33 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                     WHERE incidencia_id = CAST(:i AS uuid)
                 """), {"lat": lat, "lng": lng, "i": incidencia_id})
 
-            # ── Dirección / tipo / UF: sólo con parcela ──────────────────────────────────
+            # ── Sin parcela: etiqueta y UF van a la dirección del relevamiento anterior ──
             if not parcela_id:
+                bid = datos.get("baseline_direccion_id")
+                tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
+                hay_uf = (v.get("uf_vivienda") not in (None, "")
+                          or v.get("uf_comercio") not in (None, ""))
+                if bid and (tipo_ed or hay_uf):
+                    if tipo_ed and tipo_ed not in _TIPO_CATEGORIA:
+                        return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
+                                            status_code=400)
+                    uf_v = uf_c = None
+                    if hay_uf:
+                        try:
+                            uf_v = int(v.get("uf_vivienda") or 0)
+                            uf_c = int(v.get("uf_comercio") or 0)
+                        except (ValueError, TypeError):
+                            return JSONResponse({"ok": False, "error": "uf_vivienda/uf_comercio inválidos"},
+                                                status_code=400)
+                        if uf_v < 0 or uf_c < 0:
+                            return JSONResponse({"ok": False, "error": "las UF deben ser ≥ 0"},
+                                                status_code=400)
+                    aplicados += _guardar_datos_baseline(conn, bid, tipo_ed or None, uf_v, uf_c)
                 if not aplicados:
                     return JSONResponse(
-                        {"ok": False, "error": "esta incidencia no tiene parcela: sólo se pueden "
-                                               "corregir su ubicación en el mapa y, si es un "
-                                               "hotel, sus habitaciones"},
+                        {"ok": False, "error": "esta incidencia no tiene parcela: se pueden "
+                                               "corregir su ubicación, su etiqueta y sus UF (y, "
+                                               "si es un hotel, sus habitaciones)"},
                         status_code=400)
                 conn.execute(text("""
                     UPDATE incidencias SET estado = 'resuelta', resolucion = :res, nota = :nota,

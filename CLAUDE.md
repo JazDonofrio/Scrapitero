@@ -368,6 +368,13 @@ anterior** (`baseline_direcciones.lat/lng` con `geocode_source='manual'`). Eso l
 primera vez a **`geocoding_dudoso`**, que mostraba el problema —el punto está a cientos de metros
 de su calle— y no ofrecía forma de arreglarlo. Ojo: 16 de 20 `hotel_sin_habitaciones` **no tienen
 parcela**, así que ese camino también acepta habitaciones + coordenada.
+**Etiqueta y UF sin parcela:** las tarjetas que apuntan al relevamiento anterior editan la
+etiqueta y las UF **de esa dirección** (`baseline_direcciones`, precargadas con
+`GET /api/baseline-direcciones/{id}`). La etiqueta va a la columna propia `tipo_edificacion`
+(mig. 054) y **no** a `uso`: `uso` es la clasificación funcional (`residencial`/`comercial`/
+`mixto`) que consumen `_agregar_por_direccion`, la comparativa y el CSV, así que se **deriva** de
+las UF resultantes con la misma regla de la importación. La corrección se ve sola en el mapa —
+`/api/baselines/{id}/puntos` calcula `uf_total` de `uf_vivienda+uf_comercio`.
 Cada concepto se guarda en **su** tabla de override (dirección → `parcela_direccion_manual`, tipo →
 `parcela_tipo_manual`, UF → `parcela_uf_manual`, coordenada → la de arriba según el objeto,
 habitaciones → `hotel_habitaciones_manual`), todo en **una sola transacción**: el "guardar" es uno
