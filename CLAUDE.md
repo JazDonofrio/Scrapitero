@@ -353,8 +353,13 @@ Viene precargado con los valores actuales (`GET /api/parcelas/{parcela_id}`, que
 `lat`/`lng`/`ubicacion_source`) y con el origen de cada dato al pie. Los campos que se dejan igual
 no se mandan y no se tocan. Un caso de altura o de UF casi siempre destapa además que la dirección
 está mal rotulada, y antes no había forma de arreglarla sin entrar a la base.
-**La coordenada** se corrige arrastrando el pin sobre el satélite (botón «📍 Mover», marcador
-`draggable` que al soltarse escribe lat/lng en el form) o escribiéndola. Va a **tres destinos**
+**La coordenada se marca clickeando en el mapa**: el botón «📍 Marcar en el mapa» entra en modo
+selección (cursor de cruz) y el click sobre el satélite planta el punto y llena lat/lng; el pin
+queda arrastrable para afinar. Escribir lat/lng a mano queda como ajuste fino, no como entrada
+principal — nadie tipea coordenadas mirando una foto aérea. **Gotcha de Leaflet:** el click que
+cae sobre una capa interactiva **no** se propaga al mapa, y el mapa está lleno de marcadores
+(incidencias + puntos del relevamiento anterior), que son justo los que uno quiere reubicar ⇒ el
+modo engancha el mismo handler en cada capa mientras dura y lo desengancha al salir. Va a **tres destinos**
 según qué es la ubicación del caso, en ese orden: **hotel** (`_mover_hotel`: mueve el pin,
 **re-vincula la parcela** por `ST_Contains` y persiste `hotel_ubicacion_manual`, mig. 049) →
 **parcela** (`centroid_lat/lng` + `ubicacion_source='manual'` + `parcela_ubicacion_manual`,
