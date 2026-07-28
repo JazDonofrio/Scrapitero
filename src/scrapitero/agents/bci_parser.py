@@ -383,22 +383,48 @@ def _get_parcelas(region_id: str, batch_size: int) -> list[tuple[str, str]]:
 def _update_parcela(parcela_id: str, d: dict) -> None:
     engine = get_engine()
     with engine.begin() as conn:
+        # BCIParser es la RED DE SEGURIDAD: se re-corre sobre regiones ya terminadas
+        # para recuperar PDFs mal parseados. Por eso no puede pisar los datos que
+        # aportaron los pasos POSTERIORES del pipeline, que para su campo son mejores
+        # que el BCI:
+        #   - `manual`   → corrección del operador en el panel de incidencias. Es la
+        #     única que el re-parseo no puede reconstruir: trabajo humano.
+        #   - `cadastur` → habitaciones reales del hotel como `uf_comercio`. Medido:
+        #     un re-parseo sin guarda tiraba Filinto Müller 62 de 146 UF a 1 (el BCI
+        #     cuenta unidades del inmueble, no habitaciones).
+        #   - `google`   → conteo real de comercios de Places (fuente autoritativa de
+        #     `uf_comercio` según el flujo).
+        #   - `shopping_min` → piso de UF=1 de ParcelaCategoria para un SHOPPING.
+        # El uso va con la misma lista: si el hotel abierto hace comercial a la
+        # parcela, el BCI no debe devolverla a vacante/residencial.
         conn.execute(text("""
             UPDATE parcelas SET
-                uso_principal               = COALESCE(:uso, uso_principal),
-                uso_fuente                  = CASE WHEN :uso IS NOT NULL
-                                             THEN 'bci' ELSE uso_fuente END,
-                uf_vivienda                 = :uf_viv,
-                uf_comercio                 = :uf_com,
-                uf_fuente                   = 'bci',
-                unidades_funcionales_estimadas = :uf_tot,
+                uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','google')
+                                              THEN uso_principal ELSE COALESCE(:uso, uso_principal) END,
+                uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','google')
+                                              THEN uso_fuente
+                                                   WHEN :uso IS NOT NULL THEN 'bci'
+                                                   ELSE uso_fuente END,
+                uf_vivienda                 = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                                              THEN uf_vivienda ELSE :uf_viv END,
+                uf_comercio                 = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                                              THEN uf_comercio ELSE :uf_com END,
+                uf_fuente                   = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                                              THEN uf_fuente ELSE 'bci' END,
+                unidades_funcionales_estimadas = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                                              THEN unidades_funcionales_estimadas
+                                              ELSE COALESCE(:uf_tot, unidades_funcionales_estimadas) END,
                 area_m2_construida          = COALESCE(:area, area_m2_construida),
                 area_m2_terreno             = COALESCE(:area_terr, area_m2_terreno),
-                calle                       = COALESCE(:calle, calle),
-                numero                      = COALESCE(:nro, numero),
+                calle                       = CASE WHEN direccion_source = 'manual'
+                                              THEN calle ELSE COALESCE(:calle, calle) END,
+                numero                      = CASE WHEN direccion_source = 'manual'
+                                              THEN numero ELSE COALESCE(:nro, numero) END,
                 complemento                 = COALESCE(:comp, complemento),
-                barrio                      = COALESCE(:barrio, barrio),
-                codigo_postal               = COALESCE(:cep, codigo_postal),
+                barrio                      = CASE WHEN direccion_source = 'manual'
+                                              THEN barrio ELSE COALESCE(:barrio, barrio) END,
+                codigo_postal               = CASE WHEN direccion_source = 'manual'
+                                              THEN codigo_postal ELSE COALESCE(:cep, codigo_postal) END,
                 codigo_logradouro           = COALESCE(:cod_logr, codigo_logradouro),
                 nomenclatura_catastral      = COALESCE(:nomen, nomenclatura_catastral),
                 partida_inmobiliaria        = COALESCE(:mat, partida_inmobiliaria),
@@ -410,10 +436,13 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                 propietario_nombre          = COALESCE(:prop, propietario_nombre),
                 propietario_documento       = COALESCE(:prop_doc, propietario_documento),
                 contribuyente_secundario    = COALESCE(:prop_sec, contribuyente_secundario),
-                direccion_source            = CASE WHEN :calle IS NOT NULL
-                                             THEN 'bci_pdf' ELSE direccion_source END,
-                direccion_confidence        = CASE WHEN :calle IS NOT NULL
-                                             THEN 0.95 ELSE direccion_confidence END
+                direccion_source            = CASE WHEN direccion_source = 'manual' THEN 'manual'
+                                                   WHEN :calle IS NOT NULL THEN 'bci_pdf'
+                                                   ELSE direccion_source END,
+                direccion_confidence        = CASE WHEN direccion_source = 'manual'
+                                                   THEN direccion_confidence
+                                                   WHEN :calle IS NOT NULL THEN 0.95
+                                                   ELSE direccion_confidence END
             WHERE parcela_id = :pid
         """), {
             "pid": parcela_id,

@@ -506,14 +506,26 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
             """), {"rid": region_id, "cca": str(codigo)}).fetchone()
 
             if existing:
+                # La dirección NO se pisa si ya vino de una fuente mejor. SmartGIS
+                # (`LOTE_ENDERECO`) trae el logradouro sin el tipo de vía ("DA FEB"),
+                # mientras que el BCI lo publica completo ("AVENIDA - DA FEB") y es el
+                # que alimenta `NOME_TIPO_LOGR` del CSV de operadora. Como SmartGIS es
+                # resumible y el runner lo re-invoca, sin esta guarda una segunda
+                # corrida posterior al BCI degradaba la calle —y dejaba la fila
+                # diciendo `direccion_source='bci_pdf'`, o sea con el linaje mentido—.
+                # `manual` es la corrección del operador desde el panel de incidencias:
+                # trabajo humano, nunca se pisa.
                 conn.execute(text("""
                     UPDATE parcelas SET
                         survey_id = :sid,
                         geometry = COALESCE(ST_GeomFromText(:geom, 4326), geometry),
                         centroid_lat = :lat, centroid_lng = :lon,
-                        calle = COALESCE(:calle, calle),
-                        barrio = COALESCE(:barrio, barrio),
-                        codigo_postal = COALESCE(:cep, codigo_postal),
+                        calle = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                                THEN calle ELSE COALESCE(:calle, calle) END,
+                        barrio = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                                 THEN barrio ELSE COALESCE(:barrio, barrio) END,
+                        codigo_postal = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                                        THEN codigo_postal ELSE COALESCE(:cep, codigo_postal) END,
                         area_m2_terreno = COALESCE(:aterr, area_m2_terreno),
                         area_m2_construida = COALESCE(:acons, area_m2_construida),
                         nomenclatura_catastral = COALESCE(:nomen, nomenclatura_catastral),
