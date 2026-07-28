@@ -42,9 +42,9 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
 | VGPipelineRunner | `vg_pipeline_runner` | **VG: PREFERIDO.** Happy path compilado: SmartGIS→BCI(parse inline)→Parser→Agrupador→**ShoppingFetcher**(OSM)→**ParcelaCategoria**→CountryFetcher→**HotelFetcher**→**HotelHabitacionesLLM**→**FootprintFetcher**→**AlturaFetcher** en UNA llamada determinista. Las dos últimas son las **capas de revisión de edificios** y van al final porque necesitan las parcelas ya cargadas con dirección/áreas del BCI para poder contrastar: la huella 2D sola no distingue una casa de una torre con la misma huella, así que la **altura** es la que delata al edificio y a la construcción no declarada. Ambas opcionales/best-effort (Open Buildings es gratis; Solar tiene 10.000 llamadas/mes gratis y el paso es resumible). Los pasos de shoppings/categorías/hoteles son **opcionales/best-effort** (no tumban el relevamiento si fallan); usan fuentes gratis (sin Google). El survey **no se marca `completed`** hasta terminar TODOS los pasos. Registra pasos en `surveys.notes`, honra stop. `parcial:true` ⇒ re-invocar (continúa). Los agentes de abajo quedan para correr pasos sueltos/debug |
-| SmartGISFetcher | `smartgis_fetcher` | **VG: SIEMPRE primero.** Parcelas Várzea Grande: inscripción+geometría desde SmartGIS |
+| SmartGISFetcher | `smartgis_fetcher` | **VG: SIEMPRE primero.** Parcelas Várzea Grande: inscripción+geometría desde SmartGIS. Su `LOTE_ENDERECO` trae el logradouro **sin el tipo de vía** ("DA FEB"), así que **no pisa** `calle`/`barrio`/`codigo_postal` si ya vinieron del BCI (`AVENIDA - DA FEB`, el que llena `NOME_TIPO_LOGR` del CSV de operadora) ni si el operador los corrigió a mano — ver **precedencia de fuentes** más abajo |
 | VGBCIFetcher | `varzea_bci_fetcher` | VG: Después de SmartGIS. Descarga PDFs BCI (reutiliza existentes en `pdf_downloads/`) **y parsea cada uno apenas baja** (`parse_inline`=true: uso/UF/dirección a DB de a uno). Presupuesto de tiempo (`max_runtime_s`=840): frena con gracia antes del timeout de Hermes (~900s) y devuelve `parcial:true` + `pdfs_pendientes` — re-ejecutar continúa donde quedó (NO es error) |
-| BCIParser | `bci_parser` | VG: Después de VGBCIFetcher, como **red de seguridad** (idempotente): re-parsea PDFs con inline fallido o preexistentes sin parsear. Extrae uso/UF/dirección de PDFs sin LLM |
+| BCIParser | `bci_parser` | VG: Después de VGBCIFetcher, como **red de seguridad** (idempotente): re-parsea PDFs con inline fallido o preexistentes sin parsear. Extrae uso/UF/dirección de PDFs sin LLM. Como se re-corre sobre regiones **ya terminadas**, respeta lo que aportaron los pasos posteriores: no pisa `uf_*`/`uso_*` cuando la fuente es `manual`/`cadastur`/`google`/`shopping_min` (el BCI cuenta unidades del inmueble, no habitaciones de hotel: sin la guarda un re-parseo tiraba Filinto Müller 62 de 146 UF a 1) ni la dirección `manual` — ver **precedencia de fuentes** más abajo |
 | ONRLotesFetcher | `onr_lotes_fetcher` | Lotes urbanos Brasil (ciudades con cobertura ONR) |
 | ONRSigefFetcher | `onr_sigef_fetcher` | Predios rurales Brasil (SIGEF/INCRA, todo el país) |
 | ONRCartoIdentify | `onr_carto_identify` | Identificar cartório responsable de un punto (CNS/nombre) |
@@ -610,6 +610,22 @@ salió cada dato, en 4 columnas de origen por parcela (todas exportadas en el CS
   `rentas`=SaltaRentasFetcher, `clasificador`=UsoClassifier, `google`=GooglePlacesFetcher
   (parcela con comercio → comercial/mixto). NULL = sin determinar (datos previos
   a la migración).
+
+**Precedencia de fuentes (obligatorio al escribir `parcelas`):** varias etapas escriben las
+MISMAS columnas y **corren más de una vez** (SmartGIS es resumible, BCIParser es la red de
+seguridad y se re-corre sobre regiones ya terminadas). Sin guarda explícita gana la última
+corrida aunque su dato sea peor, y el `*_fuente` queda **mintiendo** — porque el agente
+actualiza el valor pero no siempre el sello. Reglas:
+- `COALESCE(:nuevo, viejo)` **NO alcanza**: sólo protege contra el NULL, no contra el dato peor.
+  Si tu agente puede correr después de otro que escribe esa columna, poné
+  `CASE WHEN <sello> IN (…) THEN <viejo> ELSE … END`.
+- **`manual` nunca se pisa** (corrección del operador desde el panel de incidencias: es lo único
+  irreconstruible). Para `uf_*` tampoco `cadastur`/`google`/`shopping_min`, que son posteriores
+  al BCI y más específicos para su campo.
+- El que cambia un valor tiene que actualizar **su sello en la misma sentencia**.
+- Para detectar un pisado silencioso, buscar filas donde el sello dice una fuente y el texto
+  tiene la huella de otra (erratas, espaciado, formato). Ver memoria
+  `project_precedencia_fuentes_parcela`.
 
 **Levantar el servidor:**
 ```bash
