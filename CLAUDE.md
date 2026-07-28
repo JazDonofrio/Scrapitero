@@ -504,6 +504,32 @@ dirección completa única** (calle+número+CEP+bairro deduplicados — varias p
 la misma dirección colapsan en un registro), ordenado por calle y número; las parcelas
 sin calle se excluyen.
 
+**Cuando el survey tiene baseline, el export usa el layout PROPIO del cliente** (las 65 columnas
+de su CSV, en su orden) y completa **todo lo que el relevamiento permite inferir** — el resto
+queda en blanco a propósito. De 7 columnas con dato se pasó a **24**:
+- **Constantes de la base**, derivadas del CSV importado con `_constantes_baseline`: si una
+  columna vale lo mismo en las 673 filas del cliente (`COD_OPERADORA`=858, `COD_IBGE`=5108402,
+  `DSC_REGIONAL`, `DSC_CLUSTER`, `DSC_SUBCLUSTER`, `COD_CIDADE`, `COD_BASE`, `DSC_HEADEND`) no es
+  dato de una dirección sino **identidad de la base**, y se reproduce. **No hay nada hardcodeado**:
+  otro cliente/ciudad trae otras constantes y salen solas.
+- **Del relevamiento (BCI/catastro):** `DSC_LOGRADOURO_NO` (número, con el estimado — ver arriba),
+  `COD_TIPO_LOGRADOURO`/`DSC_TIPO_LOGRADOURO`/`DSC_LOGR_COMPLETO` (de `descomponer_logradouro`; la
+  **abreviatura sale del vocabulario del propio cliente** vía `_vocabulario_tipo_logradouro`:
+  RUA→R, AVENIDA→AV, TRAVESSA→TV, ROTULA→ROT, BECO→BC), `COD_TIPO_EDIFICACAO` (UNICO/MULTIPLO
+  según las unidades que el BCI declara en `parcela_unidades`), y
+  `DSC_IMOVEL_TIPO_COMPLEMENTO1..4`/`..._TEXTO_...` (de `partes_unidad`, que parte la unidad del
+  complemento en pares tipo/valor con su vocabulario: QD, LT, BL, CASA, SALA, LJ, APT).
+- **Se dejan vacías a propósito** (`_OPERADORA_NO_INFERIBLE`) las que afirman **estado** de una
+  dirección concreta —de red, técnico o comercial (`DSC_STATUS_*`, `DSC_SITUACAO_*`,
+  `QTD_CAPACIDADE_NODE`, `IND_BLOQUEIO_*`)— y las que son **identificadores de la operadora**
+  (`COD_HP`, `COD_IMOVEL`, `NUM_CONTRATO`, `COD_BAIRRO`, `COD_LOGRADOURO`, `COD_TIPO_IMOVEL`,
+  `COD_NODE`, `COD_CELULA`). Aunque sean constantes en el CSV importado: de una dirección nueva
+  no sabemos si su nodo está activo ni si tiene venta liberada, y sus códigos los asigna la
+  operadora. Ojo `COD_LOGRADOURO`: el del cliente es **su** código (93503), no el municipal que
+  trae el BCI (120) — mismo nombre, otro espacio de códigos. Y `NUM_UTM` **es por nodo, no por
+  dirección** (medido: 673 filas comparten 104 valores, uno por nodo), así que tampoco se llena
+  con el centroide de la parcela.
+
 **Comparativa con relevamiento anterior (📊):** cada relevamiento tiene en su detalle un
 selector **"Comparar con…"** que ofrece (a) los surveys anteriores de la misma región —
 incluidos los archivados — y (b) los **baselines importados** (el CSV del relevamiento

@@ -76,6 +76,61 @@ _BAIRRO = re.compile(
     r"CENTRO[\s\-]NORTE$)", re.I)
 
 
+# Abreviatura con la que la operadora rotula cada tipo de unidad dentro del inmueble
+# (`DSC_IMOVEL_TIPO_COMPLEMENTO1`). El vocabulario sale de su propio CSV: QD, LT, BL, CASA,
+# SALA, LJ, FD, BSD. Lo que no está acá se manda tal cual, en mayúsculas.
+_ABREV_UNIDAD = {
+    "QUADRA": "QD", "QDA": "QD", "QD": "QD", "Q": "QD",
+    "LOTE": "LT", "LT": "LT", "L": "LT",
+    "BLOCO": "BL", "BL": "BL",
+    "CASA": "CASA", "CS": "CASA",
+    "SALA": "SALA", "SALAS": "SALA", "SL": "SALA",
+    "LOJA": "LJ", "LJ": "LJ",
+    "APTO": "APT", "APT": "APT", "AP": "APT",
+    "ANDAR": "AND", "BOX": "BOX", "CONJ": "CJ", "CJ": "CJ",
+}
+
+
+def partes_unidad(unidad: str | None) -> list[tuple[str, str]]:
+    """Parte la unidad en pares (tipo, texto) con el vocabulario de la operadora.
+
+    "QUADRA 04 LOTE 13" → [("QD","04"), ("LT","13")] · "sl 02" → [("SALA","02")] ·
+    "QD.C" → [("QD","C")]. El layout tiene cuatro pares de columnas
+    (`DSC_IMOVEL_TIPO_COMPLEMENTO1..4` / `..._TEXTO_...`), así que se devuelven en orden.
+
+    Se recorre por TOKENS y sólo se aceptan tipos del vocabulario conocido. Buscar el patrón
+    con una regex suelta partía palabras por la mitad ("SALA SERVIÇOS" → tipo "ERVIÇO",
+    "DA LIBERDADE" → "BERDAD"): lo que no se reconoce se deja en blanco, que es lo correcto —
+    igual sigue entero en la dirección.
+    """
+    if not unidad or not unidad.strip():
+        return []
+    # "L.21" / "QD.C" / "N:84" vienen pegados: se separan en dos tokens antes de recorrer.
+    # SÓLO si hay un separador explícito o un dígito — si no, una palabra entera como "QUADRA"
+    # se partía en "QUADR"+"A" y el tipo salía irreconocible.
+    tokens: list[str] = []
+    for t in re.split(r"[\s,]+", unidad.strip()):
+        m = (re.fullmatch(r"([A-Za-zÀ-ÿ]+)[.:]([0-9]+[A-Za-z]?|[A-Za-z])", t)
+             or re.fullmatch(r"([A-Za-zÀ-ÿ]+)[.:]?([0-9]+[A-Za-z]?)", t))
+        tokens.extend([m.group(1), m.group(2)] if m else [t])
+
+    pares: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        clave = tokens[i].upper().strip(".:")
+        abrev = _ABREV_UNIDAD.get(clave)
+        if abrev and i + 1 < len(tokens):
+            valor = tokens[i + 1].upper().strip(".:")
+            # El valor de una unidad es un número o una letra suelta ("04", "13A", "C"),
+            # no otra palabra ("SALA COMERCIAL" no lleva número).
+            if re.fullmatch(r"[0-9]{1,4}[A-Z]?|[A-Z]", valor):
+                pares.append((abrev, valor))
+                i += 2
+                continue
+        i += 1
+    return pares
+
+
 def _segmentos_complemento(texto: str) -> list[str]:
     """Parte el complemento en sus piezas. El BCI las junta con ' - ' y entrecomilla
     el nombre: «"CHURRASCARIA AEROPORTO GRILL" - ÁREA 01 - MATRÍCULA 70.846»,

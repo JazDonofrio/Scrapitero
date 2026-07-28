@@ -23,7 +23,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from loguru import logger
 from sqlalchemy import text
 
-from scrapitero.agents.logradouro_br import clasificar_complemento, descomponer_logradouro
+from scrapitero.agents.logradouro_br import (clasificar_complemento, descomponer_logradouro,
+                                             partes_unidad)
 from scrapitero.db.engine import get_engine
 
 app = FastAPI(title="Scraper GIS")
@@ -2627,6 +2628,52 @@ async def export_csv(survey_id: str) -> StreamingResponse:
 CSV_OPERADORA_COD = "858"
 
 
+# Columnas del layout de operadora que afirman ESTADO de una dirección concreta —de red, técnico
+# o comercial— o la identifican en los sistemas de la operadora. Aunque sean constantes en el CSV
+# importado, no se reproducen: para una dirección nueva no sabemos si su nodo está activo ni si
+# tiene venta liberada, y su COD_HP/COD_IMOVEL lo asigna la operadora, no el relevamiento.
+_OPERADORA_NO_INFERIBLE = (
+    "DSC_STATUS_", "DSC_SITUACAO_", "DSC_MOTIVO_", "COD_SITUACAO_", "IND_BLOQUEIO_",
+    "QTD_CAPACIDADE_", "DAT_", "NUM_CONTRATO", "COD_HP", "COD_IMOVEL", "NUM_UTM",
+    "COD_CELULA", "COD_NODE", "COD_BAIRRO", "COD_LOGRADOURO", "COD_TIPO_IMOVEL",
+    "COD_CID_CONTRATO", "NUM_IMPAR_", "NUM_PAR_", "COD_CONDOMINIO", "DSC_CONDOMINIO",
+)
+
+
+def _constantes_baseline(filas_extras: list, header: list, ya_mapeadas: set) -> dict:
+    """Columnas que valen SIEMPRE lo mismo en el CSV que importó el cliente.
+
+    Si en las 673 filas de su base `COD_OPERADORA` es 858, `COD_IBGE` 5108402 y `DSC_REGIONAL`
+    "Regional Leste", eso no es dato de una dirección: es identidad de la base. Se reproduce tal
+    cual en las filas nuevas. Se deriva del archivo en vez de hardcodearlo para que sirva con
+    cualquier operadora y ciudad — otro cliente traerá otras constantes y salen solas.
+    """
+    vistos: dict[str, set] = {}
+    for ex in filas_extras:
+        d = json.loads(ex) if isinstance(ex, str) else (ex or {})
+        for k, v in d.items():
+            if v in (None, "", "NULL"):
+                continue
+            vistos.setdefault(k, set()).add(v)
+            if len(vistos[k]) > 1:                      # ya no es constante, no hace falta más
+                vistos[k] = {"__multi__", "__multi__2"}
+    return {k: next(iter(v)) for k, v in vistos.items()
+            if len(v) == 1 and k in header and k not in ya_mapeadas
+            and not k.startswith(_OPERADORA_NO_INFERIBLE)}
+
+
+def _vocabulario_tipo_logradouro(filas_extras: list) -> dict:
+    """Abreviatura que usa la operadora para cada tipo de vía, sacada de su propio CSV:
+    {"RUA": "R", "AVENIDA": "AV", "TRAVESSA": "TV", "ROTULA": "ROT", "BECO": "BC"}."""
+    voc: dict[str, str] = {}
+    for ex in filas_extras:
+        d = json.loads(ex) if isinstance(ex, str) else (ex or {})
+        dsc, cod = d.get("DSC_TIPO_LOGRADOURO"), d.get("COD_TIPO_LOGRADOURO")
+        if dsc and cod and dsc != "NULL" and cod != "NULL":
+            voc.setdefault(dsc.strip().upper(), cod.strip().upper())
+    return voc
+
+
 @app.get("/api/surveys/{survey_id}/export/csv-operadora")
 async def export_csv_operadora(survey_id: str) -> StreamingResponse:
     """CSV con el layout de base de logradouros de operadora (solo Brasil).
@@ -2669,6 +2716,9 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 extras_keys = list(json.loads(ex).keys()) if ex else []
                 mapped = [h for h in mapeo_d.values() if h]
                 header = mapped + [k for k in extras_keys if k not in mapped]
+            extras_base = [r[0] for r in conn.execute(text(
+                "SELECT extras FROM baseline_direcciones WHERE baseline_id = CAST(:bid AS uuid) "
+                "AND extras IS NOT NULL"), {"bid": base[2]}).fetchall()]
             parc = conn.execute(text("""
                 SELECT calle,
                        -- Toda dirección tiene que salir con número. Cuando el municipio no lo
@@ -2702,14 +2752,21 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                               AND parcelas.geometry IS NOT NULL
                               AND ST_Contains(parcelas.geometry,
                                     ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326)))
-                       )), '') AS nome_imovel
+                       )), '') AS nome_imovel,
+                       -- UNICO / MULTIPLO: lo sabe el BCI (unidades de la inscrição). Es el
+                       -- `COD_TIPO_EDIFICACAO` del layout.
+                       (SELECT count(*) FROM parcela_unidades u
+                          WHERE u.parcela_id = parcelas.parcela_id) AS n_unidades
                 FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
                 ORDER BY calle,
                          NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
                            NULLS LAST
             """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN}).fetchall()
-            plantilla = (header, mapeo_d, parc)
+            plantilla = (header, mapeo_d, parc,
+                         _constantes_baseline(extras_base, header,
+                                              {v for v in mapeo_d.values() if v}),
+                         _vocabulario_tipo_logradouro(extras_base))
 
         rows = None
         if not plantilla:
@@ -2731,12 +2788,16 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
     filename = f"operadora_{meta[0]}_{fecha}.csv".replace(" ", "_")
 
     if plantilla:
-        header, mapeo_d, parc = plantilla
+        header, mapeo_d, parc, constantes, voc_tipo = plantilla
         inv = {h: f for f, h in mapeo_d.items() if h}   # header → campo
         TIPO_VIV, TIPO_COM = "RESIDENCIAL", "COMERCIO EM GERAL"
+        idx = {h: i for i, h in enumerate(header)}
 
-        # Índice de la columna del nombre del comercio (si el layout la tiene).
-        idx_nome = header.index("DSC_NOME_DO_IMOVEL") if "DSC_NOME_DO_IMOVEL" in header else None
+        def _set(fila, col, valor):
+            """Escribe una columna del layout sólo si existe y hay algo que poner."""
+            i = idx.get(col)
+            if i is not None and valor not in (None, ""):
+                fila[i] = valor
 
         def _gen_plantilla():
             buf = io.StringIO()
@@ -2744,7 +2805,7 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             w = csv.writer(buf, delimiter=";")
             w.writerow(header)
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-            for calle, numero, compl, barrio, muni, est, cep, uv, uc, nome in parc:
+            for calle, numero, compl, barrio, muni, est, cep, uv, uc, nome, n_unid in parc:
                 # El `complemento` del BCI mezcla cuatro cosas y sólo una es dirección:
                 # unidad ("QUADRA 04 LOTE 13"), nombre del inmueble ("DROGASIL"), nota
                 # registral ("MAT.57499") y referencia ("ESQUINA COM A RUA X"). Sin separar,
@@ -2764,13 +2825,34 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 unidades = [TIPO_VIV] * int(uv) + [TIPO_COM] * int(uc)
                 if not unidades:
                     unidades = [""]
+                # Descomposición de la vía, para las columnas que el layout pide por separado.
+                d_logr = descomponer_logradouro(calle)
+                cod_tipo = voc_tipo.get(d_logr["tipo"], "")
+                # "R ORIEL B CAMPOS", "AV PRES ARTHUR BERNARDES": tipo abreviado + resto.
+                logr_completo = " ".join(x for x in (cod_tipo, d_logr["titulo"],
+                                                     d_logr["preposicao"], d_logr["nome"]) if x)
+                pares_unidad = partes_unidad(unidad)
+
                 for tipo in unidades:
                     val = {"direccion": full, "calle": calle or "", "numero": numero or "",
                            "barrio": barrio or "", "ciudad": muni or "",
                            "estado": (est or "").upper(), "cep": cep or "", "uso": tipo}
                     fila = [val.get(inv.get(col), "") for col in header]
-                    if idx_nome is not None and nome:   # nombre del comercio → DSC_NOME_DO_IMOVEL
-                        fila[idx_nome] = nome
+                    # 1) Constantes de la base del cliente (COD_OPERADORA, COD_IBGE, …).
+                    for col, v in constantes.items():
+                        _set(fila, col, v)
+                    # 2) Lo que sale del relevamiento (BCI + catastro).
+                    _set(fila, "DSC_NOME_DO_IMOVEL", nome)
+                    _set(fila, "DSC_LOGRADOURO_NO", numero)
+                    _set(fila, "COD_TIPO_LOGRADOURO", cod_tipo)
+                    _set(fila, "DSC_TIPO_LOGRADOURO", d_logr["tipo"])
+                    _set(fila, "DSC_LOGR_COMPLETO", logr_completo)
+                    # Una inscrição con más de una unidad en el BCI es edificación MÚLTIPLE.
+                    _set(fila, "COD_TIPO_EDIFICACAO", "MULTIPLO" if (n_unid or 0) > 1 else "UNICO")
+                    # El complemento de unidad, en los pares tipo/texto del layout (hasta 4).
+                    for i, (t_u, x_u) in enumerate(pares_unidad[:4], start=1):
+                        _set(fila, f"DSC_IMOVEL_TIPO_COMPLEMENTO{i}", t_u)
+                        _set(fila, f"DSC_IMOVEL_TEXTO_COMPLEMENTO{i}", x_u)
                     w.writerow(fila)
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
 
