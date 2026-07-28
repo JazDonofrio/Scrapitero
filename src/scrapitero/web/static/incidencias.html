@@ -388,7 +388,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
       + bloqueCoord(b ? b.lat : (ctx && ctx.lat), b ? b.lng : (ctx && ctx.lng), '')
       + `<div class="row" style="margin-top:6px">`
       + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
-      + `<button>💾 Guardar cambios</button></div>`
+      + `<button class="guardar-btn">💾 Guardar cambios</button></div>`
       + (b ? `<div class="mut" style="margin-top:4px;font-size:.68rem">Relevamiento anterior: `
              + `«${esc(b.direccion_raw)}» · uso «${esc(b.uso||'s/d')}»`
              + (b.geocode_source ? ` · geocoding «${esc(b.geocode_source)}»` : '')
@@ -408,7 +408,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
       + bloqueCoord(d.lat, d.lng, d.ubicacion_source)
       + `<div class="row" style="margin-top:6px">`
       + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
-      + `<button>💾 Guardar cambios</button></div>`
+      + `<button class="guardar-btn">💾 Guardar cambios</button></div>`
       + `<div class="mut" style="margin-top:4px;font-size:.68rem">Origen actual: `
       + `dirección «${esc(d.direccion_source||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
       + (d.ubicacion_source ? ` · ubicación «${esc(d.ubicacion_source)}»` : '')
@@ -424,7 +424,11 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
     const la = g('lat'), ln = g('lng');
     activarSeleccionMapa(cont, isNaN(la)?(ctx&&ctx.lat):la, isNaN(ln)?(ctx&&ctx.lng):ln, mover);
   };
-  const btn = cont.querySelector('.row button');
+  // Clase propia y no `.row button`: en `elem.querySelector('.row button')` el `.row`
+  // se busca en TODO el documento, no dentro de `elem` — y la `.dirform` está dentro
+  // del `.row[data-a=editar]`, así que el selector agarraba el botón de marcar en el
+  // mapa (el primero del form) y le pisaba su handler con el de guardar.
+  const btn = cont.querySelector('.guardar-btn');
   if(btn) btn.onclick = (e)=>{ e.stopPropagation(); onSubmit(btn); };
 }
 
