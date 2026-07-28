@@ -23,7 +23,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from loguru import logger
 from sqlalchemy import text
 
-from scrapitero.agents.logradouro_br import descomponer_logradouro
+from scrapitero.agents.logradouro_br import clasificar_complemento, descomponer_logradouro
 from scrapitero.db.engine import get_engine
 
 app = FastAPI(title="Scraper GIS")
@@ -2716,9 +2716,20 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             w.writerow(header)
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
             for calle, numero, compl, barrio, muni, est, cep, uv, uc, nome in parc:
-                full = " ".join(x for x in (calle, numero) if x)
-                if compl:
-                    full = f"{full} {compl}".strip()
+                # El `complemento` del BCI mezcla cuatro cosas y sólo una es dirección:
+                # unidad ("QUADRA 04 LOTE 13"), nombre del inmueble ("DROGASIL"), nota
+                # registral ("MAT.57499") y referencia ("ESQUINA COM A RUA X"). Sin separar,
+                # el 85% de lo que se pegaba a DSC_ENDERECO_COMPLETO no era una dirección.
+                # El nombre pasa a su columna propia; el resto no va al layout de operadora
+                # (el valor crudo queda intacto en `parcelas.complemento` y en el CSV completo).
+                unidad, nombre_compl = clasificar_complemento(compl)
+                full = " ".join(x for x in (calle, numero, unidad) if x)
+                if nombre_compl:
+                    # Dedupe: el nombre suele venir por partida doble (el hotel ya está en
+                    # `hoteles` y además rotulado en el complemento del BCI).
+                    ya = {p.strip().upper() for p in (nome or "").split("|")}
+                    if nombre_compl.upper() not in ya:
+                        nome = " | ".join(x for x in (nome, nombre_compl) if x)
                 # Una fila por UNIDAD: uf_vivienda → RESIDENCIAL, uf_comercio → COMERCIO.
                 # Sin UF (vacante) → 1 fila para no perder la dirección.
                 unidades = [TIPO_VIV] * int(uv) + [TIPO_COM] * int(uc)
