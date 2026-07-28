@@ -1249,6 +1249,52 @@ def _marcar_cerrado(conn, hotel_id: str, cerrado: bool, nota: str | None) -> tup
     return True, region_id
 
 
+def _mover_hotel(conn, hotel_id: str, lat: Optional[float], lng: Optional[float],
+                 direccion: Optional[str], nota: Optional[str]) -> tuple[bool, str]:
+    """Aplica la corrección de ubicación/dirección de un hotel (mig. 049).
+
+    Extraído del endpoint `/api/hoteles/{id}/ubicacion` para que el editor único del panel de
+    incidencias mueva el hotel con exactamente las mismas escrituras: `hoteles` + re-vínculo de
+    parcela por `ST_Contains` + override durable por `(region_id, cnpj)`. Devuelve
+    `(ok, parcela_id_o_error)`."""
+    row = conn.execute(text(
+        "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+        {"h": hotel_id}).fetchone()
+    if not row:
+        return False, "Hotel no encontrado"
+    region_id, cnpj = row
+    conn.execute(text("""
+        UPDATE hoteles
+           SET location = COALESCE(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), location),
+               direccion = COALESCE(:dir, direccion)
+         WHERE hotel_id::text = :h
+    """), {"lat": lat, "lng": lng, "dir": direccion, "h": hotel_id})
+    # Re-vincular la parcela con el punto ya corregido (el motivo de fondo de la corrección).
+    conn.execute(text("""
+        UPDATE hoteles h SET parcela_id = p.parcela_id
+        FROM parcelas p
+        WHERE h.hotel_id::text = :h AND p.region_id = h.region_id
+          AND p.geometry IS NOT NULL AND h.location IS NOT NULL
+          AND ST_Contains(p.geometry, h.location)
+    """), {"h": hotel_id})
+    if cnpj:
+        conn.execute(text("""
+            INSERT INTO hotel_ubicacion_manual (region_id, cnpj, lat, lng, direccion, nota, autor)
+            VALUES (:r, :c, :lat, :lng, :dir, :nota, 'operador')
+            ON CONFLICT (region_id, cnpj) DO UPDATE SET
+                lat = COALESCE(:lat, hotel_ubicacion_manual.lat),
+                lng = COALESCE(:lng, hotel_ubicacion_manual.lng),
+                direccion = COALESCE(:dir, hotel_ubicacion_manual.direccion),
+                nota = COALESCE(:nota, hotel_ubicacion_manual.nota),
+                actualizado_at = now()
+        """), {"r": region_id, "c": cnpj, "lat": lat, "lng": lng,
+               "dir": direccion, "nota": nota})
+    pid = conn.execute(text(
+        "SELECT parcela_id::text FROM hoteles WHERE hotel_id::text = :h"),
+        {"h": hotel_id}).scalar()
+    return True, pid
+
+
 @app.post("/api/hoteles/{hotel_id}/ubicacion")
 async def set_ubicacion_manual(hotel_id: str, request: Request) -> JSONResponse:
     """El operador corrige la coordenada y/o la dirección de un hotel (mig. 049).
@@ -1273,43 +1319,11 @@ async def set_ubicacion_manual(hotel_id: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "lat y lng van juntos"}, status_code=400)
     engine = get_engine()
     with engine.begin() as conn:
-        row = conn.execute(text(
-            "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
-            {"h": hotel_id}).fetchone()
-        if not row:
-            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
-        region_id, cnpj = row
-        conn.execute(text("""
-            UPDATE hoteles
-               SET location = COALESCE(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), location),
-                   direccion = COALESCE(:dir, direccion)
-             WHERE hotel_id::text = :h
-        """), {"lat": lat, "lng": lng, "dir": direccion, "h": hotel_id})
-        # Re-vincular la parcela con el punto ya corregido (el motivo de fondo de la corrección).
-        conn.execute(text("""
-            UPDATE hoteles h SET parcela_id = p.parcela_id
-            FROM parcelas p
-            WHERE h.hotel_id::text = :h AND p.region_id = h.region_id
-              AND p.geometry IS NOT NULL AND h.location IS NOT NULL
-              AND ST_Contains(p.geometry, h.location)
-        """), {"h": hotel_id})
-        if cnpj:
-            conn.execute(text("""
-                INSERT INTO hotel_ubicacion_manual (region_id, cnpj, lat, lng, direccion, nota, autor)
-                VALUES (:r, :c, :lat, :lng, :dir, :nota, 'operador')
-                ON CONFLICT (region_id, cnpj) DO UPDATE SET
-                    lat = COALESCE(:lat, hotel_ubicacion_manual.lat),
-                    lng = COALESCE(:lng, hotel_ubicacion_manual.lng),
-                    direccion = COALESCE(:dir, hotel_ubicacion_manual.direccion),
-                    nota = COALESCE(:nota, hotel_ubicacion_manual.nota),
-                    actualizado_at = now()
-            """), {"r": region_id, "c": cnpj, "lat": lat, "lng": lng,
-                   "dir": direccion, "nota": nota})
-        pid = conn.execute(text(
-            "SELECT parcela_id::text FROM hoteles WHERE hotel_id::text = :h"),
-            {"h": hotel_id}).scalar()
+        ok, detalle = _mover_hotel(conn, hotel_id, lat, lng, direccion, nota)
+    if not ok:
+        return JSONResponse({"ok": False, "error": detalle}, status_code=404)
     return JSONResponse({"ok": True, "lat": lat, "lng": lng, "direccion": direccion,
-                         "parcela_id": pid})
+                         "parcela_id": detalle})
 
 
 @app.post("/api/hoteles/{hotel_id}/cerrado")
@@ -1558,7 +1572,9 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
                    COALESCE((SELECT h.tipo FROM hoteles h
                        WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
                        ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
-                   p.descripcion_uso
+                   p.descripcion_uso,
+                   -- al final a propósito: el resto se lee por índice posicional
+                   p.centroid_lat, p.centroid_lng, p.ubicacion_source
             FROM parcelas p
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
             WHERE p.parcela_id = CAST(:p AS uuid)
@@ -1576,6 +1592,9 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
         # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro)
         "tipo_edificacion": _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]) or "",
         "tipo_manual": r[16] or "",
+        "lat": float(r[19]) if r[19] is not None else None,
+        "lng": float(r[20]) if r[20] is not None else None,
+        "ubicacion_source": r[21] or "",
     })
 
 
@@ -1609,6 +1628,71 @@ def _guardar_direccion_manual(conn, parcela_id: str, campos: dict, nota: Optiona
                 {upd}, nota = :nota, parcela_id = CAST(:p AS uuid), actualizado_at = now()
         """), {**campos, "r": row[0], "c": row[1], "nota": nota, "p": parcela_id})
     return len(campos)
+
+
+def _guardar_ubicacion_manual(conn, parcela_id: str, lat: float, lng: float,
+                              nota: Optional[str]) -> int:
+    """Mueve el punto de una parcela y lo respalda en `parcela_ubicacion_manual`.
+
+    Toca `centroid_lat/lng` —que es lo que dibuja el mapa y sale al CSV— y **no** `geometry`:
+    el polígono es del catastro y sigue siendo el dato oficial; lo que el operador corrige es
+    el punto representativo. `ubicacion_source='manual'` es el sello que impide que la próxima
+    corrida de SmartGIS lo pise. Devuelve 1 si movió algo, 0 si la coordenada no cambió."""
+    prev = conn.execute(text(
+        "SELECT region_id, cca_code, centroid_lat, centroid_lng FROM parcelas "
+        "WHERE parcela_id = CAST(:p AS uuid)"), {"p": parcela_id}).fetchone()
+    if not prev:
+        return 0
+    lat_prev = float(prev[2]) if prev[2] is not None else None
+    lng_prev = float(prev[3]) if prev[3] is not None else None
+    # ~0,1 m: por debajo de eso es el redondeo del arrastre, no una corrección.
+    if (lat_prev is not None and lng_prev is not None
+            and abs(lat - lat_prev) < 1e-6 and abs(lng - lng_prev) < 1e-6):
+        return 0
+    conn.execute(text("""
+        UPDATE parcelas SET centroid_lat = :lat, centroid_lng = :lng,
+               ubicacion_source = 'manual'
+        WHERE parcela_id = CAST(:p AS uuid)
+    """), {"lat": lat, "lng": lng, "p": parcela_id})
+    if prev[1]:
+        conn.execute(text("""
+            INSERT INTO parcela_ubicacion_manual
+                (region_id, cca_code, lat, lng, lat_previa, lng_previa, nota, autor, parcela_id)
+            VALUES (:r, :c, :lat, :lng, :latp, :lngp, :nota, 'operador', CAST(:p AS uuid))
+            ON CONFLICT (region_id, cca_code) DO UPDATE SET
+                lat = :lat, lng = :lng, nota = :nota,
+                parcela_id = CAST(:p AS uuid), actualizado_at = now()
+        """), {"r": prev[0], "c": prev[1], "lat": lat, "lng": lng,
+               "latp": lat_prev, "lngp": lng_prev, "nota": nota, "p": parcela_id})
+    return 1
+
+
+def _guardar_ubicacion_baseline(conn, baseline_direccion_id, lat: float, lng: float) -> int:
+    """Mueve una dirección del relevamiento ANTERIOR (caso `geocoding_dudoso`).
+
+    No necesita tabla de respaldo: `baseline_direcciones` ES el registro durable del CSV del
+    cliente. `geocode_source='manual'` con confianza 1 lo blinda del re-geocoding — el
+    geocoder sólo procesa filas sin coordenada, y `baseline_interp` respeta las fuentes
+    exactas."""
+    r = conn.execute(text("""
+        UPDATE baseline_direcciones
+        SET lat = :lat, lng = :lng, geocode_source = 'manual', geocode_confidence = 1.0
+        WHERE id = :i
+    """), {"lat": lat, "lng": lng, "i": baseline_direccion_id})
+    return r.rowcount or 0
+
+
+def _coords_validas(v: dict) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    """Lee lat/lng del payload. Devuelve (lat, lng, error)."""
+    if v.get("lat") in (None, "") or v.get("lng") in (None, ""):
+        return None, None, None
+    try:
+        lat, lng = float(v["lat"]), float(v["lng"])
+    except (ValueError, TypeError):
+        return None, None, "coordenadas inválidas"
+    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+        return None, None, "coordenadas fuera de rango"
+    return lat, lng, None
 
 
 @app.post("/api/incidencias/{incidencia_id}/resolver")
@@ -1752,20 +1836,105 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                                     status_code=400)
             _guardar_direccion_manual(conn, parcela_id, {"numero": num}, nota)
 
-        elif accion == "direccion":
-            # Corrección de la dirección COMPLETA + las variables derivadas que muestra la web.
-            # Cada concepto va a su tabla de override: dirección → parcela_direccion_manual,
-            # tipo → parcela_tipo_manual, UF → parcela_uf_manual. Así no hay dos lugares donde
-            # se guarde lo mismo y un re-scrape puede re-aplicar todo.
-            if not parcela_id:
-                return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
-                                    status_code=400)
+        elif accion in ("direccion", "ubicacion"):
+            # UNA sola escritura con TODO lo editable de la ubicación: dirección, tipo, UF,
+            # coordenada y —si el caso es de hotel— habitaciones. La página manda el formulario
+            # entero con un único botón de guardar; acá se aplica campo por campo y cada
+            # concepto va a SU tabla de override (dirección → parcela_direccion_manual, tipo →
+            # parcela_tipo_manual, UF → parcela_uf_manual, coordenada → parcela_ubicacion_manual,
+            # habitaciones → hotel_habitaciones_manual). Así no hay dos lugares donde se guarde
+            # lo mismo y un re-scrape puede re-aplicar todo.
+            # (`direccion` se acepta como alias histórico: es la resolución que quedó guardada
+            # en las incidencias cerradas antes de que el formulario incluyera la coordenada.)
             v = valor if isinstance(valor, dict) else {}
+            lat, lng, err_coord = _coords_validas(v)
+            if err_coord:
+                return JSONResponse({"ok": False, "error": err_coord}, status_code=400)
+
+            aplicados = 0
+            hotel_id = datos.get("hotel_id")
+
+            # ── Habitaciones (sólo casos con hotel) ──────────────────────────────────────
+            if v.get("habitaciones") not in (None, ""):
+                if not hotel_id:
+                    return JSONResponse({"ok": False, "error": "la incidencia no tiene hotel"},
+                                        status_code=400)
+                try:
+                    n_hab = int(v["habitaciones"])
+                except (ValueError, TypeError):
+                    return JSONResponse({"ok": False, "error": "habitaciones inválido"},
+                                        status_code=400)
+                if n_hab < 0:
+                    return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"},
+                                        status_code=400)
+                h = conn.execute(text(
+                    "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
+                    {"h": hotel_id}).fetchone()
+                if not h:
+                    return JSONResponse({"ok": False, "error": "El hotel ya no existe (re-corré 🏨)"},
+                                        status_code=409)
+                conn.execute(text("UPDATE hoteles SET habitaciones = :n, "
+                                  "habitaciones_fuente = 'manual' WHERE hotel_id::text = :h"),
+                             {"n": n_hab, "h": hotel_id})
+                if h[1]:
+                    conn.execute(text("""
+                        INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
+                        VALUES (:r, :c, :n, 'operador')
+                        ON CONFLICT (region_id, cnpj)
+                        DO UPDATE SET habitaciones = :n, actualizado_at = now()
+                    """), {"r": h[0], "c": h[1], "n": n_hab})
+                aplicados += 1
+
+            # ── La coordenada, al objeto que corresponda ─────────────────────────────────
+            # Tres destinos según qué es la ubicación del caso, en orden de especificidad:
+            # el hotel (mueve el pin y re-vincula parcela), la parcela (mueve su punto), o la
+            # dirección del relevamiento anterior (`geocoding_dudoso`, que hasta ahora no
+            # ofrecía NINGUNA acción: se veía el problema y no se podía arreglar).
+            if lat is not None:
+                if hotel_id:
+                    ok_h, det = _mover_hotel(conn, hotel_id, lat, lng, None, nota)
+                    if not ok_h:
+                        return JSONResponse({"ok": False, "error": det}, status_code=409)
+                    aplicados += 1
+                elif parcela_id:
+                    aplicados += _guardar_ubicacion_manual(conn, parcela_id, lat, lng, nota)
+                elif datos.get("baseline_direccion_id"):
+                    if not _guardar_ubicacion_baseline(conn, datos["baseline_direccion_id"],
+                                                       lat, lng):
+                        return JSONResponse({"ok": False, "error": "la dirección del relevamiento "
+                                                                  "anterior ya no existe"},
+                                            status_code=409)
+                    aplicados += 1
+                else:
+                    return JSONResponse({"ok": False, "error": "el caso no tiene a qué objeto "
+                                                              "aplicarle la coordenada"},
+                                        status_code=400)
+                conn.execute(text("""
+                    UPDATE incidencias SET lat = :lat, lng = :lng
+                    WHERE incidencia_id = CAST(:i AS uuid)
+                """), {"lat": lat, "lng": lng, "i": incidencia_id})
+
+            # ── Dirección / tipo / UF: sólo con parcela ──────────────────────────────────
+            if not parcela_id:
+                if not aplicados:
+                    return JSONResponse(
+                        {"ok": False, "error": "esta incidencia no tiene parcela: sólo se pueden "
+                                               "corregir su ubicación en el mapa y, si es un "
+                                               "hotel, sus habitaciones"},
+                        status_code=400)
+                conn.execute(text("""
+                    UPDATE incidencias SET estado = 'resuelta', resolucion = :res, nota = :nota,
+                           autor = 'operador', resuelta_at = now(), actualizada_at = now()
+                    WHERE incidencia_id = CAST(:i AS uuid)
+                """), {"res": accion, "nota": nota, "i": incidencia_id})
+                return JSONResponse({"ok": True, "estado": "resuelta", "accion": accion,
+                                     "aplicados": aplicados})
+
             campos = {k: str(v[k]).strip()[:200] for k in _CAMPOS_DIRECCION
                       if v.get(k) is not None and str(v[k]).strip() != ""}
             if campos.get("numero") and not any(c.isdigit() for c in campos["numero"]):
                 return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
-            aplicados = _guardar_direccion_manual(conn, parcela_id, campos, nota)
+            aplicados += _guardar_direccion_manual(conn, parcela_id, campos, nota)
 
             tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
             if tipo_ed:

@@ -345,22 +345,39 @@ re-scrape no pierda la corrección: `habitaciones` → `hoteles` + `hotel_habita
 **`parcela_uf_manual`** (mig. 046) · **`direccion`** → `parcelas` (`direccion_source='manual'`) +
 **`parcela_direccion_manual`** (mig. 052).
 
-**Corregir TODAS las variables de una dirección (✏️ Corregir dirección):** toda tarjeta con
-parcela ofrece, además de la acción propia de su tipo, un formulario con **calle · número ·
-complemento · bairro · CEP · tipo de edificación · UF vivienda · UF comercio**, precargado con
-los valores actuales (`GET /api/parcelas/{parcela_id}`) y con el origen de cada dato al pie
-(`direccion_source` / `uf_fuente`). Un caso de altura o de UF casi siempre destapa además que la
-dirección está mal rotulada, y antes no había forma de arreglarla sin entrar a la base. Los
-campos que se dejan igual no se tocan. Cada concepto se guarda en **su** tabla de override
-(dirección → `parcela_direccion_manual`, tipo → `parcela_tipo_manual`, UF → `parcela_uf_manual`),
-así no hay dos lugares donde viva el mismo dato. La corrección de dirección va a **`parcelas`
-directamente** con `direccion_source='manual'`: tiene que llegar al CSV, al CSV Operadora y al
-apareo contra el relevamiento anterior — si quedara sólo en una columna secundaria, el trabajo del
-operador no llegaría al entregable. `NumeroEstimator` **re-aplica** `parcela_direccion_manual` al
+**Editor ÚNICO de la ubicación (✏️ Editar ubicación) — un solo botón de guardar:** cada tarjeta
+tiene **un** formulario con todo lo editable y **un** botón «💾 Guardar cambios» al final, en vez
+de un mini-form por variable: **calle · número · complemento · bairro · CEP · tipo de edificación ·
+UF vivienda · UF comercio · coordenada · habitaciones** (estas últimas sólo si el caso trae hotel).
+Viene precargado con los valores actuales (`GET /api/parcelas/{parcela_id}`, que devuelve también
+`lat`/`lng`/`ubicacion_source`) y con el origen de cada dato al pie. Los campos que se dejan igual
+no se mandan y no se tocan. Un caso de altura o de UF casi siempre destapa además que la dirección
+está mal rotulada, y antes no había forma de arreglarla sin entrar a la base.
+**La coordenada** se corrige arrastrando el pin sobre el satélite (botón «📍 Mover», marcador
+`draggable` que al soltarse escribe lat/lng en el form) o escribiéndola. Va a **tres destinos**
+según qué es la ubicación del caso, en ese orden: **hotel** (`_mover_hotel`: mueve el pin,
+**re-vincula la parcela** por `ST_Contains` y persiste `hotel_ubicacion_manual`, mig. 049) →
+**parcela** (`centroid_lat/lng` + `ubicacion_source='manual'` + `parcela_ubicacion_manual`,
+mig. 053; **no toca `geometry`**, que es el polígono del catastro) → **dirección del relevamiento
+anterior** (`baseline_direcciones.lat/lng` con `geocode_source='manual'`). Eso le da acción por
+primera vez a **`geocoding_dudoso`**, que mostraba el problema —el punto está a cientos de metros
+de su calle— y no ofrecía forma de arreglarlo. Ojo: 16 de 20 `hotel_sin_habitaciones` **no tienen
+parcela**, así que ese camino también acepta habitaciones + coordenada.
+Cada concepto se guarda en **su** tabla de override (dirección → `parcela_direccion_manual`, tipo →
+`parcela_tipo_manual`, UF → `parcela_uf_manual`, coordenada → la de arriba según el objeto,
+habitaciones → `hotel_habitaciones_manual`), todo en **una sola transacción**: el "guardar" es uno
+solo también del lado de los datos. Las acciones que **no** son edición de campos siguen aparte,
+porque son decisiones que borran o cierran un registro: **🔒 Está cerrado · 🚫 No es hotel ·
+✖ No es un problema**. La corrección de dirección va a **`parcelas` directamente** con
+`direccion_source='manual'`: tiene que llegar al CSV, al CSV Operadora y al apareo contra el
+relevamiento anterior — si quedara sólo en una columna secundaria, el trabajo del operador no
+llegaría al entregable. `NumeroEstimator` **re-aplica** `parcela_direccion_manual` al
 arrancar, así un re-scrape del BCI no la pisa (clave `(region_id, cca_code)`: la inscrição es
-estable entre relevamientos, el `parcela_id` no). Endpoints: `GET /api/surveys/{sid}/incidencias?estado=&tipo=`
+estable entre relevamientos, el `parcela_id` no); por el mismo motivo **SmartGIS no pisa el
+centroide** cuando `ubicacion_source='manual'`. Endpoints: `GET /api/surveys/{sid}/incidencias?estado=&tipo=`
 (lista + `resumen` por tipo/estado), `POST .../incidencias/generar`,
-`POST /api/incidencias/{id}/resolver` (`{accion, valor, nota}`). En los tipos de altura la tarjeta
+`POST /api/incidencias/{id}/resolver` (`{accion, valor, nota}`; la acción del editor único es
+`ubicacion` — `direccion` se acepta como alias histórico). En los tipos de altura la tarjeta
 **muestra el año de la imagen satelital** con una advertencia — en VG el 89% es de 2014, así que el
 dato no refleja obra posterior. Resultado VG: **139 incidencias** (55 sin declarar, 45 más alto,
 28 UF imposible, 11 hoteles).

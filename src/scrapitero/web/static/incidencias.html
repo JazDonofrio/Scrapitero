@@ -129,19 +129,24 @@ const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
   const u=Math.sin(x/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.sqrt(u));};
 
 // Metadata por tipo: etiqueta, color del marcador y qué acciones ofrece la tarjeta.
+// `editar` = el formulario ÚNICO de la ubicación (dirección + coordenada + tipo + UF +
+// habitaciones si es hotel), con un solo botón de guardar. Las demás acciones que quedan
+// sueltas NO son ediciones de campos sino DECISIONES que borran o cierran un registro
+// (`no_es_hotel` elimina el hotel, `cerrado` lo marca inactivo, `descartar` cierra el caso),
+// así que siguen aparte y con su propia confirmación.
 const TIPOS = {
   hotel_sin_habitaciones: {label:'🏨 Hoteles sin habitaciones', color:'#7c3aed',
-                           acciones:['habitaciones','cerrado','no_es_hotel','direccion']},
-  altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['tipo_edificacion','uf','direccion']},
-  altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['tipo_edificacion','uf','direccion']},
-  uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['uf','direccion']},
+                           acciones:['editar','cerrado','no_es_hotel']},
+  altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['editar']},
+  altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['editar']},
+  uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['editar']},
   // El catastro no trae el número de puerta y la interpolación se negó a estimarlo (calle con
   // numeración incoherente). Sólo se resuelve mirando el frente: se carga a mano.
-  numero_faltante:        {label:'🔢 Sin número',    color:'#0ea5e9', acciones:['numero','direccion']},
+  numero_faltante:        {label:'🔢 Sin número',    color:'#0ea5e9', acciones:['editar']},
   // Ubicación dudosa del relevamiento anterior: se revisa ANTES de dibujar la zona (si el
-  // punto está mal, la zona sale mal). No hay acción de corrección automática: el operador
-  // verifica en el mapa / Google Maps y descarta si está bien.
-  geocoding_dudoso:       {label:'📍 Ubicación dudosa', color:'#06b6d4', acciones:[]},
+  // punto está mal, la zona sale mal). El editor le deja arrastrar el punto al lugar correcto
+  // (antes este tipo no ofrecía NINGUNA acción: se veía el problema y no se podía arreglar).
+  geocoding_dudoso:       {label:'📍 Ubicación dudosa', color:'#06b6d4', acciones:['editar']},
 };
 const tipoMeta = t => TIPOS[t] || {label:t, color:'#94a3b8', acciones:[]};
 
@@ -236,27 +241,17 @@ function datosHtml(t, d){
 // antes `uf` era la única acción de `uf_imposible`, estaba oculta y su link solo aparecía
 // `if acc.length>1` ⇒ no había forma de corregir la UF en esos 34 casos.
 const ACC_DEF = {
-  habitaciones:     { link: '🛏 Cargar habitaciones',
-                      form: () => `<input type="number" min="0" placeholder="habitaciones"><button>Guardar</button>` },
-  tipo_edificacion: { link: '🏷 Etiquetar tipo',
-                      form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Etiquetar</button>` },
-  uf:               { link: '🔢 Corregir UF',
-                      form: () => `<input type="number" min="0" placeholder="UF viv">`
-                                + `<input type="number" min="0" placeholder="UF com">`
-                                + `<button class="warn">Corregir UF</button>` },
+  // Editor ÚNICO de la ubicación: se completa al abrirlo con los valores actuales
+  // (GET /api/parcelas/{id}) y el operador corrige sobre lo que hay. Lo que deja igual no se
+  // manda, así que no se toca. Un solo botón de guardar al final.
+  editar:           { link: '✏️ Editar ubicación', color: '#38bdf8',
+                      form: () => `<div class="dirform" style="width:100%">`
+                        + `<div class="mut" style="margin-bottom:4px">Cargando datos…</div></div>` },
   // Es un hotel, pero ya no opera: la fila se CONSERVA (pin rojo en el mapa) y la nota
   // cuenta qué hay hoy en su lugar. Distinto de `no_es_hotel`, que borra la fila.
   cerrado:          { link: '🔒 Está cerrado',
                       form: () => `<input placeholder="qué opera hoy ahí (opcional)">`
                                 + `<button class="warn">Marcar cerrado</button>` },
-  numero:           { link: '🔢 Cargar número',
-                      form: () => `<input placeholder="nº de puerta"><button>Guardar</button>` },
-  // Corregir TODAS las variables de la dirección. El form se completa al abrirlo con los
-  // valores actuales de la parcela (GET /api/parcelas/{id}): el operador corrige sobre lo que
-  // hay, y lo que deje igual no se toca.
-  direccion:        { link: '✏️ Corregir dirección', color: '#38bdf8',
-                      form: () => `<div class="dirform" style="width:100%">`
-                        + `<div class="mut" style="margin-bottom:4px">Cargando datos…</div></div>` },
   no_es_hotel:      { link: '🚫 No es hotel',
                       form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Confirmar</button>` },
   descartar:        { link: '✖ No es un problema', color: '#94a3b8',
@@ -264,51 +259,118 @@ const ACC_DEF = {
                                 + `<button class="gris">Descartar</button>` },
 };
 
-// Trae los valores actuales de la parcela y arma los campos editables. El operador corrige
-// sobre lo que hay; lo que deja igual se manda igual y no cambia nada. Sin parcela (p.ej.
-// `geocoding_dudoso`, que apunta al relevamiento anterior) no hay nada que corregir acá.
-async function llenarFormDireccion(row, parcelaId, onSubmit){
+// ── Mover el punto en el mapa ───────────────────────────────────────────────────────────
+// Marcador arrastrable, uno solo a la vez. Al soltarlo escribe lat/lng en los inputs del
+// formulario abierto: el operador ubica mirando el satélite y guarda con el resto de los
+// campos, en el mismo botón.
+let dragMk = null;
+function activarArrastre(row, lat, lng){
+  if(dragMk){ map.removeLayer(dragMk); dragMk = null; }
+  const inLat = row.querySelector('[name="lat"]'), inLng = row.querySelector('[name="lng"]');
+  const p0 = [lat!=null?lat:map.getCenter().lat, lng!=null?lng:map.getCenter().lng];
+  dragMk = L.marker(p0, {draggable:true, autoPan:true, zIndexOffset:1000}).addTo(map)
+    .bindTooltip('Arrastrame a la posición correcta', {permanent:true, direction:'top'});
+  const set = (ll)=>{ inLat.value = ll.lat.toFixed(6); inLng.value = ll.lng.toFixed(6);
+                      const av = row.querySelector('.coord-aviso');
+                      if(av) av.textContent = '📍 Punto movido — se guarda con el botón de abajo.'; };
+  dragMk.on('dragend', ()=>set(dragMk.getLatLng()));
+  map.setView(p0, Math.max(map.getZoom(), 19));
+  set(dragMk.getLatLng());
+}
+function limpiarArrastre(){ if(dragMk){ map.removeLayer(dragMk); dragMk = null; } }
+
+// Trae los valores actuales y arma TODOS los campos editables de la ubicación. El operador
+// corrige sobre lo que hay; lo que deja igual no se manda y no se toca. Un único botón guarda
+// todo junto. Sin parcela (caso `geocoding_dudoso`, que apunta a una dirección del
+// relevamiento anterior) lo único editable es la coordenada, que es justo lo que está mal.
+async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
   const cont = row.querySelector('.dirform');
   if(!cont || cont.dataset.listo) return;
-  if(!parcelaId){ cont.innerHTML = '<div class="mut">Esta incidencia no está asociada a una parcela.</div>'; return; }
-  let d;
-  try{ d = await fetch('/api/parcelas/'+parcelaId).then(r=>r.json()); }catch(e){ d = null; }
-  if(!d || !d.ok){ cont.innerHTML = '<div class="mut">No se pudieron cargar los datos.</div>'; return; }
   const inp = (n,lbl,v,extra='') => `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">`
     + `${esc(lbl)}<input name="${n}" value="${esc(v??'')}" ${extra} style="width:100%"></label>`;
-  const opts = tiposOptions(d.tipo_edificacion);
-  cont.innerHTML =
-    `<div style="display:grid;grid-template-columns:2fr 1fr;gap:6px">`
-    + inp('calle','Calle', d.calle) + inp('numero','Número', d.numero) + `</div>`
-    + `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:5px">`
-    + inp('complemento','Complemento', d.complemento) + inp('barrio','Bairro', d.barrio)
-    + inp('codigo_postal','CEP', d.codigo_postal) + `</div>`
-    + `<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;margin-top:5px">`
-    + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Tipo de edificación`
-    + `<select name="tipo_edificacion" style="width:100%">${opts}</select></label>`
-    + inp('uf_vivienda','UF vivienda', d.uf_vivienda, 'type="number" min="0"')
-    + inp('uf_comercio','UF comercio', d.uf_comercio, 'type="number" min="0"') + `</div>`
-    + `<div class="row" style="margin-top:6px">`
-    + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
-    + `<button>Guardar dirección</button></div>`
-    + `<div class="mut" style="margin-top:4px;font-size:.68rem">Origen actual: `
-    + `dirección «${esc(d.direccion_source||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
-    + (d.numero_estimado ? ` · nº estimado ≈${esc(d.numero_estimado)}` : '') + `</div>`;
+  const bloqueCoord = (lat,lng,fuente) =>
+      `<div style="margin-top:7px;padding-top:6px;border-top:1px dashed #3b4860">`
+    + `<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:end">`
+    + inp('lat','Latitud', lat!=null?Number(lat).toFixed(6):'', 'type="number" step="any"')
+    + inp('lng','Longitud', lng!=null?Number(lng).toFixed(6):'', 'type="number" step="any"')
+    + `<button type="button" class="gris mover-btn" title="Arrastrar el punto sobre el mapa">📍 Mover</button></div>`
+    + `<div class="mut coord-aviso" style="margin-top:3px;font-size:.68rem">`
+    + (fuente==='manual' ? 'Coordenada ya corregida a mano.' : 'Arrastrá el punto o escribí las coordenadas.')
+    + `</div></div>`;
+
+  // Las habitaciones sólo existen si el caso trae un hotel.
+  const campoHab = (ctx && ctx.hotel_id)
+    ? `<div style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:5px">`
+      + inp('habitaciones','Habitaciones del hotel', ctx.habitaciones ?? '', 'type="number" min="0"')
+      + `</div>` : '';
+
+  // Sin parcela: la coordenada (del hotel o de la dirección anterior) + habitaciones si es hotel.
+  // 16 de los 20 hoteles sin habitaciones NO tienen parcela vinculada, así que este camino tiene
+  // que seguir permitiendo cargarlas.
+  if(!parcelaId){
+    cont.innerHTML =
+      `<div class="mut" style="font-size:.72rem">`
+      + (ctx && ctx.hotel_id
+          ? `Este hotel no está vinculado a ninguna parcela. Se puede corregir su ubicación —al `
+            + `moverlo se re-vincula solo con la parcela que lo contenga— y sus habitaciones.`
+          : `Esta incidencia no tiene parcela del relevamiento nuevo: apunta a una dirección del `
+            + `relevamiento anterior. Lo que se corrige es dónde está.`)
+      + `</div>`
+      + campoHab
+      + bloqueCoord(ctx && ctx.lat, ctx && ctx.lng, '')
+      + `<div class="row" style="margin-top:6px">`
+      + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
+      + `<button>💾 Guardar cambios</button></div>`;
+  } else {
+    let d;
+    try{ d = await fetch('/api/parcelas/'+parcelaId).then(r=>r.json()); }catch(e){ d = null; }
+    if(!d || !d.ok){ cont.innerHTML = '<div class="mut">No se pudieron cargar los datos.</div>'; return; }
+    const opts = tiposOptions(d.tipo_edificacion);
+    cont.innerHTML =
+      `<div style="display:grid;grid-template-columns:2fr 1fr;gap:6px">`
+      + inp('calle','Calle', d.calle) + inp('numero','Número', d.numero) + `</div>`
+      + `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:5px">`
+      + inp('complemento','Complemento', d.complemento) + inp('barrio','Bairro', d.barrio)
+      + inp('codigo_postal','CEP', d.codigo_postal) + `</div>`
+      + `<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:6px;margin-top:5px">`
+      + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Tipo de edificación`
+      + `<select name="tipo_edificacion" style="width:100%">${opts}</select></label>`
+      + inp('uf_vivienda','UF vivienda', d.uf_vivienda, 'type="number" min="0"')
+      + inp('uf_comercio','UF comercio', d.uf_comercio, 'type="number" min="0"') + `</div>`
+      + campoHab
+      + bloqueCoord(d.lat, d.lng, d.ubicacion_source)
+      + `<div class="row" style="margin-top:6px">`
+      + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
+      + `<button>💾 Guardar cambios</button></div>`
+      + `<div class="mut" style="margin-top:4px;font-size:.68rem">Origen actual: `
+      + `dirección «${esc(d.direccion_source||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
+      + (d.ubicacion_source ? ` · ubicación «${esc(d.ubicacion_source)}»` : '')
+      + (d.numero_estimado ? ` · nº estimado ≈${esc(d.numero_estimado)}` : '') + `</div>`;
+  }
   cont.dataset.listo = '1';
-  // El botón se crea recién ahora (el form llega por fetch), así que se cablea acá y no en el
-  // loop de acciones del card, que corrió antes de que existiera.
+  // Los controles se crean recién ahora (el form llega por fetch), así que se cablean acá y
+  // no en el loop de acciones del card, que corrió antes de que existieran.
   cont.querySelectorAll('.row').forEach(r => r.onclick = (e)=>e.stopPropagation());
-  const btn = cont.querySelector('button');
+  const mover = cont.querySelector('.mover-btn');
+  if(mover) mover.onclick = (e)=>{ e.preventDefault(); e.stopPropagation();
+    const g = k => parseFloat((cont.querySelector(`[name="${k}"]`)||{}).value);
+    const la = g('lat'), ln = g('lng');
+    activarArrastre(cont, isNaN(la)?(ctx&&ctx.lat):la, isNaN(ln)?(ctx&&ctx.lng):ln);
+  };
+  const btn = cont.querySelector('.row button');
   if(btn) btn.onclick = (e)=>{ e.stopPropagation(); onSubmit(btn); };
 }
 
-// Lee el form de corrección y arma el payload: sólo los campos con valor. `resolver` aplica
-// cada uno en su tabla de override (dirección / tipo / UF).
+// Lee el form y arma el payload: sólo los campos con valor. El backend aplica cada uno en su
+// tabla de override (dirección / tipo / UF / coordenada / habitaciones) en una sola
+// transacción, así el "guardar" es uno solo también del lado de los datos.
 function payloadDireccion(row){
   const g = k => { const el=row.querySelector(`[name="${k}"]`); return el ? el.value.trim() : ''; };
   const p = {};
   ['calle','numero','complemento','barrio','codigo_postal','tipo_edificacion',
-   'uf_vivienda','uf_comercio'].forEach(k=>{ const v=g(k); if(v!=='') p[k]=v; });
+   'uf_vivienda','uf_comercio','habitaciones','lat','lng'].forEach(k=>{ const v=g(k); if(v!=='') p[k]=v; });
+  // lat y lng viajan siempre juntas o ninguna: media coordenada no ubica nada.
+  if((p.lat==null) !== (p.lng==null)){ delete p.lat; delete p.lng; }
   return {payload:p, nota:g('nota_dir')||null};
 }
 
@@ -340,6 +402,7 @@ function renderFiltros(resumen){
 }
 
 async function load(){
+  limpiarArrastre();          // la lista se re-arma: el marcador de arrastre queda huérfano
   if(!TIPOS_HTML) await cargarTipos();
   const q = new URLSearchParams({estado:filtroEstado}); if(filtroTipo) q.set('tipo', filtroTipo);
   const d = await fetch(`/api/surveys/${SID}/incidencias?`+q).then(r=>r.json());
@@ -389,11 +452,17 @@ async function load(){
         ? `<div style="margin-top:6px"><a href="#" class="acc-tog reabrir-lnk"
              style="color:#0ea5e9">↩ Reabrir / corregir</a></div>` : '')+
       (editable?accionesHtml(it.tipo):'');
-    // Guardado del form de corrección de dirección (se cablea cuando el form ya existe).
+    // Contexto que el editor necesita y que no está en /api/parcelas: la coordenada del caso
+    // (para los que no tienen parcela) y el hotel, si lo hay.
+    const ctxEdit = {lat: it.lat, lng: it.lng,
+                     hotel_id: (it.datos||{}).hotel_id,
+                     habitaciones: (it.datos||{}).habitaciones};
+    // Guardado ÚNICO del editor (se cablea cuando el form ya existe).
     const submitDir = (row) => (btn) => {
       const {payload, nota} = payloadDireccion(row);
       if(!Object.keys(payload).length){ alert('No cambiaste ningún campo'); return; }
-      resolver(it.incidencia_id,'direccion',payload,nota,btn,card);
+      limpiarArrastre();
+      resolver(it.incidencia_id,'ubicacion',payload,nota,btn,card);
     };
     // Cablear acciones
     card.querySelectorAll('.row').forEach(row=>{
@@ -402,28 +471,15 @@ async function load(){
       btn.onclick=(e)=>{
         e.stopPropagation();
         const a=row.dataset.a;
-        if(a==='habitaciones'){
-          const n=parseInt(row.querySelector('input').value,10);
-          if(isNaN(n)||n<0){ alert('Ingresá un número válido de habitaciones'); return; }
-          resolver(it.incidencia_id,'habitaciones',n,null,btn,card);
-        } else if(a==='cerrado'){
+        if(a==='cerrado'){
           const v=row.querySelector('input').value.trim();
           if(!confirm('Marcar el hotel como CERRADO? Sigue en el mapa, con el pin rojo.')) return;
           resolver(it.incidencia_id,'cerrado',v,null,btn,card);
-        } else if(a==='tipo_edificacion'||a==='no_es_hotel'){
+        } else if(a==='no_es_hotel'){
           const v=row.querySelector('select').value;
           if(!v){ alert('Elegí una etiqueta'); return; }
-          if(a==='no_es_hotel' && !confirm(`Marcar como NO hotel y etiquetar "${v}"?`)) return;
+          if(!confirm(`Marcar como NO hotel y etiquetar "${v}"?`)) return;
           resolver(it.incidencia_id,a,v,null,btn,card);
-        } else if(a==='uf'){
-          const ins=row.querySelectorAll('input');
-          const uv=parseInt(ins[0].value,10), uc=parseInt(ins[1].value,10);
-          if(isNaN(uv)||isNaN(uc)||uv<0||uc<0){ alert('Ingresá UF vivienda y comercio (≥ 0)'); return; }
-          resolver(it.incidencia_id,'uf',{uf_vivienda:uv,uf_comercio:uc},null,btn,card);
-        } else if(a==='numero'){
-          const v=row.querySelector('input').value.trim();
-          if(!v || !/\d/.test(v)){ alert('Ingresá el número de puerta'); return; }
-          resolver(it.incidencia_id,'numero',v,null,btn,card);
         } else if(a==='descartar'){
           resolver(it.incidencia_id,'descartar',null,row.querySelector('textarea').value,btn,card);
         }
@@ -441,12 +497,13 @@ async function load(){
         if(!row) return;
         const abriendo = row.style.display==='none';
         row.style.display = abriendo ? 'flex' : 'none';
-        if(abriendo && tog.dataset.t==='direccion') llenarFormDireccion(row, it.parcela_id, submitDir(row));
+        if(abriendo && tog.dataset.t==='editar') llenarFormDireccion(row, it.parcela_id, submitDir(row), ctxEdit);
+        if(!abriendo && tog.dataset.t==='editar') limpiarArrastre();
       };
     });
-    // si el form de dirección quedó abierto de entrada (único de su tipo), llenarlo ya
-    const rowDir = card.querySelector('.row[data-a="direccion"]');
-    if(rowDir && rowDir.style.display!=='none') llenarFormDireccion(rowDir, it.parcela_id, submitDir(rowDir));
+    // si el editor quedó abierto de entrada (primera acción del tipo), llenarlo ya
+    const rowDir = card.querySelector('.row[data-a="editar"]');
+    if(rowDir && rowDir.style.display!=='none') llenarFormDireccion(rowDir, it.parcela_id, submitDir(rowDir), ctxEdit);
     if(it.lat!=null){
       const mk=L.circleMarker([it.lat,it.lng],{radius:8,color:meta.color,fillColor:meta.color,
         fillOpacity:.5,weight:2}).addTo(map).bindPopup(`${esc(it.titulo)}`);

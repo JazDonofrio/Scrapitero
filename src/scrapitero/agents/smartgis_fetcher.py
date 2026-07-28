@@ -519,7 +519,11 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
                     UPDATE parcelas SET
                         survey_id = :sid,
                         geometry = COALESCE(ST_GeomFromText(:geom, 4326), geometry),
-                        centroid_lat = :lat, centroid_lng = :lon,
+                        -- el punto movido a mano por el operador (mig. 053) tampoco se pisa
+                        centroid_lat = CASE WHEN ubicacion_source = 'manual'
+                                       THEN centroid_lat ELSE :lat END,
+                        centroid_lng = CASE WHEN ubicacion_source = 'manual'
+                                       THEN centroid_lng ELSE :lon END,
                         calle = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
                                 THEN calle ELSE COALESCE(:calle, calle) END,
                         barrio = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
