@@ -65,6 +65,11 @@ class IncidenciasInput(BaseModel):
     # Distancia a la parcela más cercana de su MISMA calle a partir de la cual una dirección
     # del relevamiento anterior se considera mal ubicada (ver `_casos_geocoding`).
     lejos_calle_m: float = 150.0
+    # Confianza mínima para dar por bueno un número estimado. Por debajo, la parcela va a
+    # `numero_faltante` para que un humano confirme la altura. El corte en 0,4 deja afuera
+    # justo las extrapolaciones (más allá del último ancla de la calle), que es donde el
+    # estimador mide peor. MISMO valor que usa el export — si se cambia, cambiar los dos.
+    numero_conf_min: float = 0.4
 
 
 class IncidenciasOutput(BaseModel):
@@ -183,15 +188,24 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
     return casos
 
 
-def _casos_numero_faltante(conn, survey_id: str) -> list[dict]:
-    """Parcelas sin número de puerta que `NumeroEstimator` tampoco pudo estimar.
+def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
+    """Parcelas cuya altura no se puede dar por buena: ni el catastro la trae ni la
+    interpolación llegó a una estimación confiable.
 
-    El catastro no trae la altura (campo en `0` o vacío) y la interpolación se negó a inventarla:
-    o la calle no tiene anclas suficientes, o su numeración no sigue el orden espacial
-    (coherencia < 0,6 — en VG `CLOVIS HUGNEY` 0,42 · `JOAO LIBANIO` 0,41 · `MAL RONDON` 0,55 ·
-    `SÃO BERNARDO` 0,56, donde el error medido llega a ~220 números en el p90). Sin número la
-    parcela no aparea por dirección contra el relevamiento anterior y sale con `NUMERO` vacío en
-    el CSV de operadora, así que es un caso para resolver a mano mirando el frente en Street View.
+    **La parcela NO está en duda.** Viene del catastro con su inscrição, su polígono, su calle
+    y su CEP: sabemos exactamente qué inmueble es y dónde está. Lo único que falta es el número
+    de puerta, que el municipio dejó en `0` o en blanco (verificado contra los PDFs del BCI, no
+    es un fallo del parser). Por eso la tarjeta lo dice explícitamente — si no, el operador cree
+    que tiene que verificar la ubicación, que es justo lo que ya está resuelto.
+
+    Entran dos situaciones:
+      · **sin estimación** — `NumeroEstimator` se negó: la calle no tiene anclas suficientes o su
+        numeración no sigue el orden espacial (coherencia < 0,6 — en VG `CLOVIS HUGNEY` 0,42 ·
+        `JOAO LIBANIO` 0,41 · `MAL RONDON` 0,55 · `SÃO BERNARDO` 0,56, con error de ~220 números
+        en el p90).
+      · **estimación floja** (confianza < `conf_min`) — típicamente extrapolaciones más allá del
+        último ancla de la calle. Se muestra el valor inferido como punto de partida, pero no
+        entra al entregable hasta que un humano lo confirme.
 
     Se incluyen los vecinos con número al alcance de la mano: son la referencia con la que el
     operador deduce la altura sin salir de la tarjeta."""
@@ -206,24 +220,39 @@ def _casos_numero_faltante(conn, survey_id: str) -> list[dict]:
                         WHERE q.survey_id = p.survey_id AND q.parcela_id <> p.parcela_id
                           AND q.calle = p.calle
                           AND q.numero IS NOT NULL AND q.numero <> '' AND q.numero <> '0'
-                        ORDER BY d LIMIT 4) v) AS vecinos
+                        ORDER BY d LIMIT 4) v) AS vecinos,
+               p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza,
+               p.codigo_postal
         FROM parcelas p
         WHERE p.survey_id = :sid
           AND p.calle IS NOT NULL AND p.calle <> ''
           AND (p.numero IS NULL OR p.numero = '' OR p.numero = '0')
-          AND p.numero_estimado IS NULL
-    """), {"sid": survey_id}).fetchall()
+          AND (p.numero_estimado IS NULL
+               OR COALESCE(p.numero_estimado_confianza, 0) < :conf)
+    """), {"sid": survey_id, "conf": conf_min}).fetchall()
 
     casos = []
     for r in rows:
         pid, calle, _numero, cca, barrio = r[0], r[1], r[2], r[3], r[4]
         lat, lng, uso, area_t, vecinos = r[5], r[6], r[7], r[8], r[9]
+        est, metodo, conf, cep = r[10], r[11], r[12], r[13]
+        # La ubicación está resuelta; lo que falta es sólo el rótulo. Decirlo evita que el
+        # operador salga a verificar algo que ya es dato del municipio.
+        ubicacion = (f"Ubicación confirmada por catastro (inscrição {cca}"
+                     + (f", CEP {cep}" if cep else "") + "): la parcela y su calle son correctas, "
+                     "falta únicamente el número de puerta, que el municipio no declaró. ")
+        if est:
+            motivo = (f"La interpolación sugiere ≈{est}, pero con confianza baja "
+                      f"({conf:.2f}{', extrapolado' if (metodo or '').endswith('_extrap') else ''}), "
+                      "así que no se usa en el relevamiento hasta confirmarla. ")
+        else:
+            motivo = ("La numeración de esta calle no permite interpolarlo con confianza "
+                      "(sin anclas suficientes o fuera de orden espacial). ")
         casos.append({
             "tipo": "numero_faltante",
             "clave": f"numero_faltante:{pid}",
             "titulo": f"🔢 {calle} (sin número) — cargar la altura",
-            "detalle": ("El catastro no declara el número de puerta y la numeración de esta calle "
-                        "no permite interpolarlo con confianza. "
+            "detalle": (ubicacion + motivo
                         + (f"Vecinos con número: {vecinos}. " if vecinos else "")
                         + "Cargá la altura mirando el frente."),
             "lat": float(lat) if lat is not None else None,
@@ -233,6 +262,9 @@ def _casos_numero_faltante(conn, survey_id: str) -> list[dict]:
             "datos": {
                 "direccion": f"{calle} (sin número)", "cca_code": cca, "barrio": barrio,
                 "uso": uso, "vecinos_con_numero": vecinos,
+                "numero_estimado": est, "numero_estimado_metodo": metodo,
+                "numero_estimado_confianza": float(conf) if conf is not None else None,
+                "ubicacion_confirmada": True,
                 "area_m2_terreno": round(float(area_t), 0) if area_t else None,
             },
         })
@@ -417,7 +449,7 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
         casos = (_casos_hoteles(conn, input.region_id, input.survey_id)
                  + _casos_altura(conn, input.survey_id)
                  + _casos_uf_imposible(conn, input.survey_id, input.m2_por_uf_min)
-                 + _casos_numero_faltante(conn, input.survey_id)
+                 + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min)
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
                                     input.lejos_calle_m))
 

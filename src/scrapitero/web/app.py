@@ -1554,6 +1554,14 @@ async def reabrir_incidencia(incidencia_id: str) -> JSONResponse:
 # `parcelas` (dato vigente del relevamiento) + `parcela_direccion_manual` (respaldo durable).
 _CAMPOS_DIRECCION = ("calle", "numero", "complemento", "barrio", "codigo_postal")
 
+# Confianza mínima para que un número ESTIMADO salga como número de la dirección en los
+# entregables. Por debajo, la parcela va al panel de incidencias (`numero_faltante`) para que
+# un humano cargue la altura. El corte en 0,4 deja afuera justo las extrapolaciones más allá
+# del último ancla de la calle, que es donde `NumeroEstimator` mide peor.
+# MISMO valor que `IncidenciasInput.numero_conf_min` — si cambia uno, cambiar el otro, o
+# quedan parcelas sin número en el CSV y sin incidencia que las reclame.
+_NUMERO_CONF_MIN = 0.4
+
 
 @app.get("/api/parcelas/{parcela_id}")
 async def get_parcela_editable(parcela_id: str) -> JSONResponse:
@@ -2584,7 +2592,14 @@ async def export_csv(survey_id: str) -> StreamingResponse:
 
         for r in rows:
             comp_ef = (r[4] or "").strip() or letras_rep.get(r[34], "")
-            direccion = " ".join(s for s in (r[2], r[3], comp_ef) if s).strip()
+            # Mismo criterio que el CSV de operadora: toda dirección sale con número, usando el
+            # estimado cuando el municipio no lo declaró y la interpolación es confiable. Acá el
+            # número crudo del catastro sigue visible en su columna (`DSC_LOGRADOURO_NO`) y el
+            # inferido en las suyas (método y confianza), así se puede auditar cuál se usó.
+            num_ef = (r[3] or "").strip()
+            if num_ef in ("", "0") and (r[42] or 0) >= _NUMERO_CONF_MIN:
+                num_ef = str(r[40] or "")
+            direccion = " ".join(s for s in (r[2], num_ef, comp_ef) if s).strip()
             unidades = unidades_por_parcela.get(r[34])
             if unidades:
                 # Edificio/lote con varias unidades: una fila por unidad (sin conteo).
@@ -2655,7 +2670,21 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 mapped = [h for h in mapeo_d.values() if h]
                 header = mapped + [k for k in extras_keys if k not in mapped]
             parc = conn.execute(text("""
-                SELECT calle, numero, complemento, barrio, municipio, estado_provincia,
+                SELECT calle,
+                       -- Toda dirección tiene que salir con número. Cuando el municipio no lo
+                       -- declaró (campo en '0' o vacío, el 12,8% de las parcelas del BCI), se
+                       -- usa el que interpoló `NumeroEstimator` sobre el eje de la calle,
+                       -- pero SÓLO si su confianza llega al piso: las extrapolaciones más allá
+                       -- del último ancla miden mal y esas parcelas van al panel de incidencias
+                       -- para que un humano cargue la altura mirando el frente.
+                       -- `parcelas.numero` NO se toca: sigue siendo el dato del municipio, y el
+                       -- inferido vive en `numero_estimado*` (mig. 050). Acá sólo se elige cuál
+                       -- de los dos sale al entregable.
+                       CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
+                            WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 THEN numero_estimado
+                            ELSE NULL END AS numero,
+                       complemento, barrio, municipio, estado_provincia,
                        codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
                        -- Nombre del comercio de la parcela (para DSC_NOME_DO_IMOVEL): hoteles +
                        -- comercios (Google) + establecimiento agrupado + shoppings (POI espacial).
@@ -2679,7 +2708,7 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 ORDER BY calle,
                          NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
                            NULLS LAST
-            """), {"sid": survey_id}).fetchall()
+            """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN}).fetchall()
             plantilla = (header, mapeo_d, parc)
 
         rows = None
