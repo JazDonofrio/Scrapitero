@@ -146,6 +146,8 @@ const TIPOS = {
   altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['editar']},
   altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['editar']},
   uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['editar']},
+  // El catastro declara obra pero 0 unidades: se contradice solo y la parcela aporta 0 UF.
+  uf_sin_declarar:        {label:'🧮 UF sin declarar', color:'#f97316', acciones:['editar']},
   // El catastro no trae el número de puerta y la interpolación se negó a estimarlo (calle con
   // numeración incoherente). Sólo se resuelve mirando el frente: se carga a mano.
   numero_faltante:        {label:'🔢 Sin número',    color:'#0ea5e9', acciones:['editar']},

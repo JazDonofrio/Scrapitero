@@ -15,6 +15,9 @@ Tipos que genera hoy:
   - `uf_imposible`: la UF declarada no cabe en el volumen visible (m²/UF absurdo) — detecta
     errores de carga tanto del baseline como del BCI. El umbral vive acá (no en
     `altura_fetcher`) para no tocar el criterio de una capa ya corrida.
+  - `uf_sin_declarar`: el espejo del anterior — el catastro declara área construida pero CERO
+    unidades, o sea se contradice solo y la parcela aporta 0 al relevamiento. No necesita
+    satélite: la contradicción está dentro del propio BCI.
 
 **Idempotente preservando el trabajo humano**: upsert por `(survey_id, tipo, clave)`, donde
 `clave` es natural y estable entre corridas — `<tipo>:<parcela_id>` para parcelas y
@@ -45,6 +48,9 @@ from scrapitero.db.engine import get_engine
 _PRIORIDAD = {
     "altura_sin_declarar": 1,
     "uf_imposible": 1,
+    # Contradicción interna del catastro (obra declarada, 0 unidades): son UF que faltan en el
+    # entregable y se detecta sin satélite, así que es de las más confiables.
+    "uf_sin_declarar": 1,
     # El geocoding dudoso se revisa ANTES de dibujar la zona: si una dirección del
     # relevamiento anterior está mal ubicada, la zona sale mal y se relevan las parcelas
     # equivocadas. Es el que más temprano hay que atender.
@@ -70,6 +76,9 @@ class IncidenciasInput(BaseModel):
     # justo las extrapolaciones (más allá del último ancla de la calle), que es donde el
     # estimador mide peor. MISMO valor que usa el export — si se cambia, cambiar los dos.
     numero_conf_min: float = 0.4
+    # Área construida mínima para reclamar UF a una parcela que declara 0 unidades. Por debajo
+    # puede ser un galpón/garaje sin unidad propia. En VG con 30 m² salen 13 casos (mínimo 54).
+    area_construida_min: float = 30.0
 
 
 class IncidenciasOutput(BaseModel):
@@ -319,6 +328,76 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
     return casos
 
 
+def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
+    """El catastro declara ÁREA CONSTRUIDA pero NINGUNA unidad. Se contradice solo.
+
+    Es el espejo de `uf_imposible`: allá la UF declarada no cabe en el volumen; acá hay volumen
+    construido y la UF es cero. A diferencia de las señales de altura, ésta **no necesita
+    satélite** — la contradicción está dentro del propio BCI, así que es barata y no depende de
+    la imagen (que en VG es de 2014 en el 89% de los puntos).
+
+    Importa porque son **UF que faltan en el entregable**: una parcela con obra declarada y 0
+    unidades sale del relevamiento aportando nada. Caso que lo destapó: `SAO BENTO 156`
+    (cca 101192), `uso='vacante'` con **703 m² construidos sobre 519 m² de terreno** — ratio
+    1,36, o sea más de una planta.
+
+    `area_min` filtra lo que puede ser un galpón, tapera o garaje sin unidad propia; en VG con
+    30 m² quedan 13 casos, el menor de 54 m². Se adjunta la medición satelital cuando existe:
+    no hace falta para detectar, pero al operador le sirve para decidir sin salir de la tarjeta.
+    """
+    rows = conn.execute(text("""
+        SELECT p.parcela_id::text, p.calle, p.numero, p.cca_code, p.uso_principal, p.uf_fuente,
+               p.area_m2_terreno, p.area_m2_construida, p.centroid_lat, p.centroid_lng,
+               p.numero_estimado, p.barrio,
+               a.altura_m, a.pisos_satelital, a.ground_area_m2, a.imagery_year
+        FROM parcelas p
+        LEFT JOIN parcela_altura a ON a.parcela_id = p.parcela_id
+        WHERE p.survey_id = :sid
+          AND COALESCE(p.uf_vivienda, 0) + COALESCE(p.uf_comercio, 0) = 0
+          AND COALESCE(p.area_m2_construida, 0) >= :amin
+    """), {"sid": survey_id, "amin": area_min}).fetchall()
+
+    casos = []
+    for r in rows:
+        pid, calle, numero, cca, uso, uf_fuente = r[0], r[1], r[2], r[3], r[4], r[5]
+        area_t, area_c, lat, lng, num_est, barrio = r[6], r[7], r[8], r[9], r[10], r[11]
+        altura, pisos, huella, img_year = r[12], r[13], r[14], r[15]
+        dir_txt = _direccion(calle, numero, num_est)
+        ratio = (float(area_c) / float(area_t)) if area_t else None
+        # Un ratio construido/terreno > 1 sólo se explica con más de una planta: es la señal
+        # más fuerte de que la parcela tiene unidades sin declarar.
+        extra = (f" El construido supera al terreno (ratio {ratio:.2f}), así que hay más de una "
+                 f"planta." if ratio and ratio > 1 else "")
+        if pisos:
+            extra += f" El satélite ve {pisos} piso/s sobre {float(huella or 0):.0f} m² de huella."
+        casos.append({
+            "tipo": "uf_sin_declarar",
+            "clave": f"uf_sin_declarar:{pid}",
+            "titulo": f"🧮 {dir_txt} — {float(area_c):.0f} m² construidos y 0 UF",
+            "detalle": (f"El catastro la da como «{uso or 's/d'}» con **{float(area_c):.0f} m² "
+                        f"construidos** sobre {float(area_t or 0):.0f} m² de terreno, pero no "
+                        f"declara ninguna unidad. Se contradice solo, y así la parcela aporta 0 "
+                        f"al relevamiento.{extra} Cargá las UF que corresponden."),
+            "lat": float(lat) if lat is not None else None,
+            "lng": float(lng) if lng is not None else None,
+            "parcela_id": pid,
+            "hotel_cnpj": None,
+            "datos": {
+                "direccion": dir_txt, "cca_code": cca, "barrio": barrio,
+                "numero_estimado": num_est or None, "uso": uso, "uf_fuente": uf_fuente,
+                "uf_vivienda": 0, "uf_comercio": 0,
+                "area_m2_terreno": round(float(area_t), 0) if area_t else None,
+                "area_m2_construida": round(float(area_c), 0),
+                "ratio_constr_terreno": round(ratio, 2) if ratio else None,
+                "altura_m": round(float(altura), 1) if altura is not None else None,
+                "pisos_satelital": pisos,
+                "ground_area_m2": round(float(huella), 0) if huella else None,
+                "imagery_year": img_year,
+            },
+        })
+    return casos
+
+
 def _casos_geocoding(conn, survey_id: str, region_id: str,
                      lejos_calle_m: float = 150.0) -> list[dict]:
     """Direcciones del relevamiento anterior cuya ubicación no es de fiar.
@@ -450,6 +529,7 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
                  + _casos_altura(conn, input.survey_id)
                  + _casos_uf_imposible(conn, input.survey_id, input.m2_por_uf_min)
                  + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min)
+                 + _casos_uf_sin_declarar(conn, input.survey_id, input.area_construida_min)
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
                                     input.lejos_calle_m))
 
