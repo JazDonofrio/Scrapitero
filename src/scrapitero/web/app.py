@@ -3493,6 +3493,8 @@ async def baseline_puntos(baseline_id: str) -> JSONResponse:
         "uf_total": int((r[5] or 0) + (r[6] or 0)),
         # 'ciudad' = no se pudo ubicar en la calle → centro de la ciudad (aproximado).
         "aprox_ciudad": (r[9] == "ciudad"),
+        # el mapa de incidencias pinta distinto el punto que un humano ya reubicó
+        "fuente": r[9],
         **_status_de_extras(r[8]),
     } for r in rows]
     return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})

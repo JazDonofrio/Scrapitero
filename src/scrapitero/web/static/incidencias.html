@@ -172,7 +172,25 @@ const tiposOptions = (sel) => '<option value="">— sin cambiar —</option>' +
     g.tipos.map(t=>`<option value="${esc(t)}"${t===sel?' selected':''}>${esc(t)}</option>`).join('')
     +'</optgroup>').join('');
 
-let baselinePts = [], markers = {}, pendientes = 0;
+// Los puntos del relevamiento anterior van en su propia capa para poder REDIBUJARLOS: el
+// editor los mueve, y si se cargaran una sola vez el punto seguiría viéndose donde estaba
+// hasta recargar la página entera.
+let baselinePts = [], baselineLayer = L.layerGroup().addTo(map), markers = {}, pendientes = 0;
+
+async function cargarBaseline(bid){
+  try{
+    const b = await fetch(`/api/baselines/${bid}/puntos`).then(r=>r.json());
+    if(!b.ok) return;
+    baselinePts = b.puntos || [];
+    baselineLayer.clearLayers();
+    baselinePts.forEach(p => L.circleMarker([p.lat,p.lng],
+        {radius:3, color: p.fuente==='manual' ? '#22c55e' : '#7c3aed',
+         fillColor: p.fuente==='manual' ? '#86efac' : '#c4b5fd', fillOpacity:.7, weight:1})
+      .bindPopup(`<b>Relevamiento anterior</b><br>${esc(p.direccion)}<br>UF: ${p.uf_total}`
+        + (p.fuente==='manual' ? '<br>✏️ ubicación corregida a mano' : ''))
+      .addTo(baselineLayer));
+  }catch(e){}
+}
 function nearestBaseline(lat,lng){
   let best=null, bd=120;
   for(const p of baselinePts){ const d=distM(lat,lng,p.lat,p.lng); if(d<bd){bd=d;best={...p,d:Math.round(d)};} }
@@ -480,14 +498,9 @@ async function load(){
   if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
   pendientes = d.pendientes; updateSub(); renderFiltros(d.resumen);
 
-  if(d.baseline_id && !baselinePts.length){
-    try{ const b=await fetch(`/api/baselines/${d.baseline_id}/puntos`).then(r=>r.json());
-      if(b.ok){ baselinePts=b.puntos||[];
-        baselinePts.forEach(p=>L.circleMarker([p.lat,p.lng],{radius:3,color:'#7c3aed',
-          fillColor:'#c4b5fd',fillOpacity:.7,weight:1})
-          .bindPopup(`<b>Relevamiento anterior</b><br>${esc(p.direccion)}<br>UF: ${p.uf_total}`).addTo(map)); }
-    }catch(e){}
-  }
+  // Se recarga SIEMPRE (no sólo la primera vez): al mover un punto desde el editor, éste es
+  // el que tiene que aparecer en la posición nueva.
+  if(d.baseline_id) await cargarBaseline(d.baseline_id);
 
   Object.values(markers).forEach(m=>map.removeLayer(m)); markers={};
   const list = document.getElementById('list'); list.innerHTML='';
