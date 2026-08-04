@@ -335,6 +335,8 @@ def _aggregate_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, i
 
             if set_uso:
                 # Parcela con comercio → comercial; si ya era residencial → mixto.
+                # `uso_fuente='manual'` (corrección del operador en el panel de incidencias) no
+                # se pisa: un local de Google sobre la parcela no desmiente a quien la miró.
                 res = conn.execute(text("""
                     UPDATE parcelas SET
                         uso_principal = CASE
@@ -343,7 +345,7 @@ def _aggregate_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, i
                             ELSE 'comercial'
                         END,
                         uso_fuente = 'google'
-                    WHERE parcela_id = :pid
+                    WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'
                 """), {"pid": pid})
                 uso_upd += res.rowcount or 0
 

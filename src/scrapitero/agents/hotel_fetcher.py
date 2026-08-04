@@ -1131,16 +1131,21 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
                 uf = int(uf)
                 out.parcelas_con_hotel += 1
                 out.total_uf_comercio += uf
+                # Las UF del hotel sí se aplican siempre (son habitaciones reales), pero el USO
+                # no se toca si el operador ya lo fijó a mano desde el panel de incidencias:
+                # `manual` es el único origen irreconstruible (ver CLAUDE.md, precedencia).
                 conn.execute(text("""
                     UPDATE parcelas SET
                         uf_comercio = :uf,
                         unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0) + :uf,
                         uf_fuente = 'cadastur',
                         uso_principal = CASE
+                            WHEN COALESCE(uso_fuente, '') = 'manual' THEN uso_principal
                             WHEN uso_principal = 'residencial' THEN 'mixto'
                             WHEN uso_principal IN ('comercial','mixto') THEN uso_principal
                             ELSE 'comercial' END,
-                        uso_fuente = 'cadastur'
+                        uso_fuente = CASE WHEN COALESCE(uso_fuente, '') = 'manual'
+                                          THEN uso_fuente ELSE 'cadastur' END
                     WHERE parcela_id = :pid
                 """), {"uf": uf, "pid": pid})
 

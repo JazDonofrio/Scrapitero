@@ -185,6 +185,11 @@ def _get_parcelas(region_id: str, survey_id: Optional[str], overwrite: bool) -> 
         WHERE region_id = :rid
           AND uso_principal IS NOT NULL
           AND validado_manual = false
+          -- UF cargadas a mano desde el panel de incidencias: se respetan SIEMPRE, también
+          -- con overwrite=true. `overwrite` significa "recalculá las estimaciones", no "borrá
+          -- lo que contó un humano" — y nadie relee `parcela_uf_manual` para reponerlas, así
+          -- que pisarlas acá las perdía sin vuelta atrás.
+          AND COALESCE(uf_fuente, '') <> 'manual'
     """
     params: dict = {"rid": region_id}
     if not overwrite:

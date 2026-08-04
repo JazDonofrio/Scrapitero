@@ -146,9 +146,12 @@ def run(input: ClassifierInput) -> ClassifierOutput:
             procesadas += 1
 
             with engine.begin() as conn:
+                # `uso_fuente='manual'` = corrección del operador desde el panel de incidencias.
+                # Es el único origen irreconstruible, así que nunca se pisa (ver la regla de
+                # precedencia de fuentes en CLAUDE.md).
                 conn.execute(text(
                     "UPDATE parcelas SET uso_principal = :uso, uso_fuente = 'clasificador' "
-                    "WHERE parcela_id = :pid"
+                    "WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'"
                 ), {"uso": uso, "pid": parcela_id})
 
             logger.debug(
