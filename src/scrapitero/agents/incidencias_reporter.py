@@ -7,6 +7,9 @@ que alimenta la página `/incidencias/{survey_id}` donde el operador las resuelv
 Tipos que genera hoy:
   - `hotel_sin_habitaciones`: hotel abierto sin habitaciones en ninguna fuente (Cadastur caído,
     Google no las trae). Misma condición que la vieja asistencia de hoteles.
+  - `hotel_duplicado`: dos registros abiertos del MISMO establecimiento (re-registro societario
+    o pin suelto de Google). Duplica habitaciones en el total y en el `uf_comercio` de la
+    parcela. Se detecta por asimetría de evidencia, no por cercanía sola.
   - `altura_sin_declarar`: el catastro no declara construcción pero el satélite ve un edificio.
   - `altura_mas_alta`: el satélite ve más pisos que los que sugiere el catastro.
   - `numero_faltante`: el catastro no trae el número de puerta y `NumeroEstimator` tampoco pudo
@@ -40,8 +43,13 @@ from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.direccion_norm import nucleo_calle
-from scrapitero.agents.hotel_fetcher import _norm
+from scrapitero.agents.hotel_fetcher import _nombre_fuerte, _norm
 from scrapitero.db.engine import get_engine
+
+# Incidencias que el operador abre A MANO desde el mapa (no las produce este agente). Se
+# declaran acá porque este módulo es el que tiene que saber ignorarlas: no salen de ningún
+# escaneo, así que el barrido a `obsoleta` del final las borraría a todas.
+TIPO_MANUAL = "revision_manual"
 
 # Prioridad por tipo (1 = mirar primero). `sin_declarar` y `uf_imposible` son los que más
 # cambian el resultado del relevamiento; `mas_alto` suele ser una diferencia de criterio.
@@ -56,11 +64,26 @@ _PRIORIDAD = {
     # equivocadas. Es el que más temprano hay que atender.
     "geocoding_dudoso": 1,
     "hotel_sin_habitaciones": 2,
+    # Un duplicado abierto cuenta DOS VECES el mismo establecimiento en `habitaciones_total` y
+    # en el `uf_comercio` de la parcela. Es plata mal contada, pero se resuelve con un click
+    # (cerrar el sobrante) y no bloquea nada aguas arriba: misma prioridad que la asistencia.
+    "hotel_duplicado": 2,
     # Sin número la parcela no aparea contra el relevamiento anterior ni entra al CSV de
     # operadora, pero se resuelve mirando el frente: importante, no urgente.
     "numero_faltante": 2,
     "altura_mas_alta": 3,
 }
+
+# Fuentes de `habitaciones` que cuentan como DATO EXACTO del establecimiento. Son las que
+# distinguen al hotel vigente del re-registro societario: quien tiene UHs de Cadastur/OSM (o
+# un número puesto a mano) es el que opera. `llm` y `bci_proxy` son estimaciones y no sirven
+# para desempatar — de hecho el LLM le puso 76 y 30 al MISMO hotel en dos corridas.
+_HAB_EXACTA = ("cadastur", "osm", "manual")
+
+# Situações que delatan una sociedad que ya no opera. Conviven en `situacion_cadastur` las de
+# Receita (ATIVA/INAPTA/SUSPENSA/BAIXADA/NULA) y las de Cadastur (Em Operação/Inativo), porque
+# `HotelFetcher` guarda en esa columna la de la fuente que ganó el merge.
+_SITUACION_MUERTA = ("inapta", "suspensa", "baixada", "nula", "inativo", "cancelado")
 
 
 class IncidenciasInput(BaseModel):
@@ -79,6 +102,11 @@ class IncidenciasInput(BaseModel):
     # Área construida mínima para reclamar UF a una parcela que declara 0 unidades. Por debajo
     # puede ser un galpón/garaje sin unidad propia. En VG con 30 m² salen 13 casos (mínimo 54).
     area_construida_min: float = 30.0
+    # Radio para emparejar dos registros del mismo hotel por cercanía (ver `_casos_duplicados`).
+    # 80 m alcanza para el pin de Google contra la dirección fiscal geocodificada de la misma
+    # cuadra, sin llegar al hotel vecino: en VG, Express y Diplomata —ambos reales— están a 72 m,
+    # pero los dos tienen UHs de Cadastur, así que la asimetría de evidencia igual los excluye.
+    dup_dist_m: float = 80.0
 
 
 class IncidenciasOutput(BaseModel):
@@ -138,6 +166,135 @@ def _casos_hoteles(conn, region_id: str, survey_id: str) -> list[dict]:
                 "hotel_id": r[0],          # volátil: sirve para la acción de esta corrida
                 "nombre": r[1], "cnpj": cnpj or None, "tipo_hotel": r[3],
                 "telefono": r[4], "direccion": r[5], "situacion": r[6], "fuente": r[7],
+            },
+        })
+    return casos
+
+
+def _casos_duplicados(conn, region_id: str, survey_id: str, dup_dist_m: float) -> list[dict]:
+    """Hoteles abiertos que son el MISMO establecimiento que otro también abierto.
+
+    En Brasil el dueño cierra una sociedad y abre otra para el mismo hotel sin cambiar el
+    cartel ni la dirección, y Google agrega su propio pin sin CNPJ. `HotelFetcher` ya fusiona
+    lo que puede, pero lo que queda afuera entra dos veces al relevamiento y **duplica las
+    habitaciones** en `habitaciones_total` y en el `uf_comercio` de la parcela.
+
+    La regla es una **asimetría de evidencia**, no la mera cercanía. En los dos casos se exige
+    que UNO tenga dato exacto de habitaciones (Cadastur/OSM/manual) —el vigente— y el otro no,
+    pero la vía de proximidad pide además una señal dura:
+
+      1. **mismo cartel** (`_nombre_fuerte`, el mismo criterio con que el fetcher fusiona), a
+         cualquier distancia — las coordenadas de Cadastur/Receita son la dirección fiscal
+         geocodificada y pueden caer lejos del hotel real. Basta con la asimetría: dos registros
+         con el mismo cartel donde solo uno tiene UHs es un re-registro societario
+         (`HOTEL LAS VELAS LTDA` a 2,1 km de `HOTEL LAS VELAS`, ambos abiertos).
+      2. **proximidad** ≤ `dup_dist_m`, y **solo** si el sospechoso además no trae CNPJ (pin
+         suelto de Google) o su situação está dada de baja. Sin esa exigencia la vía de
+         proximidad se dispara sola en una avenida con hoteles pegados: `FLY HOTEL` y
+         `HOTEL TAINA` están a 23 m y son distintos — Fly aparecía como duplicado nada más
+         que porque ese día le faltaban las habitaciones.
+
+    Un hotel que solo carece de habitaciones (con CNPJ y situação activa) **no** entra acá: ese
+    es el caso de `hotel_sin_habitaciones`, que ya lo reporta.
+
+    Se emite **una incidencia por hotel sospechoso** (no por par), apuntando a su mejor
+    candidato: así el operador cierra el sobrante de un click y no ve el mismo caso dos veces.
+    El candidato nombrado es el más cercano, que no siempre es "el" original cuando hay tres
+    registros del mismo lugar — no cambia la acción, que es cerrar el sospechoso igual.
+    """
+    rows = conn.execute(text("""
+        SELECT hotel_id::text, nombre, cnpj, direccion, habitaciones, habitaciones_fuente,
+               COALESCE(business_status, situacion_cadastur) AS estado, fuente,
+               ST_Y(location) AS lat, ST_X(location) AS lng, parcela_id::text
+        FROM hoteles
+        WHERE region_id = :rid
+          AND (survey_id = CAST(:sid AS uuid) OR survey_id IS NULL)
+          AND NOT cerrado_def AND location IS NOT NULL
+        ORDER BY nombre
+    """), {"rid": region_id, "sid": survey_id}).fetchall()
+
+    hoteles = [{
+        "hotel_id": r[0], "nombre": r[1], "cnpj": (r[2] or "").strip() or None,
+        "direccion": r[3], "hab": r[4], "hab_fuente": (r[5] or "").lower(),
+        "estado": r[6], "fuente": r[7],
+        "lat": float(r[8]), "lng": float(r[9]), "parcela_id": r[10],
+    } for r in rows]
+
+    def exacto(h) -> bool:
+        return h["hab"] is not None and h["hab_fuente"] in _HAB_EXACTA
+
+    def senal_dura(h) -> bool:
+        """No parece un registro vivo: sin CNPJ (pin suelto de Google) o dado de baja."""
+        return h["cnpj"] is None or _norm(h["estado"]) in _SITUACION_MUERTA
+
+    def dist_m(a, b) -> float:
+        cos_lat = math.cos(math.radians(a["lat"]))
+        dx = (b["lng"] - a["lng"]) * 111320.0 * cos_lat
+        dy = (b["lat"] - a["lat"]) * 110540.0
+        return math.hypot(dx, dy)
+
+    vigentes = [h for h in hoteles if exacto(h)]
+    casos = []
+    for h in hoteles:
+        if exacto(h):
+            continue                      # tiene el dato duro: es el vigente, no el sobrante
+        # Mejor candidato: primero por cartel (a cualquier distancia), si no el más cercano.
+        # Dentro de cada vía gana el más próximo, para no colgarle el caso a un hotel lejano
+        # cuando el de al lado explica mejor la duplicación.
+        por_nombre = sorted(
+            (v for v in vigentes if _nombre_fuerte(h["nombre"], v["nombre"])),
+            key=lambda v: dist_m(h, v))
+        # La vía de proximidad exige la señal dura: si no, cualquier hotel real al que ese día
+        # le falten las habitaciones sale marcado por tener un Cadastur en la misma cuadra.
+        por_cerca = sorted(
+            (v for v in vigentes if dist_m(h, v) <= dup_dist_m),
+            key=lambda v: dist_m(h, v)) if senal_dura(h) else []
+        if por_nombre:
+            cand, motivo = por_nombre[0], "mismo_nombre"
+        elif por_cerca:
+            cand, motivo = por_cerca[0], "proximidad"
+        else:
+            continue
+
+        d = dist_m(h, cand)
+        senal = ("Mismo cartel" if motivo == "mismo_nombre"
+                 else f"A {d:.0f} m")
+        por_que = []
+        if h["cnpj"] is None:
+            por_que.append("no trae CNPJ (pin de Google)")
+        if _norm(h["estado"]) in _SITUACION_MUERTA:
+            por_que.append(f"situação {h['estado']}")
+        if h["hab"] is None:
+            por_que.append("ninguna fuente le da habitaciones")
+        elif not exacto(h):
+            por_que.append(f"sus {h['hab']} habitaciones son una estimación "
+                           f"({h['hab_fuente'] or 's/d'})")
+
+        casos.append({
+            "tipo": "hotel_duplicado",
+            "clave": f"hotel_duplicado:{h['cnpj'] or _norm(h['nombre'])}",
+            "titulo": f"👯 {h['nombre'] or '(sin nombre)'} — ¿duplicado de "
+                      f"{cand['nombre'] or '(sin nombre)'}?",
+            "detalle": (
+                f"{senal} de «{cand['nombre']}», que tiene {cand['hab']} habitaciones de "
+                f"{cand['hab_fuente']}. Este registro, en cambio, {'; '.join(por_que)}. "
+                "Si es el mismo establecimiento, cerrá ESTE (queda el pin rojo y sus "
+                "habitaciones dejan de contarse dos veces); si son hoteles distintos, "
+                "descartá el caso."),
+            "lat": h["lat"], "lng": h["lng"],
+            "parcela_id": h["parcela_id"],
+            "hotel_cnpj": h["cnpj"],
+            "datos": {
+                "hotel_id": h["hotel_id"],      # volátil: la acción de ESTA corrida
+                "nombre": h["nombre"], "cnpj": h["cnpj"], "direccion": h["direccion"],
+                "situacion": h["estado"], "fuente": h["fuente"],
+                "habitaciones": h["hab"], "habitaciones_fuente": h["hab_fuente"] or None,
+                "motivo_duplicado": motivo,
+                "distancia_m": round(d, 1),
+                "candidato_nombre": cand["nombre"], "candidato_cnpj": cand["cnpj"],
+                "candidato_direccion": cand["direccion"],
+                "candidato_habitaciones": cand["hab"],
+                "candidato_habitaciones_fuente": cand["hab_fuente"],
             },
         })
     return casos
@@ -526,6 +683,8 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
 
     with engine.connect() as conn:
         casos = (_casos_hoteles(conn, input.region_id, input.survey_id)
+                 + _casos_duplicados(conn, input.region_id, input.survey_id,
+                                     input.dup_dist_m)
                  + _casos_altura(conn, input.survey_id)
                  + _casos_uf_imposible(conn, input.survey_id, input.m2_por_uf_min)
                  + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min)
@@ -580,12 +739,16 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
 
         # Las pendientes que ya no aparecen en el escaneo se marcan obsoletas (el dato se
         # corrigió por otra vía, o un re-run de altura/hoteles cambió el número).
+        # EXCEPTO las que abrió el operador a mano desde el mapa (`revision_manual`): no salen
+        # de ningún escaneo, así que este UPDATE las mataría a todas en la primera corrida.
         claves = [f"{c['tipo']}|{c['clave']}" for c in casos]
         r = conn.execute(text("""
             UPDATE incidencias SET estado = 'obsoleta', actualizada_at = now()
             WHERE survey_id = CAST(:sid AS uuid) AND estado = 'pendiente'
+              AND tipo <> :tipo_manual
               AND (tipo || '|' || clave) <> ALL(:claves)
-        """), {"sid": input.survey_id, "claves": claves or [""]})
+        """), {"sid": input.survey_id, "claves": claves or [""],
+               "tipo_manual": TIPO_MANUAL})
         out.obsoletas = r.rowcount or 0
 
         out.pendientes = conn.execute(text(
