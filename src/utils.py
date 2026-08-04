@@ -1,6 +1,6 @@
 import uuid
 
-# Namespace propio para el proyecto Scraper GIS
+# Namespace propio para el proyecto AI Mapping
 NAMESPACE_SCRAPITERO = uuid.uuid5(uuid.NAMESPACE_DNS, "scrapitero.com.ar")
 
 def generar_vivienda_uuid(provincia: str, partido: str, calle: str, altura: str, piso: str = "", depto: str = "") -> uuid.UUID:

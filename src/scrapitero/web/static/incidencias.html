@@ -3,55 +3,104 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Incidencias del relevamiento</title>
+  <title>Incidencias del relevamiento — AI Mapping</title>
   <link rel="icon" type="image/svg+xml" href="/logo-mark.svg">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <!-- theme.css va DESPUÉS de leaflet.css: sus overrides de tema para los controles del
+       mapa tienen la misma especificidad y sólo ganan si se cargan después. -->
+  <link rel="stylesheet" href="/theme.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Mismo tema que el dashboard, sellado antes del primer pintado.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('aim-theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark')
+        t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <style>
-    :root{--bg:#0f172a;--panel:#1e293b;--card:#273449;--txt:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--accent:#0ea5e9;--warn:#f59e0b;--bad:#dc2626}
-    *{box-sizing:border-box} html,body{margin:0;height:100%;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+    /* Los tokens (--bg/--card/--border/…) vienen de /theme.css y resuelven en los dos
+       temas. Esta página tenía su propia paleta oscura fija con nombres que chocaban
+       con los del sistema (--card era un hex acá y una terna HSL allá), así que los
+       locales que sobreviven van con prefijo `--inc-`. */
+    html,body{margin:0;height:100%}
     #wrap{display:flex;height:100vh}
-    #side{width:420px;min-width:360px;display:flex;flex-direction:column;border-right:1px solid #334155;background:var(--panel)}
-    #head{padding:12px 14px;border-bottom:1px solid #334155}
-    #head h1{font-size:1rem;margin:0 0 4px} #head .sub{font-size:.78rem;color:var(--mut)}
+    #side{width:420px;min-width:360px;display:flex;flex-direction:column;
+          border-right:1px solid hsl(var(--border));background:hsl(var(--bg))}
+    #head{padding:12px 14px;border-bottom:1px solid hsl(var(--border));background:hsl(var(--card))}
+    #head .brandline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+    #head .brandline img{height:20px;width:auto}
+    #head .brandline .bn{font-family:var(--font-head);font-weight:700;font-size:.86rem;letter-spacing:-.02em}
+    #head .brandline .bn .ai{color:var(--brand-teal)} #head .brandline .bn .mapping{color:var(--brand-indigo)}
+    :root[data-theme="dark"] #head .brandline .bn .mapping{color:#9ea4dd}
+    /* El wordmark no puede ser hijo directo de un flex con gap: partiría "Ai|Mapping". */
+    #head .brandline .bn{white-space:nowrap}
+    #head h1{font-family:var(--font-head);font-size:1rem;margin:0 0 4px}
+    #head .sub{font-size:.78rem;color:hsl(var(--muted-fg))}
     #filtros{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
-    .chip{font-size:.72rem;padding:3px 9px;border-radius:12px;border:1px solid #475569;background:#0f172a;color:var(--mut);cursor:pointer}
-    .chip:hover{border-color:var(--accent)} .chip.on{background:var(--accent);color:#04293b;font-weight:700;border-color:var(--accent)}
-    #estado-sel{margin-top:8px;width:100%;padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.78rem}
+    .chip{font-size:.72rem;padding:3px 9px;border-radius:999px;border:1px solid hsl(var(--border));
+          background:hsl(var(--muted));color:hsl(var(--muted-fg));cursor:pointer;font-weight:600}
+    .chip:hover{border-color:hsl(var(--primary) / .6);color:hsl(var(--fg))}
+    .chip.on{background:hsl(var(--primary));color:hsl(var(--primary-fg));font-weight:700;border-color:hsl(var(--primary))}
+    #estado-sel{margin-top:8px;width:100%;padding:5px 7px;font-size:.78rem}
     #list{flex:1;overflow:auto;padding:8px}
-    .card{background:var(--card);border:1px solid #334155;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:.82rem;line-height:1.5;cursor:pointer;border-left:3px solid #475569}
-    .card:hover{border-color:var(--accent)} .card.done{opacity:.55;border-color:var(--ok)}
-    .card .nm{font-weight:700;font-size:.88rem} .card .mut{color:var(--mut);font-size:.76rem}
+    .card{background:hsl(var(--card));border:1px solid hsl(var(--border));border-radius:var(--radius-sm);
+          padding:10px 12px;margin-bottom:8px;font-size:.82rem;line-height:1.5;cursor:pointer;
+          border-left:2.5px solid hsl(var(--primary));box-shadow:var(--shadow-card);
+          transition:box-shadow .25s,transform .25s,border-color .25s}
+    .card:hover{box-shadow:var(--shadow-glow);transform:translateY(-1px)}
+    .card.done{opacity:.55;border-left-color:var(--c-ok)}
+    .card .nm{font-family:var(--font-head);font-weight:700;font-size:.88rem}
+    .card .mut{color:hsl(var(--muted-fg));font-size:.76rem}
     .card .det{margin-top:4px;font-size:.78rem}
-    .card a{color:var(--accent);text-decoration:none}
-    .card .base{margin-top:5px;padding-top:5px;border-top:1px dashed #3b4860;color:#a5b4fc;font-size:.76rem}
-    .datos{margin-top:6px;font-size:.74rem;color:#cbd5e1;background:#1b2637;border-radius:6px;padding:5px 8px}
-    .datos b{color:#e2e8f0}
+    .card a{color:hsl(var(--primary));text-decoration:none}
+    .card a:hover{text-decoration:underline}
+    .card .base{margin-top:5px;padding-top:5px;border-top:1px dashed hsl(var(--border));
+                color:var(--a-violet);font-size:.76rem}
+    .datos{margin-top:6px;font-size:.74rem;color:hsl(var(--fg) / .85);background:hsl(var(--muted));
+           border-radius:var(--radius-xs);padding:5px 8px}
+    .datos b{color:hsl(var(--fg))}
     .row{display:flex;gap:6px;align-items:center;margin-top:7px;flex-wrap:wrap}
-    .row input,.row select,.row textarea{padding:5px 7px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:var(--txt);font-size:.82rem}
+    .row input,.row select,.row textarea{padding:5px 7px;font-size:.82rem;width:auto}
     .row input[type=number]{width:88px}
     .row textarea{flex:1;min-width:150px;resize:vertical;min-height:32px}
-    .row button{padding:5px 12px;border-radius:6px;border:0;background:var(--accent);color:#04293b;font-weight:700;cursor:pointer;font-size:.8rem}
-    .row button.warn{background:var(--warn);color:#3b2705} .row button.gris{background:#475569;color:#e2e8f0}
+    .row button{padding:5px 12px;border-radius:var(--radius-xs);border:0;background:hsl(var(--primary));
+                color:hsl(var(--primary-fg));font-family:var(--font-body);font-weight:700;cursor:pointer;font-size:.8rem}
+    .row button:hover:not(:disabled){background:hsl(var(--primary) / .88)}
+    .row button.warn{background:var(--c-warn);color:#3b2705}
+    .row button.gris{background:hsl(var(--muted));color:hsl(var(--fg));border:1px solid hsl(var(--border))}
     .row button:disabled{opacity:.5;cursor:default}
-    .acc-tog{color:var(--warn);font-size:.75rem;text-decoration:none;margin-right:10px}
+    .acc-tog{color:var(--a-amber);font-size:.75rem;text-decoration:none;margin-right:10px}
     /* Marcar la coordenada en el mapa: es la acción principal del bloque, va ancha y visible.
        Vive fuera de `.row`, así que no hereda el estilo de los botones de acción. */
-    .mover-btn{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #38bdf8;
-      background:#0b2b3d;color:#7dd3fc;font-weight:700;cursor:pointer;font-size:.8rem}
-    .mover-btn:hover{background:#123c53}
-    .mover-btn.picking{background:#38bdf8;color:#04293b;border-color:#38bdf8}
+    .mover-btn{width:100%;padding:6px 10px;border-radius:var(--radius-xs);
+      border:1px solid hsl(var(--primary) / .6);
+      background:hsl(var(--primary) / .12);color:hsl(var(--primary));
+      font-family:var(--font-body);font-weight:700;cursor:pointer;font-size:.8rem}
+    .mover-btn:hover{background:hsl(var(--primary) / .2)}
+    .mover-btn.picking{background:hsl(var(--primary));color:hsl(var(--primary-fg));border-color:hsl(var(--primary))}
     #map{flex:1}
-    .tag{display:inline-block;font-size:.66rem;padding:1px 6px;border-radius:10px;background:#334155;color:#cbd5e1;margin-left:4px}
-    .tag.est{background:#14532d;color:#bbf7d0}
-    #empty{padding:24px;text-align:center;color:var(--mut)}
-    .warnbox{margin-top:5px;font-size:.72rem;color:#fbbf24}
+    .tag{display:inline-block;font-size:.66rem;padding:1px 6px;border-radius:999px;
+         background:var(--neutral-bg);color:var(--neutral-fg);margin-left:4px;font-weight:600}
+    .tag.est{background:var(--ok-bg);color:var(--ok-fg)}
+    #empty{padding:24px;text-align:center;color:hsl(var(--muted-fg))}
+    .warnbox{margin-top:5px;font-size:.72rem;color:var(--a-amber)}
   </style>
 </head>
 <body>
 <div id="wrap">
   <div id="side">
     <div id="head">
+      <div class="brandline">
+        <span style="display:flex;align-items:center;gap:.4rem">
+          <img src="/logo-mark.svg" alt="">
+          <span class="bn"><span class="ai">Ai</span><span class="mapping">Mapping</span></span>
+        </span>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Cambiar entre tema claro y oscuro"
+                aria-label="Cambiar tema"></button>
+      </div>
       <h1>🧾 Incidencias del relevamiento</h1>
       <div class="sub" id="sub">Cargando…</div>
       <div id="filtros"></div>
@@ -68,6 +117,15 @@
   <div id="map"></div>
 </div>
 <script>
+/* Tema claro/oscuro — la preferencia se comparte con el dashboard vía localStorage.
+   El tema inicial ya lo selló un script en <head>, antes del primer pintado. */
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('aim-theme', t); } catch (e) {}
+  try { map.invalidateSize(); } catch (e) {}   // `map` es const de este módulo, no window.map
+}
+
 const SID = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop());
 const QS = new URLSearchParams(location.search);
 let filtroTipo = QS.get('tipo') || '';          // el link de Telegram llega con ?tipo=
@@ -117,8 +175,9 @@ const BtnGMaps = L.Control.extend({
     a.href = '#'; a.target = '_blank'; a.rel = 'noopener';
     a.title = 'Abrir Google Maps centrado en esta misma vista';
     a.textContent = '🌍 Abrir en Google Maps';
-    Object.assign(a.style, {background:'#fff', color:'#0f172a', padding:'6px 10px',
-      borderRadius:'6px', font:'600 12px system-ui', textDecoration:'none',
+    Object.assign(a.style, {background: 'var(--overlay-bg-on)', color: 'var(--overlay-fg)',
+      padding: '6px 10px', borderRadius: 'var(--radius-xs)',
+      font: "700 12px var(--font-body)", textDecoration: 'none',
       boxShadow:'0 1px 5px rgba(0,0,0,.4)', display:'inline-block'});
     L.DomEvent.disableClickPropagation(a);
     L.DomEvent.on(a, 'click', (e) => {
@@ -143,6 +202,12 @@ const distM = (a,b,c,d)=>{const R=6371000,r=Math.PI/180,x=(c-a)*r,y=(d-b)*r;
 const TIPOS = {
   hotel_sin_habitaciones: {label:'🏨 Hoteles sin habitaciones', color:'#7c3aed',
                            acciones:['editar','cerrado','no_es_hotel']},
+  // Dos registros abiertos del MISMO establecimiento (re-registro societario o pin suelto de
+  // Google). `cerrado` va PRIMERA —es la que queda abierta en la tarjeta— porque la resolución
+  // normal es cerrar el sobrante: sus habitaciones dejan de contarse dos veces y la fila queda
+  // como pin rojo con la nota del porqué. Si resultan ser hoteles distintos, `descartar`.
+  hotel_duplicado:        {label:'👯 Posibles duplicados', color:'#be123c',
+                           acciones:['cerrado','editar','no_es_hotel']},
   altura_sin_declarar:    {label:'🏗 No declarado',   color:'#dc2626', acciones:['editar']},
   altura_mas_alta:        {label:'🏢 Más alto',       color:'#f59e0b', acciones:['editar']},
   uf_imposible:           {label:'⚠ UF imposible',   color:'#eab308', acciones:['editar']},
@@ -155,6 +220,10 @@ const TIPOS = {
   // punto está mal, la zona sale mal). El editor le deja arrastrar el punto al lugar correcto
   // (antes este tipo no ofrecía NINGUNA acción: se veía el problema y no se podía arreglar).
   geocoding_dudoso:       {label:'📍 Ubicación dudosa', color:'#06b6d4', acciones:['editar']},
+  // La abrió el operador a mano desde el mapa del relevamiento (vio algo por satélite que el
+  // dato no refleja). Es el único tipo que no produce ningún agente: no tiene diagnóstico
+  // automático, así que la nota de quien la marcó es todo el contexto que hay.
+  revision_manual:        {label:'📌 Marcadas a mano', color:'#e11d48', acciones:['editar','descartar']},
 };
 const tipoMeta = t => TIPOS[t] || {label:t, color:'#94a3b8', acciones:[]};
 
@@ -237,7 +306,7 @@ function datosHtml(t, d){
   if(d.direccion) p.push(`📍 ${esc(d.direccion)}`);
   // El «≈ N» del título/dirección NO es el número del catastro: es una inferencia de
   // NumeroEstimator (interpolación entre los linderos con número real). Se aclara siempre.
-  if(d.numero_estimado) p.push(`<span style="color:#b45309" title="El catastro no trae el`
+  if(d.numero_estimado) p.push(`<span style="color:var(--a-amber)" title="El catastro no trae el`
     + ` número de esta parcela. El ≈${esc(d.numero_estimado)} está interpolado sobre el eje de la`
     + ` calle entre los linderos que sí lo tienen.">nº ≈${esc(d.numero_estimado)} <b>estimado</b></span>`);
   if(d.telefono) p.push(`📞 <a href="tel:${esc(d.telefono)}">${esc(d.telefono)}</a>`);
@@ -256,6 +325,19 @@ function datosHtml(t, d){
     + (d.geocode_confidence!=null?` (conf ${d.geocode_confidence})`:''));
   if(d.calle_parcela) p.push(`cae en «${esc(d.calle_parcela)}${d.numero_parcela?' '+esc(d.numero_parcela):''}»`);
   if(d.cca_code) p.push(`cca ${esc(d.cca_code)}`);
+  // Duplicados: al lado de los datos del sospechoso van los del candidato vigente, que es
+  // contra lo que el operador compara para decidir. La fuente de las habitaciones es el dato
+  // que desempata (`cadastur`/`osm`/`manual` = exacto; `llm`/`bci_proxy` = estimación).
+  if(d.candidato_nombre){
+    const dist = d.motivo_duplicado === 'mismo_nombre'
+      ? `mismo cartel${d.distancia_m!=null?` · a ${d.distancia_m} m`:''}`
+      : `a ${d.distancia_m} m`;
+    p.push(`<b>vs «${esc(d.candidato_nombre)}»</b> (${esc(dist)})`);
+    if(d.candidato_habitaciones!=null) p.push(`el otro: <b>${d.candidato_habitaciones} hab</b>`
+      + ` (${esc(d.candidato_habitaciones_fuente||'s/d')})`);
+    if(d.candidato_direccion) p.push(`📍 el otro: ${esc(d.candidato_direccion)}`);
+  }
+  if(d.habitaciones_fuente) p.push(`habitaciones de <b>${esc(d.habitaciones_fuente)}</b>`);
   let html = p.length ? `<div class="datos">${p.join(' · ')}</div>` : '';
   if(d.imagery_year) html += `<div class="warnbox">🛰 Imagen satelital de ${d.imagery_year}`+
     `${d.imagery_quality?' ('+esc(d.imagery_quality)+')':''} — no refleja obra posterior.</div>`;
@@ -270,7 +352,7 @@ const ACC_DEF = {
   // Editor ÚNICO de la ubicación: se completa al abrirlo con los valores actuales
   // (GET /api/parcelas/{id}) y el operador corrige sobre lo que hay. Lo que deja igual no se
   // manda, así que no se toca. Un solo botón de guardar al final.
-  editar:           { link: '✏️ Editar ubicación', color: '#38bdf8',
+  editar:           { link: '✏️ Editar ubicación', color: 'var(--a-sky)',
                       form: () => `<div class="dirform" style="width:100%">`
                         + `<div class="mut" style="margin-bottom:4px">Cargando datos…</div></div>` },
   // Es un hotel, pero ya no opera: la fila se CONSERVA (pin rojo en el mapa) y la nota
@@ -280,7 +362,7 @@ const ACC_DEF = {
                                 + `<button class="warn">Marcar cerrado</button>` },
   no_es_hotel:      { link: '🚫 No es hotel',
                       form: () => `<select style="flex:1">${TIPOS_HTML}</select><button class="warn">Confirmar</button>` },
-  descartar:        { link: '✖ No es un problema', color: '#94a3b8',
+  descartar:        { link: '✖ No es un problema', color: 'hsl(var(--muted-fg))',
                       form: () => `<textarea placeholder="por qué no es un problema (opcional)"></textarea>`
                                 + `<button class="gris">Descartar</button>` },
 };
@@ -326,13 +408,13 @@ function activarSeleccionMapa(row, lat, lng, btn){
   map.getContainer().style.cursor = 'crosshair';
   if(btn){ btn.textContent = '✓ Listo'; btn.classList.add('picking'); }
   const av = row.querySelector('.coord-aviso');
-  if(av) av.innerHTML = '<b style="color:#38bdf8">Clickeá en el mapa</b> dónde va el punto.';
+  if(av) av.innerHTML = '<b style="color:var(--a-sky)">Clickeá en el mapa</b> dónde va el punto.';
   // Acercar a lo que hay hoy, para que el click caiga sobre la construcción y no a ciegas.
   if(lat!=null && lng!=null){
     map.setView([lat,lng], Math.max(map.getZoom(), 19));
     _pickSet(L.latLng(lat,lng));             // pin de arranque en la posición actual
     const av2 = row.querySelector('.coord-aviso');
-    if(av2) av2.innerHTML = '<b style="color:#38bdf8">Clickeá en el mapa</b> dónde va el punto '
+    if(av2) av2.innerHTML = '<b style="color:var(--a-sky)">Clickeá en el mapa</b> dónde va el punto '
                           + '(o arrastrá el pin).';
   }
 }
@@ -359,7 +441,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
   // La ubicación se marca EN EL MAPA: el botón va primero y ancho, y los campos numéricos
   // quedan abajo como salida/ajuste fino (se llenan solos al clickear).
   const bloqueCoord = (lat,lng,fuente) =>
-      `<div style="margin-top:7px;padding-top:6px;border-top:1px dashed #3b4860">`
+      `<div style="margin-top:7px;padding-top:6px;border-top:1px dashed hsl(var(--border))">`
     + `<div style="font-size:.68rem;color:var(--mut);margin-bottom:4px">Ubicación en el mapa</div>`
     + `<button type="button" class="mover-btn">📍 Marcar en el mapa</button>`
     + `<div class="mut coord-aviso" style="margin:4px 0;font-size:.68rem">`
@@ -376,6 +458,22 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
     ? `<div style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:5px">`
       + inp('habitaciones','Habitaciones del hotel', ctx.habitaciones ?? '', 'type="number" min="0"')
       + `</div>` : '';
+
+  // Uso de la parcela. Va aparte de la etiqueta 🏢 porque no son lo mismo: la etiqueta es la
+  // taxonomía del cliente (lo que se lee en el popup y en el CSV Operadora), el uso es lo que
+  // colorea el mapa, sale en el CSV del relevamiento, reparte los habitantes y alimenta la
+  // estimación de UF. Corregir sólo la etiqueta dejaba todo eso mal. Sólo para parcelas: el
+  // relevamiento anterior no se edita.
+  const USOS = ['residencial','comercial','mixto','industrial','equipamiento','vacante'];
+  const bloqueUso = (uso, fuente) =>
+      `<div style="margin-top:5px">`
+    + `<label style="display:flex;flex-direction:column;gap:2px;font-size:.68rem;color:var(--mut)">Uso de la parcela`
+    + `<select name="uso_principal" style="width:100%">`
+    + `<option value="">— dejar como está${uso ? ` (${esc(uso)})` : ''} —</option>`
+    + USOS.map(u=>`<option value="${u}"${u===uso?' selected':''}>${u}</option>`).join('')
+    + `</select></label>`
+    + (fuente==='manual' ? `<div class="mut" style="margin-top:3px;font-size:.66rem">Uso ya corregido a mano.</div>` : '')
+    + `</div>`;
 
   // Etiqueta + UF: mismos campos para parcela y para dirección del relevamiento anterior; lo
   // único que cambia es contra qué fila se guardan.
@@ -423,6 +521,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
       + `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:5px">`
       + inp('complemento','Complemento', d.complemento) + inp('barrio','Bairro', d.barrio)
       + inp('codigo_postal','CEP', d.codigo_postal) + `</div>`
+      + bloqueUso(d.uso_principal, d.uso_fuente)
       + bloqueTipoUf(d.tipo_edificacion, d.uf_vivienda, d.uf_comercio)
       + campoHab
       + bloqueCoord(d.lat, d.lng, d.ubicacion_source)
@@ -430,7 +529,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
       + `<textarea name="nota_dir" placeholder="nota (opcional): en qué te basaste"></textarea>`
       + `<button class="guardar-btn">💾 Guardar cambios</button></div>`
       + `<div class="mut" style="margin-top:4px;font-size:.68rem">Origen actual: `
-      + `dirección «${esc(d.direccion_source||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
+      + `dirección «${esc(d.direccion_source||'s/d')}» · uso «${esc(d.uso_fuente||'s/d')}» · UF «${esc(d.uf_fuente||'s/d')}»`
       + (d.ubicacion_source ? ` · ubicación «${esc(d.ubicacion_source)}»` : '')
       + (d.numero_estimado ? ` · nº estimado ≈${esc(d.numero_estimado)}` : '') + `</div>`;
   }
@@ -458,7 +557,7 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
 function payloadDireccion(row){
   const g = k => { const el=row.querySelector(`[name="${k}"]`); return el ? el.value.trim() : ''; };
   const p = {};
-  ['calle','numero','complemento','barrio','codigo_postal','tipo_edificacion',
+  ['calle','numero','complemento','barrio','codigo_postal','uso_principal','tipo_edificacion',
    'uf_vivienda','uf_comercio','habitaciones','lat','lng'].forEach(k=>{ const v=g(k); if(v!=='') p[k]=v; });
   // lat y lng viajan siempre juntas o ninguna: media coordenada no ubica nada.
   if((p.lat==null) !== (p.lng==null)){ delete p.lat; delete p.lng; }
@@ -536,7 +635,7 @@ async function load(){
           + (it.autor?` · ${esc(it.autor)}`:'') + `</div>` : '')+
       (!abierta && editable
         ? `<div style="margin-top:6px"><a href="#" class="acc-tog reabrir-lnk"
-             style="color:#0ea5e9">↩ Reabrir / corregir</a></div>` : '')+
+             style="color:var(--a-sky)">↩ Reabrir / corregir</a></div>` : '')+
       (editable?accionesHtml(it.tipo):'');
     // Contexto que el editor necesita y que no está en /api/parcelas: la coordenada del caso
     // (para los que no tienen parcela) y el hotel, si lo hay.

@@ -1,0 +1,460 @@
+/* ============================================================================
+   AI Mapping — sistema de diseño de la plataforma.
+   Espejo del lenguaje visual de https://aimapping.net (tokens HSL, Space Grotesk
+   para títulos + DM Sans para texto, radio .75rem, teal primario / índigo
+   secundario, tarjetas con borde izquierdo de acento).
+
+   Regla: NINGÚN color de chrome se escribe en hex dentro de los HTML. Todo sale
+   de estas variables, porque cada una tiene que resolver en los DOS temas. Los
+   colores que SÍ quedan literales son los semánticos del dato (uso de la parcela,
+   estados del pipeline, severidad de incidencias): son la leyenda del mapa, no
+   decoración, y se eligieron para leerse sobre imagen satelital en ambos modos.
+   ========================================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
+
+/* ── Tokens ─────────────────────────────────────────────────────────────── */
+:root {
+  /* superficies y texto (valores de aimapping.net, modo claro) */
+  --bg:            210 20% 98%;
+  --fg:            225 25% 12%;
+  --card:          0 0% 100%;
+  --card-fg:       225 25% 12%;
+  --muted:         210 18% 95%;
+  --muted-fg:      220 10% 42%;
+  --accent:        170 25% 94%;
+  --accent-fg:     170 50% 25%;
+  --border:        220 15% 88%;
+  --input:         220 15% 88%;
+
+  /* marca */
+  --primary:       170 50% 42%;
+  --primary-fg:    0 0% 100%;
+  --secondary:     235 34% 47%;
+  --secondary-fg:  0 0% 100%;
+  --ring:          170 50% 42%;
+  --brand-teal:    #37bea7;   /* extremos del degradé de marca; iguales en ambos temas */
+  --brand-indigo:  #7d83bf;
+
+  --radius:        .75rem;
+  --radius-sm:     .5rem;
+  --radius-xs:     .375rem;
+
+  --shadow-sm:     0 1px 2px 0 rgb(0 0 0 / .05);
+  --shadow-card:   0 2px 16px #171b260a;
+  --shadow-md:     0 4px 20px rgb(23 27 38 / .08);
+  --shadow-lg:     0 10px 40px rgb(23 27 38 / .12);
+  --shadow-glow:   0 0 0 1px #37bea740, 0 8px 32px #37bea71f;
+
+  /* tríos semánticos (fondo suave + texto + borde) — se invierten en oscuro */
+  --ok-bg:      #dcfce7;  --ok-fg:      #166534;  --ok-br:      #a7e8c0;
+  --warn-bg:    #fef3c7;  --warn-fg:    #92400e;  --warn-br:    #fcd34d;
+  --danger-bg:  #fee2e2;  --danger-fg:  #991b1b;  --danger-br:  #fca5a5;
+  --info-bg:    #e6e8f6;  --info-fg:    #3a4384;  --info-br:    #b9bee4;
+  --neutral-bg: #eff1f4;  --neutral-fg: #606876;  --neutral-br: #dcdfe5;
+
+  /* sólidos: puntos, barras, marcadores. Iguales en ambos temas a propósito
+     (son señal, no superficie), salvo el ajuste de luminancia de abajo. */
+  --c-ok:      #16a34a;
+  --c-warn:    #f59e0b;
+  --c-danger:  #dc2626;
+  --c-info:    #6366a8;
+  --c-primary: #2f9f8c;
+
+  /* Acentos de TEXTO dentro de popups y fichas. Conservan el significado que ya
+     tenían (violeta = relevamiento anterior, ámbar = estimado, etc.) pero cambian
+     de luminancia según el tema: los tonos oscuros del modo claro caían a ~2,5:1
+     sobre la tarjeta oscura. No confundir con los colores de MARCADOR del mapa,
+     que son literales porque van sobre imagen satelital, no sobre la tarjeta. */
+  --a-violet: #6d28d9;
+  --a-green:  #15803d;
+  --a-orange: #c2410c;
+  --a-sky:    #0284c7;
+  --a-amber:  #b45309;
+  --a-red:    #dc2626;
+
+  /* overlays sobre el mapa: SIEMPRE oscuros, en los dos temas. Van encima de
+     imagen satelital, donde un panel claro no se lee. */
+  --overlay-bg:    rgb(15 23 42 / .78);
+  --overlay-bg-on: rgb(15 23 42 / .95);
+  --overlay-fg:    #e2e8f0;
+  --overlay-fg-dim:#94a3b8;
+
+  /* consola de logs: superficie de código, oscura en ambos temas */
+  --console-bg:    #0f1420;
+  --console-fg:    #9aa4b8;
+  --console-dim:   #5b6678;
+  --console-rule:  #232c3d;
+
+  --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-head: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Mono', 'Cascadia Code', ui-monospace, monospace;
+
+  /* Iconos del toggle de tema, como máscaras (heredan el color del botón). */
+  --icon-moon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/%3E%3C/svg%3E");
+  --icon-sun:  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='4.2'/%3E%3Cpath d='M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'/%3E%3C/svg%3E");
+}
+
+:root[data-theme="dark"] {
+  --bg:            225 35% 5%;
+  --fg:            210 20% 93%;
+  --card:          225 30% 8%;
+  --card-fg:       210 20% 93%;
+  --muted:         225 25% 11%;
+  --muted-fg:      220 12% 58%;
+  --accent:        225 20% 10%;
+  --accent-fg:     170 45% 60%;
+  --border:        225 20% 14%;
+  --input:         225 20% 16%;
+
+  --primary:       170 55% 48%;
+  --secondary:     235 34% 58%;
+  --ring:          170 55% 48%;
+
+  --shadow-sm:     0 1px 2px 0 rgb(0 0 0 / .4);
+  --shadow-card:   0 2px 20px #0006;
+  --shadow-md:     0 4px 20px rgb(0 0 0 / .45);
+  --shadow-lg:     0 10px 40px rgb(0 0 0 / .55);
+  --shadow-glow:   0 0 0 1px #37bea74d, 0 8px 40px #37bea71a;
+
+  --ok-bg:      rgb(34 197 94 / .16);   --ok-fg:      #6ee7a8;  --ok-br:      rgb(34 197 94 / .35);
+  --warn-bg:    rgb(245 158 11 / .16);  --warn-fg:    #fcd34d;  --warn-br:    rgb(245 158 11 / .38);
+  --danger-bg:  rgb(239 68 68 / .16);   --danger-fg:  #fca5a5;  --danger-br:  rgb(239 68 68 / .38);
+  --info-bg:    rgb(125 131 191 / .20); --info-fg:    #b3b8e4;  --info-br:    rgb(125 131 191 / .40);
+  --neutral-bg: rgb(255 255 255 / .06); --neutral-fg: #8e97a8;  --neutral-br: rgb(255 255 255 / .12);
+
+  --c-ok:      #22c55e;
+  --c-warn:    #fbbf24;
+  --c-danger:  #ef4444;
+  --c-info:    #8d93cf;
+  --c-primary: #37bea7;
+
+  --a-violet: #a78bfa;
+  --a-green:  #34d399;
+  --a-orange: #fb923c;
+  --a-sky:    #38bdf8;
+  --a-amber:  #fbbf24;
+  --a-red:    #f87171;
+
+  --console-bg:    #0a0d15;
+  --console-rule:  #1a2231;
+}
+
+/* Sin preferencia guardada, seguimos al sistema (el bootstrap del <head> sella
+   data-theme; esto cubre el instante previo y los navegadores sin JS). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-body);
+  background: hsl(var(--bg));
+  color: hsl(var(--fg));
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color .25s ease, color .25s ease;
+}
+
+h1, h2, h3, h4, h5, h6, .font-head {
+  font-family: var(--font-head);
+  font-weight: 700;
+  letter-spacing: -.02em;
+  line-height: 1.25;
+}
+
+a { color: hsl(var(--primary)); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::selection { background: hsl(var(--primary) / .25); }
+
+:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+/* Scrollbars discretas, en tono de la superficie */
+* { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-fg) / .5); }
+
+/* ── Marca ──────────────────────────────────────────────────────────────── */
+.gradient-text {
+  background-image: linear-gradient(135deg, var(--brand-teal), var(--brand-indigo));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+
+.brand {
+  display: flex; align-items: center; gap: .55rem;
+  font-family: var(--font-head); font-weight: 700;
+  letter-spacing: -.03em; text-decoration: none;
+}
+.brand:hover { text-decoration: none; }
+.brand img { height: 26px; width: auto; display: block; }
+.brand-name { font-size: 1.15rem; }
+.brand-name .ai { color: var(--brand-teal); }
+.brand-name .mapping { color: var(--brand-indigo); }
+:root[data-theme="dark"] .brand-name .mapping { color: #9ea4dd; }
+
+/* ── Botones ────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+  padding: .55rem 1.1rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: .875rem; font-weight: 600; letter-spacing: .01em;
+  white-space: nowrap; cursor: pointer;
+  transition: background-color .18s, border-color .18s, color .18s,
+              box-shadow .18s, transform .1s;
+}
+.btn:active { transform: scale(.975); }
+.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+.btn-primary {
+  background: hsl(var(--primary)); color: hsl(var(--primary-fg));
+  box-shadow: var(--shadow-sm);
+}
+.btn-primary:hover:not(:disabled) {
+  background: hsl(var(--primary) / .88);
+  box-shadow: 0 4px 14px hsl(var(--primary) / .3);
+}
+
+.btn-secondary {
+  background: hsl(var(--secondary)); color: hsl(var(--secondary-fg));
+}
+.btn-secondary:hover:not(:disabled) { background: hsl(var(--secondary) / .88); }
+
+.btn-outline {
+  background: hsl(var(--card)); color: hsl(var(--fg));
+  border-color: hsl(var(--border));
+}
+.btn-outline:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / .55);
+  color: hsl(var(--primary));
+  background: hsl(var(--accent));
+}
+
+/* Ghost: sobre el header claro, no sobre navy como antes. */
+.btn-ghost {
+  background: transparent; color: hsl(var(--muted-fg));
+  border-color: hsl(var(--border));
+}
+.btn-ghost:hover:not(:disabled) {
+  background: hsl(var(--muted)); color: hsl(var(--fg));
+}
+
+.btn-green { background: var(--c-ok); color: #fff; }
+.btn-green:hover:not(:disabled) { background: var(--c-ok); filter: brightness(1.08); }
+
+.btn-danger { background: var(--c-danger); color: #fff; }
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+
+.btn-sm { padding: .32rem .7rem; font-size: .78rem; border-radius: var(--radius-xs); }
+.btn-xs { padding: .18rem .5rem; font-size: .7rem; border-radius: var(--radius-xs); }
+
+/* ── Toggle de tema ─────────────────────────────────────────────────────── */
+.theme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; flex-shrink: 0;
+  background: transparent; border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  color: hsl(var(--muted-fg)); font-size: .95rem; line-height: 1;
+  cursor: pointer; transition: background-color .18s, color .18s, border-color .18s;
+}
+.theme-toggle:hover { background: hsl(var(--muted)); color: hsl(var(--fg)); }
+/* El icono va como máscara SVG y no como carácter unicode: ☾/☀ dependen de la fuente
+   del sistema y renderizaban con tamaños y recortes distintos en cada máquina.
+   Como máscara toma el `color` del botón, así que sigue al tema sin reglas extra. */
+.theme-toggle::before {
+  content: ""; width: 17px; height: 17px; background: currentColor;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center;  mask-position: center;
+  -webkit-mask-size: contain;     mask-size: contain;
+  /* luna (modo claro: ofrece pasar a oscuro) */
+  -webkit-mask-image: var(--icon-moon); mask-image: var(--icon-moon);
+}
+:root[data-theme="dark"] .theme-toggle::before {
+  /* sol (modo oscuro: ofrece volver a claro) */
+  -webkit-mask-image: var(--icon-sun); mask-image: var(--icon-sun);
+}
+
+/* ── Toggle de idioma ───────────────────────────────────────────────────────
+   Mismas métricas que .theme-toggle (34 px de alto, mismo borde y radio) para que
+   los dos controles de chrome del header se lean como un par. El ancho es auto
+   porque acá el contenido es texto.
+
+   Es un segmentado "ES PT" con el activo resaltado, y no una bandera: 🇧🇷 vs 🇵🇹
+   sería una decisión política innecesaria, y un emoji tendría el mismo problema de
+   fuente que ya nos hizo pasar el icono de tema a máscara SVG. Mostrar sólo el
+   idioma destino tampoco sirve: "PT" se lee ambiguo (¿estoy en portugués o me lo
+   ofrece?), mientras que el par no tiene lectura doble.
+
+   El resaltado sale de :root[lang], que i18n.js sella antes del primer pintado —
+   sin JS, igual que :root[data-theme] para el sol/luna. */
+.lang-toggle {
+  display: inline-flex; align-items: center; gap: .3rem;
+  height: 34px; padding: 0 .55rem; flex-shrink: 0;
+  background: transparent; border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  font-family: var(--font-head); font-size: .68rem; font-weight: 600;
+  letter-spacing: .06em; line-height: 1;
+  color: hsl(var(--muted-fg));
+  cursor: pointer; transition: background-color .18s, color .18s, border-color .18s;
+}
+.lang-toggle:hover { background: hsl(var(--muted)); }
+.lang-toggle span { opacity: .42; }
+:root[lang="es"] .lang-toggle span[data-lang="es"],
+:root[lang="pt"] .lang-toggle span[data-lang="pt"] { opacity: 1; color: hsl(var(--fg)); }
+
+/* ── Superficies ────────────────────────────────────────────────────────── */
+.card {
+  background: hsl(var(--card)); color: hsl(var(--card-fg));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+/* Tarjeta con el borde izquierdo de acento — la firma visual de aimapping.net */
+.accent-card {
+  background: hsl(var(--card)); color: hsl(var(--card-fg));
+  border: 1px solid hsl(var(--border) / .6);
+  border-left: 2.5px solid hsl(var(--primary));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow .3s cubic-bezier(.4,0,.2,1),
+              transform .3s cubic-bezier(.4,0,.2,1),
+              border-color .3s;
+}
+.accent-card:hover { box-shadow: var(--shadow-glow); transform: translateY(-2px); }
+
+.surface-muted {
+  background: hsl(var(--muted)); border-radius: var(--radius-sm);
+}
+
+/* ── Tipografía de apoyo ────────────────────────────────────────────────── */
+.section-title {
+  font-family: var(--font-head);
+  font-size: .78rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .09em;
+  color: hsl(var(--muted-fg));
+}
+.eyebrow {
+  font-family: var(--font-head);
+  font-size: .68rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em;
+  color: hsl(var(--primary));
+}
+.text-muted { color: hsl(var(--muted-fg)); }
+
+/* ── Píldoras de estado ─────────────────────────────────────────────────── */
+.pill {
+  display: inline-block; padding: .22rem .6rem;
+  border-radius: 999px;
+  font-size: .72rem; font-weight: 700; white-space: nowrap;
+  line-height: 1.35;
+}
+.pill-ok      { background: var(--ok-bg);      color: var(--ok-fg); }
+.pill-warn    { background: var(--warn-bg);    color: var(--warn-fg); }
+.pill-danger  { background: var(--danger-bg);  color: var(--danger-fg); }
+.pill-info    { background: var(--info-bg);    color: var(--info-fg); }
+.pill-neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+
+/* ── Formularios ────────────────────────────────────────────────────────── */
+label { font-family: var(--font-body); }
+
+input[type="text"], input[type="password"], input[type="number"],
+input[type="search"], input[type="email"], input[type="file"],
+select, textarea {
+  width: 100%;
+  padding: .55rem .75rem;
+  background: hsl(var(--card));
+  color: hsl(var(--fg));
+  border: 1px solid hsl(var(--input));
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body); font-size: .9rem;
+  transition: border-color .18s, box-shadow .18s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 3px hsl(var(--ring) / .18);
+}
+input::placeholder, textarea::placeholder { color: hsl(var(--muted-fg) / .7); }
+input[type="checkbox"], input[type="radio"] { width: auto; accent-color: hsl(var(--primary)); }
+select { cursor: pointer; }
+:root[data-theme="dark"] select option { background: hsl(var(--card)); color: hsl(var(--fg)); }
+
+.form-label {
+  display: block;
+  font-size: .7rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .07em;
+  color: hsl(var(--muted-fg)); margin-bottom: .35rem;
+}
+.form-hint { font-size: .76rem; color: hsl(var(--muted-fg)); margin-top: .3rem; }
+
+/* ── Avisos ─────────────────────────────────────────────────────────────── */
+.alert { border-radius: var(--radius-sm); padding: .6rem .9rem; font-size: .85rem; line-height: 1.45; }
+.alert-ok     { background: var(--ok-bg);     color: var(--ok-fg); }
+.alert-warn   { background: var(--warn-bg);   color: var(--warn-fg); }
+.alert-danger { background: var(--danger-bg); color: var(--danger-fg); }
+.alert-info   { background: var(--info-bg);   color: var(--info-fg); }
+
+/* ── Tablas ─────────────────────────────────────────────────────────────── */
+.tbl { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.tbl th {
+  font-family: var(--font-head);
+  font-size: .68rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em;
+  color: hsl(var(--muted-fg));
+  text-align: left; padding: .35rem .5rem;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+}
+.tbl td { padding: .35rem .5rem; border-bottom: 1px solid hsl(var(--border) / .5); }
+.tbl tr:last-child td { border-bottom: none; }
+
+/* ── Leaflet en tema oscuro ─────────────────────────────────────────────── */
+:root[data-theme="dark"] .leaflet-container { background: #0b0e16; }
+:root[data-theme="dark"] .leaflet-popup-content-wrapper,
+:root[data-theme="dark"] .leaflet-popup-tip {
+  background: hsl(var(--card)); color: hsl(var(--fg));
+  box-shadow: var(--shadow-lg);
+}
+:root[data-theme="dark"] .leaflet-popup-close-button { color: hsl(var(--muted-fg)) !important; }
+:root[data-theme="dark"] .leaflet-bar a,
+:root[data-theme="dark"] .leaflet-control-layers {
+  background: hsl(var(--card)); color: hsl(var(--fg));
+  border-color: hsl(var(--border));
+}
+:root[data-theme="dark"] .leaflet-bar a:hover { background: hsl(var(--muted)); }
+:root[data-theme="dark"] .leaflet-control-attribution {
+  background: hsl(var(--card) / .8) !important; color: hsl(var(--muted-fg)) !important;
+}
+:root[data-theme="dark"] .leaflet-control-attribution a { color: hsl(var(--primary)) !important; }
+/* Los tiles claros (OSM) encandilan sobre fondo oscuro; se atenúan apenas.
+   Las capas satelitales NO se tocan: son el dato que el operador mira. */
+:root[data-theme="dark"] .leaflet-tile-pane .leaflet-layer.tile-dim { filter: brightness(.82) contrast(1.05); }
+
+/* Popups: tipografía de la app, no la de Leaflet */
+.leaflet-popup-content { font-family: var(--font-body); font-size: .8rem; line-height: 1.5; }
+.leaflet-popup-content b, .leaflet-popup-content strong { font-family: var(--font-head); }
+
+/* ── Utilidades ─────────────────────────────────────────────────────────── */
+.hero-glow {
+  position: absolute; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(ellipse at center, hsl(var(--primary) / .13) 0%, transparent 68%);
+  filter: blur(2px);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { display: inline-block; animation: spin .8s linear infinite; }

@@ -1,7 +1,10 @@
-# Scraper GIS — Instrucciones para Claude Code
+# AI Mapping — Instrucciones para Claude Code
 
-> El producto se llama **Scraper GIS**. El paquete Python, la DB, el container y el
+> El producto se llama **AI Mapping** (antes «Scraper GIS»), alineado con la marca de
+> [aimapping.net](https://aimapping.net). El paquete Python, la DB, el container y el
 > servicio siguen llamándose `scrapitero` a propósito: son identidad técnica, no marca.
+> En la UI el wordmark se escribe **AiMapping** (teal `Ai` + índigo `Mapping`), y el
+> claim es *«Relevamiento inteligente»* / *«Plataforma de relevamiento geoespacial»*.
 
 > **Al inicio de cada sesión:** leer `ARCHITECTURE.md` para entender el sistema completo sin re-explorar código.
 
@@ -290,6 +293,87 @@ Dashboard para gestionar relevamientos. Corre en `http://localhost:8765` (públi
 **Telegram** (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_HOME_CHANNEL`/`TELEGRAM_ALLOWED_USERS`) **también
 en el `.env` del host** (no solo en Hermes): el botón 🏨 corre in-process en la web, y sin esas
 vars sus avisos por Telegram se descartan en silencio.
+
+**Sistema de diseño — `static/theme.css` (marca AI Mapping):** toda la estética sale de un
+único archivo de tokens, espejo del lenguaje visual de [aimapping.net](https://aimapping.net):
+**Space Grotesk** para títulos + **DM Sans** para texto (Google Fonts), radio `.75rem`,
+**teal `hsl(170 50% 42%)`** primario e **índigo `hsl(235 34% 47%)`** secundario, degradé de marca
+`#37bea7 → #7d83bf`, y la firma visual de la marca: **tarjeta con borde izquierdo de acento**
+(`.accent-card` / `.survey-card`) que en hover levanta 2 px con un glow teal. Componentes
+compartidos: `.btn` (`-primary/-secondary/-outline/-ghost/-green/-danger`, `-sm/-xs`), `.card`,
+`.pill-*`, `.alert-*`, `.tbl`, `.form-label`, `.theme-toggle`. Reglas al tocar la UI:
+- **Ningún color de chrome se escribe en hex** en los HTML: todo sale de un token, porque cada
+  color tiene que resolver en los **dos temas**. Hay tres familias: pares semánticos
+  (`--ok-bg/-fg/-br`, `--warn-*`, `--danger-*`, `--info-*`, `--neutral-*`), sólidos de señal
+  (`--c-ok/-warn/-danger/-primary`) y acentos de texto sobre tarjeta (`--a-violet/-green/-orange/
+  -sky/-amber/-red`, que **cambian de luminancia** entre temas: los tonos del modo claro caían a
+  ~2,5:1 sobre la tarjeta oscura).
+- **Sí quedan literales los colores SEMÁNTICOS del dato** — `PARCELA_COLOR`, `ALTURA_COLOR`,
+  `ESTADO_COLOR`, `CAT_COLOR`, los colores por tipo de incidencia, estilos de polígono/marcador
+  de Leaflet: son **leyenda del mapa**, van sobre imagen satelital y no deben cambiar con el tema.
+- Dos superficies son **oscuras en los dos temas a propósito**: los controles/leyenda **sobre el
+  mapa** (`--overlay-*`; un panel claro no se lee sobre satélite) y la **consola de logs**
+  (`--console-*`; es salida de proceso, mismo criterio que una terminal).
+- **`theme.css` se carga DESPUÉS de `leaflet.css`.** Sus overrides de tema para los controles del
+  mapa (`.leaflet-bar a`, popups, atribución) tienen la misma especificidad que los de Leaflet, así
+  que sólo ganan si van después. Con el orden invertido el control de zoom queda blanco en oscuro.
+
+**Tema claro/oscuro (toggle ☾/☀ en el header):** `data-theme="light|dark"` sobre `<html>`, elegido
+por un script **en el `<head>`, antes del primer pintado** (sin eso la app aparece en claro y salta
+a oscuro). La preferencia se guarda en `localStorage['aim-theme']` y **se comparte entre las
+páginas** (dashboard, incidencias, login); si no hay ninguna, sigue a `prefers-color-scheme`.
+`toggleTheme()` además hace `invalidateSize()` de los mapas abiertos. El icono del botón va como
+**máscara SVG** (`--icon-moon`/`--icon-sun`), no como carácter unicode: ☾/☀ dependen de la fuente
+del sistema y rendereaban con tamaños y recortes distintos en cada máquina.
+
+**Idioma español / portugués (toggle `ES·PT` en el header) — `static/i18n.js`:** el cliente del
+relevamiento es brasilero, así que el **dashboard** (`index.html`, vistas operador y cliente) y el
+**login** se pueden leer en portugués. **El default es español** y la elección se guarda en
+`localStorage['aim-lang']`, igual que el tema; `i18n.js` sella `<html lang>` **antes del primer
+pintado** y el CSS pinta el toggle desde `:root[lang]`, sin JS.
+
+- **La clave de traducción ES el texto en español**: `t('Parcelas')` → `'Lotes'`. No hay claves
+  simbólicas. **Si falta la traducción sale el español**, nunca vacío ni la clave cruda — por eso
+  se pudo traducir de a lotes sin romper nada en el medio.
+- ⚠ **Si cambiás una frase de la UI, actualizá `static/i18n.js`.** Es el modo de falla número uno:
+  la clave deja de matchear y la traducción **desaparece en silencio**, sin error.
+  `scripts/i18n_audit.py` lo detecta (chequeo de claves huérfanas) — corrélo al tocar texto.
+- **Interpolación con `{nombre}`**: `t('Error: {msg}', {msg: e})`. La clave tiene que ser un
+  literal **estático** — `t(\`Error: ${x}\`)` genera una clave distinta por valor, no matchea nunca
+  y es imposible de auditar. Dos claves así cubren ~24 call sites de `alert()`.
+- **Dentro de un atributo va `tAttr`, no `t`** (escapa `"`/`<`/`&`): una traducción con comillas
+  dobles rompería el atributo y con él todo el template literal.
+- **Se escapa la variable, nunca la traducción**: `t('… {n} …', {n: escHtml(x)})`, jamás
+  `escHtml(t(...))` — varias traducciones llevan HTML a propósito (los párrafos de ayuda con
+  `<strong>`/`<br>`, que van en **una sola clave**: partirlas deja el portugués agramatical).
+- **Markup estático** → `data-i18n` (texto) · `data-i18n-html` (con HTML adentro) ·
+  `data-i18n-attr="title,placeholder"`. El walker es **idempotente y bidireccional** (guarda el
+  original en un `WeakMap`), que es lo que le permite al **login traducir en vivo sin recargar** —
+  no puede: `_login_page` también es la respuesta de un POST y recargar reenviaría el formulario.
+- **Cambiar de idioma en el dashboard recarga la página.** No se re-renderiza en vivo a propósito:
+  el 96% del texto se genera dentro de funciones que corren tras un `fetch`, y `loadSurveys()` ya
+  se niega a re-renderizar cuando hay una tarjeta abierta o un formulario activo — quedaría media
+  UI en cada idioma. `hayTrabajoSinGuardar()` avisa antes si hay algo cargado en el formulario.
+- **NO se traduce**: la taxonomía del cliente (`TIPOS_EDIFICACION`, `hotelTipoLabel` →
+  HOTEL/MOTEL/FLAT/PENSÃO, ya en portugués), las columnas `DSC_`/`COD_` del CSV Operadora, y el
+  `toLocaleString('pt-BR')` del **valor venal R$ / alíquota del IPTU**, que va fijo aunque la UI
+  esté en español (el resto de números y fechas sí sigue a `I18N_LOCALE`).
+- **Fuera de alcance hoy** (quedan en español): `incidencias.html` y los ~105 mensajes de error del
+  backend. Los `alert()` ya llaman `t(data.error)`, que hoy es un no-op seguro pero deja el
+  enganche puesto para traducirlos sin tocar un solo call site.
+- **Verificación** (no hay tests de la web): `scripts/i18n_audit.py` (lint del fuente + claves
+  huérfanas) y `scripts/i18n_coverage.py` (cobertura sobre la página **renderizada**, con
+  Playwright). El segundo caza lo que el primero no ve — así aparecieron los resúmenes de avance
+  de cada paso del pipeline. Ninguno ve `alert()`/`confirm()` ni las ramas de error.
+
+**Marca:** `logo-mark.svg` es el glifo (la «A» triangular con el pin de mapa, degradé teal→índigo,
+pin **calado** con `fill-rule="evenodd"` para que se lea sobre fondo claro y oscuro) — favicon y
+header. `logo.svg` es el wordmark horizontal y `logo.png` el lettering original de la marca: un SVG
+servido por `<img>` es un documento aislado y **no puede cargar Google Fonts**, así que donde
+importa la tipografía exacta el wordmark se arma en HTML (`.brand` / `header h1 .wm`) con Space
+Grotesk. Ojo: `Ai` y `Mapping` van dentro de **un solo** `<span>`; como hijos directos de un flex
+con `gap`, la marca se parte en «Ai Mapping». Rutas nuevas en `app.py`: `/theme.css` y `/logo.png`,
+ambas en `_AUTH_PUBLIC_PATHS` (las usa el login).
 
 **Capas de ítems críticos (mapa):** el control de capas del mapa tiene un overlay toggleable por
 cada tipo de propiedad crítico — **🏨 Hoteles · 🏢 Edificios · 🧱 PH · 🛍 Shopping · 🏘 Country** —

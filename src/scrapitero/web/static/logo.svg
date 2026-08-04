@@ -1,59 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 210" role="img" aria-label="Caracará — Scraper GIS">
-  <title>Caracará</title>
-  <!-- Caracará (Caracara plancus) de perfil, de pie. Mismo lenguaje que el tero que reemplaza:
-       flat, sin gradientes, capas de paths sólidos sobre fondo oscuro (#0f172a / #1e293b).
-       Rasgos que lo identifican y no se pueden perder: cresta negra plana sobre cabeza pálida,
-       pico alto y ganchudo, patas largas (camina el terreno) y pecho barrado. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 190" role="img" aria-label="AI Mapping">
+  <title>AI Mapping</title>
+  <!-- Wordmark horizontal: el glifo de logo-mark.svg + "AiMapping".
+       Un SVG servido por <img> es un documento aislado y NO puede cargar Google Fonts, así
+       que el texto va con una pila de fuentes del sistema de tono geométrico. Donde la
+       fidelidad tipográfica importa (header y login) la marca se arma en HTML, con
+       Space Grotesk ya cargada por theme.css — ver la clase .brand. -->
+  <defs>
+    <linearGradient id="aimGradW" x1="0.18" y1="0" x2="0.42" y2="1">
+      <stop offset="0" stop-color="#3cb8a5"/>
+      <stop offset="1" stop-color="#4b6aa1"/>
+    </linearGradient>
+  </defs>
 
-  <!-- patas largas: el carancho releva a pie, no solo desde el aire -->
-  <g stroke="#fb7185" stroke-width="5" stroke-linecap="round" fill="none">
-    <path d="M118 148 L106 188"/>
-    <path d="M140 150 L150 188"/>
-    <path d="M92 188 h22 M138 188 h22"/>
-  </g>
+  <path fill="url(#aimGradW)" d="
+    M 86,16 C 90,6 100,6 104,16
+    L 186,163 C 193,176 186,181 176,181
+    L 122,181 C 113,157 77,157 68,181
+    L 24,181 C 14,181 7,176 14,163 Z"/>
+  <path fill="#fff" fill-rule="evenodd" d="
+    M 71.7,121.4 A 39,39 0 1 1 108.3,121.4 L 91,152 Z
+    M 75.4,114.4 A 31,31 0 1 1 104.6,114.4 L 91,141 Z"/>
+  <circle cx="90" cy="87" r="20" fill="none" stroke="#fff" stroke-width="10"/>
 
-  <!-- cola larga y barrada -->
-  <path d="M186 104 q40 2 52 -10 q-4 30 -44 38 z" fill="#64748b"/>
-  <path d="M196 116 q26 0 38 -8" stroke="#0b1220" stroke-width="3" fill="none" opacity=".55"/>
-  <path d="M200 126 q24 -1 34 -9" stroke="#0b1220" stroke-width="3" fill="none" opacity=".55"/>
-
-  <!-- cuerpo: pecho hondo adelante que se afina hacia la cola. Una elipse pura leía "pato";
-       la rapaz tiene el peso al frente. -->
-  <path d="M84 112 q6 -34 46 -36 q52 -2 62 26 q6 22 -20 34 q-40 18 -74 2 q-18 -10 -14 -26 z"
-        fill="#94a3b8"/>
-
-  <!-- pecho barrado: la marca del caracará adulto -->
-  <path d="M88 106 q-6 26 10 42 q18 -6 24 -22 q-10 -18 -34 -20 z" fill="#cbd5e1"/>
-  <g stroke="#0b1220" stroke-width="3.2" stroke-linecap="round" fill="none" opacity=".7">
-    <path d="M86 116 q16 2 26 11"/>
-    <path d="M88 127 q15 2 25 11"/>
-    <path d="M94 138 q12 2 19 9"/>
-  </g>
-
-  <!-- ala plegada, por encima del cuerpo -->
-  <path d="M96 100 q56 -14 96 8 q-22 34 -74 26 q-28 -6 -22 -34 z" fill="#64748b"/>
-  <path d="M120 96 q40 -2 66 16" stroke="#0b1220" stroke-width="3" fill="none" opacity=".45"/>
-
-  <!-- cuello pálido -->
-  <path d="M96 100 q-20 -32 -6 -62 q22 8 26 44 z" fill="#e2e8f0"/>
-
-  <!-- cabeza -->
-  <circle cx="80" cy="46" r="22" fill="#e2e8f0"/>
-
-  <!-- capuchón negro: CAPA plana sobre la corona que baja en punta hacia la nuca. No es el
-       penacho largo del tero — el carancho lleva un birrete, y es lo que lo distingue de
-       cualquier otra ave de campo junto con el pico. -->
-  <path d="M58 40 q6 -22 26 -22 q20 0 24 18 q14 6 20 16 q-18 -1 -30 -8 q-24 4 -40 -4 z" fill="#0b1220"/>
-
-  <!-- piel facial desnuda (la cara roja del carancho), desde la base del pico a la mejilla -->
-  <path d="M60 52 q12 6 22 4 q-2 12 -16 12 q-8 -4 -6 -16 z" fill="#fb7185"/>
-
-  <!-- pico de RAPAZ: corto y profundo, no la cuña larga de un ave de orilla, y con el gancho
-       marcado en la punta. Junto al capuchón es lo que dice "carancho" y no "pato". -->
-  <path d="M68 41 L44 48 q-9 4 -9 12 q0 7 8 8 q-3 -9 4 -13 l21 3 z" fill="#cbd5e1"/>
-  <path d="M44 48 q-9 4 -9 12 q0 7 8 8 q-3 -9 4 -13 z" fill="#94a3b8"/>
-
-  <!-- ojo: sobre la cara pálida, por debajo del capuchón -->
-  <circle cx="70" cy="52" r="4.6" fill="#0b1220"/>
-  <circle cx="71.6" cy="50.4" r="1.5" fill="#fff"/>
+  <text x="215" y="135"
+        font-family="'Space Grotesk', 'Century Gothic', 'Avenir Next', system-ui, sans-serif"
+        font-size="118" font-weight="700" letter-spacing="-3">
+    <tspan fill="#3cb8a5">Ai</tspan><tspan fill="#4b6aa1">Mapping</tspan>
+  </text>
 </svg>

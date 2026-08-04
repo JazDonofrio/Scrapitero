@@ -1,4 +1,4 @@
-"""Web app de Scraper GIS — gestión de relevamientos."""
+"""Web app de AI Mapping — gestión de relevamientos."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from scrapitero.agents.logradouro_br import (clasificar_complemento, descomponer
                                              partes_unidad)
 from scrapitero.db.engine import get_engine
 
-app = FastAPI(title="Scraper GIS")
+app = FastAPI(title="AI Mapping")
 STATIC_DIR = Path(__file__).parent / "static"
 
 # FOS (Factor de Ocupación del Suelo): fracción máxima del terreno que puede ocupar
@@ -60,7 +60,8 @@ _AUTH_SECRET = (os.getenv("WEB_AUTH_SECRET") or WEBHOOK_SECRET
 _AUTH_COOKIE = "scrap_auth"
 _AUTH_MAX_AGE = 7 * 24 * 3600          # 7 días
 # El logo se pide ANTES de autenticar (lo usa la pantalla de login), así que va público.
-_AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico", "/logo.svg", "/logo-mark.svg"}
+_AUTH_PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico", "/logo.svg", "/logo.png",
+                      "/logo-mark.svg", "/theme.css", "/i18n.js"}
 # Única escritura permitida al rol cliente: dejar comentarios (sugerencias/correcciones)
 # en puntos del mapa de un relevamiento.
 _CLIENTE_POST_RE = re.compile(r"^/api/surveys/[0-9a-fA-F-]+/comentarios$")
@@ -338,15 +339,44 @@ def _serve_spa() -> FileResponse:
     )
 
 
+@app.get("/theme.css")
+async def theme_css() -> FileResponse:
+    """Sistema de diseño de AI Mapping (tokens claro/oscuro + componentes).
+    Lo piden las tres páginas y también el login, así que va en _AUTH_PUBLIC_PATHS."""
+    return FileResponse(STATIC_DIR / "theme.css", media_type="text/css")
+
+
+@app.get("/i18n.js")
+async def i18n_js() -> FileResponse:
+    """Idioma de la interfaz (motor + diccionario ES→PT). Lo piden el dashboard y el
+    login, así que va en _AUTH_PUBLIC_PATHS igual que /theme.css: sin eso el middleware
+    responde 302 y el navegador recibe HTML donde espera JavaScript.
+
+    no-store como index.html: el diccionario viaja apareado con el markup, y una copia
+    cacheada vieja contra un texto nuevo deja de traducir sin ningún error visible."""
+    return FileResponse(
+        STATIC_DIR / "i18n.js", media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @app.get("/logo.svg")
 async def logo_svg() -> FileResponse:
-    """Logo completo (caracará de perfil) — pantalla de login, 118 px."""
+    """Wordmark horizontal (glifo + 'AiMapping')."""
     return FileResponse(STATIC_DIR / "logo.svg", media_type="image/svg+xml")
+
+
+@app.get("/logo.png")
+async def logo_png() -> FileResponse:
+    """Wordmark original de la marca, en bitmap. El SVG dibuja el glifo pero no puede
+    cargar Space Grotesk (un SVG servido por <img> no resuelve fuentes externas), así
+    que donde hace falta el lettering exacto se usa este PNG."""
+    return FileResponse(STATIC_DIR / "logo.png", media_type="image/png")
 
 
 @app.get("/logo-mark.svg")
 async def logo_mark_svg() -> FileResponse:
-    """Glifo del logo (cabeza) — favicon y header, donde el ave entera no se leería."""
+    """Glifo solo (la "A" con el pin) — favicon y header, donde el wordmark no entra."""
     return FileResponse(STATIC_DIR / "logo-mark.svg", media_type="image/svg+xml")
 
 
@@ -372,33 +402,75 @@ async def operador() -> FileResponse:
 
 
 def _login_page(error: bool = False, next_url: str = "/") -> HTMLResponse:
-    err_html = ('<p class="err">Contraseña incorrecta o sin permiso.</p>' if error else "")
+    err_html = ('<p class="err" data-i18n>Contraseña incorrecta o sin permiso.</p>' if error else "")
     html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scraper GIS — Acceso</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n>AI Mapping — Acceso</title>
 <link rel="icon" type="image/svg+xml" href="/logo-mark.svg">
+<link rel="stylesheet" href="/theme.css">
+<script>
+  // Mismo tema que el resto de la app, antes del primer pintado.
+  (function () {{
+    // `pref` y no `t`: `t` es la función global de traducción (i18n.js).
+    var pref = null;
+    try {{ pref = localStorage.getItem('aim-theme'); }} catch (e) {{}}
+    if (pref !== 'light' && pref !== 'dark')
+      pref = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = pref;
+  }})();
+</script>
+<!-- Idioma: mismo mecanismo que el resto de la app (localStorage 'aim-lang'). El login
+     es la primera página que se ve, cuando el servidor todavía no puede leer esa
+     preferencia, así que la traducción es 100% del lado del cliente. -->
+<script src="/i18n.js"></script>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; }}
-  body {{ background: #0f172a; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
-  .card {{ background: #1e293b; padding: 2rem 2.25rem; border-radius: 12px; width: 320px; box-shadow: 0 10px 40px rgba(0,0,0,.4); }}
-  h1 {{ font-size: 1.4rem; margin-bottom: .25rem; }} h1 span {{ color: #38bdf8; }}
-  p.sub {{ color: #94a3b8; font-size: .85rem; margin-bottom: 1.25rem; }}
-  label {{ display:block; font-size:.8rem; color:#94a3b8; margin-bottom:.35rem; }}
-  input {{ width:100%; padding:.6rem .7rem; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:.95rem; }}
-  button {{ width:100%; margin-top:1rem; padding:.65rem; border:0; border-radius:8px; background:#38bdf8; color:#0f172a; font-weight:700; font-size:.95rem; cursor:pointer; }}
-  button:hover {{ background:#0ea5e9; }}
-  .err {{ color:#fca5a5; font-size:.82rem; margin-bottom:.75rem; }}
-  .marca {{ display:block; margin:0 auto .85rem; width:118px; height:auto; }}
+  body {{ min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         padding: 1.5rem; position: relative; overflow: hidden; }}
+  /* Resplandor teal del hero de aimapping.net, detrás de la tarjeta */
+  .glow {{ position: fixed; width: 900px; height: 900px; top: -300px; left: 50%;
+           transform: translateX(-50%); border-radius: 50%; pointer-events: none;
+           background: radial-gradient(ellipse at center,
+                       hsl(var(--primary) / .13) 0%, transparent 68%); filter: blur(2px); }}
+  form.card {{ position: relative; padding: 2.25rem 2.25rem 2rem; width: 340px; max-width: 100%;
+               box-shadow: var(--shadow-lg); }}
+  .marca {{ display: block; margin: 0 auto .35rem; width: 62px; height: auto; }}
+  h1 {{ font-family: var(--font-head); font-size: 1.5rem; text-align: center;
+        letter-spacing: -.03em; margin-bottom: .3rem; }}
+  h1 .ai {{ color: var(--brand-teal); }} h1 .mapping {{ color: var(--brand-indigo); }}
+  :root[data-theme="dark"] h1 .mapping {{ color: #9ea4dd; }}
+  p.sub {{ color: hsl(var(--muted-fg)); font-size: .84rem; text-align: center; margin-bottom: 1.5rem; }}
+  p.tag {{ font-family: var(--font-head); font-size: .62rem; font-weight: 600;
+           text-transform: uppercase; letter-spacing: .14em; text-align: center;
+           color: hsl(var(--primary)); margin-bottom: 1.4rem; }}
+  button[type=submit] {{ width: 100%; margin-top: 1.1rem; }}
+  .err {{ color: var(--danger-fg); background: var(--danger-bg); font-size: .8rem;
+          border-radius: var(--radius-sm); padding: .5rem .7rem; margin-bottom: .9rem; }}
+  /* El toggle de idioma (.lang-toggle vive en theme.css) va sobre la tarjeta */
+  .lang-toggle {{ position: absolute; top: 1rem; right: 1rem; }}
 </style></head><body>
+  <div class="glow"></div>
+  <button class="lang-toggle" type="button" onclick="toggleLang()" data-i18n-attr="title,aria-label"
+          title="Cambiar el idioma de la interfaz (español / portugués)"
+          aria-label="Cambiar idioma"><span data-lang="es">ES</span><span data-lang="pt">PT</span></button>
   <form class="card" method="post" action="/login">
-    <img class="marca" src="/logo.svg" alt="Scraper GIS">
-    <h1>Scraper <span>GIS</span></h1>
-    <p class="sub">Ingresá tu contraseña para continuar</p>
+    <img class="marca" src="/logo-mark.svg" alt="">
+    <h1><span class="ai">Ai</span><span class="mapping">Mapping</span></h1>
+    <p class="tag" data-i18n>Relevamiento inteligente</p>
     {err_html}
     <input type="hidden" name="next" value="{next_url}">
-    <label>Contraseña</label>
+    <label class="form-label" data-i18n>Contraseña</label>
     <input type="password" name="password" autofocus required>
-    <button type="submit">Ingresar</button>
+    <button class="btn btn-primary" type="submit" data-i18n>Ingresar</button>
+    <p class="sub" style="margin:1.1rem 0 0;font-size:.75rem" data-i18n>Plataforma de relevamiento geoespacial</p>
   </form>
+<script>
+  i18nApply(document);
+  // A diferencia del dashboard, acá NO se recarga: _login_page también es la respuesta
+  // de un POST (contraseña incorrecta), y recargar dispararía el reenvío del formulario.
+  // Como el login es 100% markup estático, el walker lo traduce entero en vivo y no se
+  // pierde lo ya tipeado en el campo de contraseña.
+  function toggleLang() {{ i18nSetLang(LANG === 'pt' ? 'es' : 'pt'); }}
+</script>
 </body></html>"""
     return HTMLResponse(html)
 
@@ -658,6 +730,11 @@ def _hotel_tipo_label(t: Optional[str]) -> str:
     if "pens" in t:
         return "PENSÃO"
     return "HOTEL"
+
+
+# Las 4 etiquetas de hospedaje que devuelve `_hotel_tipo_label`. Un descarte rotulado con una
+# de ellas es un hotel duplicado (ya contado en otro registro), no un falso hotel.
+_TIPOS_HOSPEDAJE = ("HOTEL", "MOTEL", "FLAT", "PENSÃO")
 
 
 # Taxonomía FIJA del cliente (solo Brasil) para el "Tipo de edificación". Fuente de verdad:
@@ -1524,6 +1601,82 @@ async def generar_incidencias(survey_id: str) -> JSONResponse:
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
 
 
+# Tipo de las incidencias que abre el operador a mano desde el mapa, para lo que ve mal y
+# ningún agente detecta. Se importa de `IncidenciasReporter` porque es ese agente el que tiene
+# que excluirlo del barrido a obsoleta: si los dos lados no dicen el mismo string, la primera
+# corrida del agente marca obsoletas todas las marcas hechas a mano.
+from scrapitero.agents.incidencias_reporter import TIPO_MANUAL as TIPO_INCIDENCIA_MANUAL
+
+
+@app.post("/api/surveys/{survey_id}/incidencias/manual")
+async def crear_incidencia_manual(survey_id: str, request: Request) -> JSONResponse:
+    """Abre una incidencia a mano sobre una parcela o una coordenada del mapa.
+
+    El operador ve por satélite algo que el relevamiento no refleja (una parcela mal
+    clasificada, un edificio que el catastro no trajo) y lo marca para revisar; la corrección
+    se hace después desde `/incidencias/{survey_id}` con el mismo editor que el resto.
+
+    Se puede anclar a una `parcela_id` o sólo a una coordenada — este último es el caso del
+    marcador del relevamiento ANTERIOR, que es dato histórico y **no se toca**: la incidencia
+    guarda la coordenada, no escribe nada en `baseline_direcciones`.
+    """
+    try:
+        body = await request.json()
+        parcela_id = (body.get("parcela_id") or "").strip() or None
+        nota = (body.get("nota") or "").strip() or None
+        lat = body.get("lat")
+        lng = body.get("lng")
+        lat = float(lat) if lat is not None else None
+        lng = float(lng) if lng is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return JSONResponse({"ok": False, "error": "body inválido"}, status_code=400)
+    if (lat is None) != (lng is None):
+        return JSONResponse({"ok": False, "error": "lat y lng van juntos"}, status_code=400)
+    if not parcela_id and lat is None:
+        return JSONResponse({"ok": False, "error": "hace falta una parcela o una coordenada"},
+                            status_code=400)
+
+    row = _get_survey_row(survey_id)
+    if not row:
+        return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+    region_id = row[0]
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        titulo = "📌 Marcada para revisar"
+        if parcela_id:
+            p = conn.execute(text("""
+                SELECT calle, numero, centroid_lat, centroid_lng FROM parcelas
+                WHERE parcela_id = CAST(:p AS uuid) AND survey_id = CAST(:sid AS uuid)
+            """), {"p": parcela_id, "sid": survey_id}).fetchone()
+            if not p:
+                return JSONResponse({"ok": False, "error": "La parcela no es de este survey"},
+                                    status_code=404)
+            direccion = " ".join(x for x in (p[0], p[1]) if x) or "(sin dirección)"
+            titulo = f"📌 {direccion} — marcada para revisar"
+            # La coordenada del click gana; si no vino, la del centroide de la parcela.
+            if lat is None:
+                lat, lng = p[2], p[3]
+        # Clave natural: una marca por parcela (o por punto), para que marcar dos veces lo
+        # mismo actualice la nota en vez de acumular tarjetas duplicadas.
+        clave = f"manual:{parcela_id}" if parcela_id else f"manual:{lat:.6f},{lng:.6f}"
+        r = conn.execute(text("""
+            INSERT INTO incidencias (incidencia_id, region_id, survey_id, tipo, clave, estado,
+                                     prioridad, titulo, detalle, lat, lng, parcela_id, autor)
+            VALUES (gen_random_uuid(), :rid, CAST(:sid AS uuid), :tipo, :clave, 'pendiente',
+                    1, :titulo, :nota, :lat, :lng, CAST(:pid AS uuid), 'operador')
+            ON CONFLICT (survey_id, tipo, clave) DO UPDATE SET
+                estado = 'pendiente', titulo = EXCLUDED.titulo, detalle = EXCLUDED.detalle,
+                lat = EXCLUDED.lat, lng = EXCLUDED.lng,
+                resolucion = NULL, resuelta_at = NULL, actualizada_at = now()
+            RETURNING incidencia_id::text
+        """), {"rid": region_id, "sid": survey_id, "tipo": TIPO_INCIDENCIA_MANUAL,
+               "clave": clave, "titulo": titulo, "nota": nota,
+               "lat": lat, "lng": lng, "pid": parcela_id}).fetchone()
+    return JSONResponse({"ok": True, "incidencia_id": r[0], "tipo": TIPO_INCIDENCIA_MANUAL,
+                         "url": f"/incidencias/{survey_id}?inc={r[0]}"})
+
+
 @app.post("/api/incidencias/{incidencia_id}/reabrir")
 async def reabrir_incidencia(incidencia_id: str) -> JSONResponse:
     """Vuelve una incidencia resuelta/descartada a `pendiente` para poder rehacerla.
@@ -1583,7 +1736,7 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
                        ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
                    p.descripcion_uso,
                    -- al final a propósito: el resto se lee por índice posicional
-                   p.centroid_lat, p.centroid_lng, p.ubicacion_source
+                   p.centroid_lat, p.centroid_lng, p.ubicacion_source, p.uso_fuente
             FROM parcelas p
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
             WHERE p.parcela_id = CAST(:p AS uuid)
@@ -1603,7 +1756,7 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
         "tipo_manual": r[16] or "",
         "lat": float(r[19]) if r[19] is not None else None,
         "lng": float(r[20]) if r[20] is not None else None,
-        "ubicacion_source": r[21] or "",
+        "ubicacion_source": r[21] or "", "uso_fuente": r[22] or "",
     })
 
 
@@ -1637,6 +1790,42 @@ def _guardar_direccion_manual(conn, parcela_id: str, campos: dict, nota: Optiona
                 {upd}, nota = :nota, parcela_id = CAST(:p AS uuid), actualizado_at = now()
         """), {**campos, "r": row[0], "c": row[1], "nota": nota, "p": parcela_id})
     return len(campos)
+
+
+# Usos que el operador puede fijar a mano. Misma taxonomía que escriben los agentes
+# (`uso_classifier`, `bci_parser`) y que colorea el mapa en `categoriaMapa`.
+_USOS_VALIDOS = ("residencial", "comercial", "mixto", "industrial", "equipamiento", "vacante")
+
+
+def _guardar_uso_manual(conn, parcela_id: str, uso: str, nota: Optional[str]) -> int:
+    """Fija el uso de una parcela a mano y lo respalda en `parcela_uso_manual`.
+
+    `uso_principal` gobierna casi todo lo derivado —el color del círculo en el mapa, el CSV, el
+    reparto de habitantes de `dasymetric_population` y la estimación de UF—, así que corregir
+    sólo la etiqueta 🏢 (`parcela_tipo_manual`) dejaba el resto mal. `uso_fuente='manual'` es el
+    sello que impide que la próxima corrida lo pise. Devuelve 1 si cambió algo, 0 si no."""
+    prev = conn.execute(text(
+        "SELECT region_id, cca_code, uso_principal, uso_fuente FROM parcelas "
+        "WHERE parcela_id = CAST(:p AS uuid)"), {"p": parcela_id}).fetchone()
+    if not prev:
+        return 0
+    if (prev[2] or "") == uso and (prev[3] or "") == "manual":
+        return 0                                     # ya estaba así a mano → nada que hacer
+    conn.execute(text("UPDATE parcelas SET uso_principal = :u, uso_fuente = 'manual' "
+                      "WHERE parcela_id = CAST(:p AS uuid)"), {"u": uso, "p": parcela_id})
+    # Respaldo durable por inscrição: sobrevive al re-scrape, donde el parcela_id cambia.
+    if prev[1]:
+        conn.execute(text("""
+            INSERT INTO parcela_uso_manual
+                (region_id, cca_code, uso_principal, uso_previo, uso_fuente_previa,
+                 nota, autor, parcela_id)
+            VALUES (:r, :c, :u, :prev_u, :prev_f, :nota, 'operador', CAST(:p AS uuid))
+            ON CONFLICT (region_id, cca_code) DO UPDATE SET
+                uso_principal = :u, nota = :nota, parcela_id = CAST(:p AS uuid),
+                actualizado_at = now()
+        """), {"r": prev[0], "c": prev[1], "u": uso, "prev_u": prev[2], "prev_f": prev[3],
+               "nota": nota, "p": parcela_id})
+    return 1
 
 
 def _guardar_ubicacion_manual(conn, parcela_id: str, lat: float, lng: float,
@@ -1766,6 +1955,10 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
       - `tipo_edificacion`  → `parcela_tipo_manual`
       - `uf`                → `parcelas` (uf_fuente='manual') + `parcela_uf_manual`
       - `descartar`         → no cambia datos, sólo cierra el caso con nota
+
+    `direccion`/`ubicacion` es el formulario completo y también aplica `uso_principal`
+    (`parcelas` con uso_fuente='manual' + `parcela_uso_manual`), que es de donde derivan la
+    etiqueta de edificación y la estimación de UF.
     """
     try:
         body = await request.json()
@@ -2015,6 +2208,16 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                 return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
             aplicados += _guardar_direccion_manual(conn, parcela_id, campos, nota)
 
+            # El uso va ANTES de la etiqueta y las UF a propósito: es el campo del que dependen
+            # los otros dos (`_tipo_edificacion` deriva de él, y `UnidadesEstimator` lo toma
+            # como input), así que si el operador manda los tres, el uso es el que manda.
+            uso = (str(v.get("uso_principal") or "")).strip().lower()
+            if uso:
+                if uso not in _USOS_VALIDOS:
+                    return JSONResponse({"ok": False, "error": f"uso desconocido: {uso!r}"},
+                                        status_code=400)
+                aplicados += _guardar_uso_manual(conn, parcela_id, uso, nota)
+
             tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
             if tipo_ed:
                 if tipo_ed not in _TIPO_CATEGORIA:
@@ -2075,7 +2278,13 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
 async def comercios_marcados(survey_id: str) -> JSONResponse:
     """Puntos que el operador reclasificó de falso-hotel a comercio (`hotel_descartado`), para
     dibujarlos en el mapa con color/etiqueta de comercio en su coordenada real. Sin parcela:
-    viven en su propia coordenada. Scope: el survey + los de la región sin survey (compartidos)."""
+    viven en su propia coordenada. Scope: el survey + los de la región sin survey (compartidos).
+
+    Los descartes rotulados con una etiqueta de HOSPEDAJE se excluyen: no significan "esto no
+    es un hotel" sino "es un hotel ya contado en OTRO registro" (duplicado). El caso que lo
+    obliga es el duplicado SIN CNPJ: `_esta_descartado` sólo lo reconoce por nombre normalizado
+    + proximidad, así que hay que guardarle la coordenada sí o sí — y sin este filtro esa
+    coordenada volvía a dibujar, como comercio, el mismo punto que el descarte vino a sacar."""
     engine = get_engine()
     with engine.connect() as conn:
         region = conn.execute(text(
@@ -2087,8 +2296,10 @@ async def comercios_marcados(survey_id: str) -> JSONResponse:
             FROM hotel_descartado
             WHERE region_id = :r AND lat IS NOT NULL AND lng IS NOT NULL
               AND (survey_id = CAST(:s AS uuid) OR survey_id IS NULL)
+              AND COALESCE(tipo_edificacion, '') <> ALL(:hospedaje)
             ORDER BY nombre
-        """), {"r": region, "s": survey_id}).fetchall()
+        """), {"r": region, "s": survey_id,
+               "hospedaje": list(_TIPOS_HOSPEDAJE)}).fetchall()
     puntos = [{"nombre": r[0], "tipo_edificacion": r[1], "categoria": r[2],
                "lat": float(r[3]), "lng": float(r[4]), "cnpj": r[5]} for r in rows]
     return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})

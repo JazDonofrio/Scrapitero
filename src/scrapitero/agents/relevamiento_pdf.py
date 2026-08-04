@@ -41,7 +41,7 @@ class RelevamientoPDF(FPDF):
         self.set_y(-12)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(120, 120, 120)
-        self.cell(0, 8, f"Scraper GIS - {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  Página {self.page_no()}", align="C")
+        self.cell(0, 8, f"AI Mapping - {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  Página {self.page_no()}", align="C")
 
 
 def _build_pdf(report: RelevamientoReport) -> FPDF:
