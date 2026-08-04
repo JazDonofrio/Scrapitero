@@ -2094,6 +2094,28 @@ function categoriaMapa(p) {
   return p.uso || 'sin clasificar';   // vacante / industrial / equipamiento / sin clasificar
 }
 
+// Etiqueta de la taxonomía del cliente (TIPOS_EDIFICACION en app.py) → tipología del mapa,
+// para que un punto reclasificado a mano salga del mismo color que una parcela con ese uso.
+// La categoría R/C/E que viaja con el descarte alcanza para casi todo; estas tres etiquetas
+// son la excepción, porque su color no es el de su categoría.
+const TIPO_CAT_MAPA = {
+  'INDÚSTRIA':   'industrial',           // categoría C, pero gris industrial
+  'LOTE VAZIO':  'vacante',              // categoría E, pero verde vacante
+  'APARTAMENTO': 'edificio_viviendas',   // categoría R, pero azul de edificio (≥2 UF)
+};
+const CATEGORIA_CAT_MAPA = {R: 'vivienda', C: 'comercio', E: 'equipamiento'};
+// Emoji por tipología: un 🏪 sobre un estacionamiento o una casa contradice el color.
+const CAT_EMOJI = {
+  vivienda: '🏠', edificio_viviendas: '🏢', comercio: '🏪', edificio_comercios: '🏬',
+  industrial: '🏭', equipamiento: '🏛️', vacante: '▫️', mixto: '🏘️',
+};
+
+function categoriaMarcado(p) {
+  return TIPO_CAT_MAPA[(p.tipo_edificacion || '').toUpperCase()]
+      || CATEGORIA_CAT_MAPA[p.categoria]
+      || 'comercio';   // descarte viejo sin categoría → naranja, como se dibujaba antes
+}
+
 function initMap(sid) {
   const mapId = 'map-' + sid.replace(/-/g, '');
   const el = document.getElementById(mapId);
@@ -2202,7 +2224,8 @@ function initMap(sid) {
 /* ── Comercios marcados a mano (ex-falsos-hoteles) ─────────────────────────────
    Puntos que el operador reclasificó de "hotel" a comercio desde la asistencia (p.ej.
    "Casa Cortina", que Google devolvía como lodging). Se dibujan en su coordenada real, con
-   color de comercio y su etiqueta de la taxonomía — no dependen de caer en una parcela. */
+   el color y el emoji de la etiqueta que se les puso al reclasificarlos (ver
+   `categoriaMarcado`) — no dependen de caer en una parcela. */
 const comercioMarcadoLayers = {};   // sid → L.layerGroup
 async function loadComerciosMarcados(sid) {
   try {
@@ -2212,15 +2235,19 @@ async function loadComerciosMarcados(sid) {
     if (!map) return;
     if (comercioMarcadoLayers[sid]) { try { map.removeLayer(comercioMarcadoLayers[sid]); } catch(_) {} }
     const grp = L.layerGroup();
-    const col = CAT_COLOR.comercio;   // #fb923c — mismo color que los comercios del mapa
     (d.puntos || []).forEach(p => {
       if (p.lat == null || p.lng == null) return;
+      // El color y el emoji salen de la etiqueta que se le puso al reclasificarlo: un
+      // ESTACIONAMENTO tiene que verse como equipamiento, no como comercio.
+      const cat = categoriaMarcado(p);
+      const col = CAT_COLOR[cat] || CAT_DEFAULT;
+      const emoji = CAT_EMOJI[cat] || '🏪';
       const mk = L.marker([p.lat, p.lng], { icon: L.divIcon({
         className: 'comercio-marcado-pin',
-        html: `<div style="background:${col};border:2px solid #fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 0 3px rgba(0,0,0,.4)">🏪</div>`,
+        html: `<div style="background:${col};border:2px solid #fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 0 3px rgba(0,0,0,.4)">${emoji}</div>`,
         iconSize: [20, 20], iconAnchor: [10, 10],
       }) });
-      mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">🏪 <b>${escHtml(p.nombre || 'Comercio')}</b>`
+      mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">${emoji} <b>${escHtml(p.nombre || 'Comercio')}</b>`
         + `<br><span style="color:${col};font-weight:700">${escHtml(p.tipo_edificacion || 'COMÉRCIO EM GERAL')}</span>`
         + (p.cnpj ? `<br><span style="color:hsl(var(--muted-fg));font-size:.72rem">CNPJ ${escHtml(p.cnpj)}</span>` : '')
         + `<br><span style="color:hsl(var(--muted-fg));font-size:.7rem">${t('reclasificado a mano (no es hotel)')}</span></div>`, { maxWidth: 240 });
