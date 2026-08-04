@@ -259,6 +259,7 @@ var I18N_PT = {
 
   /* ── Incidencias (INCIDENCIA_LABEL) ─────────────────────────────────────── */
   '🏨 hoteles sin habitaciones': '🏨 hotéis sem quartos',
+  '👯 hoteles duplicados (cuentan dos veces)': '👯 hotéis duplicados (contam duas vezes)',
   '🏗 construcción no declarada': '🏗 construção não declarada',
   '🏢 más alto de lo declarado': '🏢 mais alto do que o declarado',
   '⚠ UF que no cabe en lo construido': '⚠ UF que não cabe no construído',
