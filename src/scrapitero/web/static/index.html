@@ -1962,6 +1962,9 @@ function renderCard(s) {
             ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
                title="${tAttr('Descargar CSV con layout de base de logradouros de operadora (solo Brasil)')}">${t('⬇ CSV Operadora')}</a>` : ''}
+            <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
+               style="text-decoration:none"
+               title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>
             ${OPERADOR ? `<button class="btn btn-sm btn-outline"
                onclick="runFootprints('${sid}', this)"
                title="${tAttr('Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.')}">${t('🏗️ Footprints (revisión)')}</button>

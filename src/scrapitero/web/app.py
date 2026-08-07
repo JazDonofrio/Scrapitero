@@ -10,6 +10,8 @@ import io
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
 import urllib.request
 import uuid
@@ -22,6 +24,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, StreamingResponse)
 from loguru import logger
 from sqlalchemy import text
+from starlette.background import BackgroundTask
 
 from scrapitero.agents.logradouro_br import (clasificar_complemento, descomponer_logradouro,
                                              partes_unidad)
@@ -3171,6 +3174,51 @@ async def crear_parcial(survey_id: str,
     logger.info(f"Relevamiento PARCIAL creado para {region_id}: survey {nuevo_sid} "
                 f"(sub-zona de {len(geojson_str)} bytes)")
     return JSONResponse({"ok": True, "survey_id": nuevo_sid, "region_id": region_id})
+
+
+@app.get("/api/surveys/{survey_id}/export/dxf")
+async def export_dxf(survey_id: str):
+    """DXF (AutoCAD) del relevamiento, con las UF de vivienda rotuladas por parcela.
+
+    DXF y no DWG: el `.dwg` es formato cerrado de Autodesk y ninguna librería libre lo
+    escribe; el DXF es el formato de intercambio del propio AutoCAD, que lo abre nativo.
+
+    Se genera on-the-fly (no se cachea: el relevamiento cambia con cada paso del
+    pipeline y una corrida sobre 567 parcelas tarda ~2 s) en un temporal que se borra
+    cuando termina de servirse.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text("""
+            SELECT r.name, s.started_at
+            FROM surveys s JOIN regions r ON s.region_id = r.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).fetchone()
+    if not meta:
+        return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+
+    from scrapitero.agents.dxf_export import DXFInput
+    from scrapitero.agents.dxf_export import run as run_dxf_agent
+
+    tmpdir = tempfile.mkdtemp(prefix="dxf_")
+    fecha = meta[1].strftime("%Y-%m-%d") if meta[1] else ""
+    nombre = f"relevamiento_{meta[0]}_{fecha}.dxf".replace(" ", "_").replace("/", "-")
+    destino = os.path.join(tmpdir, nombre)
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_dxf_agent(DXFInput(survey_id=survey_id, output_path=destino)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    if not data.get("ok"):
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return JSONResponse({"error": data.get("error") or "No se pudo generar el DXF"},
+                            status_code=422)
+
+    return FileResponse(
+        destino, media_type="image/vnd.dxf", filename=nombre,
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
 
 
 @app.get("/api/regions/{region_id}/export/csv-consolidado")

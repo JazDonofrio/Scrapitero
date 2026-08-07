@@ -16,6 +16,7 @@ typer>=0.12
 rich>=13.7
 loguru>=0.7
 python-telegram-bot>=21.0
+ezdxf>=1.4
 
 # Dependencias adicionales para scripts independientes y variables de entorno
 python-dotenv>=1.0.0

@@ -42,6 +42,10 @@ dependencies = [
 
     # Extracción de texto de PDFs (BCIParser)
     "pdfplumber>=0.11",
+
+    # Export a DXF/AutoCAD (DXFExport). El driver DXF de GDAL no sirve: no escribe
+    # atributos ni textos, sólo geometría muda.
+    "ezdxf>=1.4",
 ]
 
 [project.optional-dependencies]
