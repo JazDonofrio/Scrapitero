@@ -1959,9 +1959,9 @@ function renderCard(s) {
 
           <div class="detail-footer">
             <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">${t('↻ Actualizar')}</button>
-            ${s.country_code === 'BRA' ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
+            ${s.export_cliente ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
-               title="${tAttr('Descargar CSV con layout de base de logradouros de operadora (solo Brasil)')}">${t('⬇ CSV Operadora')}</a>` : ''}
+               title="${tAttr('Descargar el CSV con el formato de entrega propio del cliente')}: ${escHtml(s.export_cliente.descripcion || '')}">⬇ ${escHtml(s.export_cliente.etiqueta)}</a>` : ''}
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
                style="text-decoration:none"
                title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>

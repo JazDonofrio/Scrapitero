@@ -550,9 +550,10 @@ var I18N_PT = {
   'Sin estimación todavía. Tocá "Estimar habitantes".':
     'Ainda sem estimativa. Clique em "Estimar habitantes".',
   '↻ Actualizar': '↻ Atualizar',
-  'Descargar CSV con layout de base de logradouros de operadora (solo Brasil)':
-    'Baixar CSV com layout de base de logradouros da operadora (somente Brasil)',
-  '⬇ CSV Operadora': '⬇ CSV Operadora',
+  // El nombre del formato («CSV Operadora») lo pone el backend desde el perfil del
+  // cliente y NO se traduce, igual que la taxonomía y las columnas DSC_/COD_.
+  'Descargar el CSV con el formato de entrega propio del cliente':
+    'Baixar o CSV com o formato de entrega do próprio cliente',
   'Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.':
     'Baixar o levantamento em DXF para AutoCAD: lotes, unidades de moradia e comércio, endereço e tipo de edificação, cada coisa em sua camada. O AutoCAD abre nativamente e permite salvar como DWG.',
   '⬇ DXF (AutoCAD)': '⬇ DXF (AutoCAD)',

@@ -613,6 +613,10 @@ async def list_surveys(request: Request) -> list[dict]:
             "pipeline": notas,
             "region_nombre": r[5],
             "country_code": r[6],
+            # Formato de entrega propio del cliente, si su país tiene uno definido
+            # (`_EXPORT_PERFILES_CLIENTE`). El front muestra el botón según esto, en vez
+            # de preguntar `country_code === 'BRA'` en cada página.
+            "export_cliente": _EXPORT_PERFILES_CLIENTE.get((r[6] or "").upper()),
             "total_edificios": int(r[8] or 0),
             "total_parcelas": int(r[9] or 0),
             "total_uf_vivienda": int(r[10] or 0),
@@ -3001,9 +3005,41 @@ def _vocabulario_tipo_logradouro(filas_extras: list) -> dict:
     return voc
 
 
+# ── Perfiles de export "formato del cliente" ──────────────────────────────────
+# El CSV genérico (`/export/csv`) sirve en cualquier país; ADEMÁS cada cliente puede
+# tener su propio layout de entrega. Hoy sólo está definido el de la operadora brasilera.
+# Para sumar el de otro cliente: agregar la entrada acá y su generador, sin tocar el
+# resto del endpoint. Ver docs/FUENTES_DATOS_AR.md § entregable.
+_EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
+    "BRA": {
+        "etiqueta": "CSV Operadora",
+        "descripcion": "Layout de base de logradouros de operadora (Brasil)",
+    },
+    # "ARG": pendiente de definir con el cliente argentino. Mientras no exista, en
+    # Argentina se entrega el CSV genérico + DXF, que no dependen del país.
+}
+
+
+@app.get("/api/surveys/{survey_id}/export/perfiles")
+async def export_perfiles(survey_id: str) -> JSONResponse:
+    """Qué formatos de entrega aplican a este relevamiento, para que la UI muestre los
+    botones que corresponden en vez de decidirlo con un `country_code === 'BRA'` en el
+    front (que había que tocar en cada página al sumar un cliente)."""
+    with get_engine().connect() as conn:
+        pais = _country_de_survey(conn, survey_id).upper()
+    perfil = _EXPORT_PERFILES_CLIENTE.get(pais)
+    return JSONResponse({
+        "ok": True, "pais": pais,
+        # siempre disponibles: no dependen del país
+        "genericos": [{"clave": "csv", "etiqueta": "CSV"},
+                      {"clave": "dxf", "etiqueta": "DXF (AutoCAD)"}],
+        "cliente": ({"clave": "csv-operadora", **perfil} if perfil else None),
+    })
+
+
 @app.get("/api/surveys/{survey_id}/export/csv-operadora")
 async def export_csv_operadora(survey_id: str) -> StreamingResponse:
-    """CSV con el layout de base de logradouros de operadora (solo Brasil).
+    """CSV con el layout del cliente (hoy definido sólo para Brasil: base de logradouros).
 
     Una fila por parcela con dirección. Descompone `calle` en tipo/título/
     preposição/nome oficial (heurística por diccionario — logradouro_br.py).
@@ -3019,9 +3055,12 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
         """), {"sid": survey_id}).fetchone()
         if not meta:
             return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
-        if (meta[3] or "").upper() != "BRA":
+        pais_survey = (meta[3] or "").upper()
+        if pais_survey not in _EXPORT_PERFILES_CLIENTE:
+            definidos = ", ".join(sorted(_EXPORT_PERFILES_CLIENTE)) or "(ninguno)"
             return JSONResponse(
-                {"error": "El CSV de operadora es solo para relevamientos en Brasil"},
+                {"error": f"No hay formato de entrega de cliente definido para {pais_survey or '?'}. "
+                          f"Definidos: {definidos}. Usá el CSV genérico o el DXF."},
                 status_code=400)
 
         # Si el survey tiene un baseline vinculado, exportamos con el MISMO formato del CSV
@@ -3422,26 +3461,82 @@ _BASELINE_MAX_BYTES = 10 * 1024 * 1024     # 10 MB de CSV es muchísimo más que
 # mapeo manual: el CSV debe traer estas columnas con su nombre exacto. campo_interno →
 # nombre EXACTO de columna. El match es case/acento-insensible (_norm_header), pero el
 # nombre tiene que estar. Ver _resolver_columnas / docs.
-_BASELINE_COLUMNAS = {
-    "direccion":       "DSC_ENDERECO_COMPLETO",   # obligatoria
-    "ciudad":          "DSC_CIDADE",              # obligatoria
-    "estado":          "COD_UF",                  # obligatoria (sigla/código/nombre de UF)
-    "cep":             "NUM_CEP",                 # obligatoria
-    "uso":             "DSC_TIPO_IMOVEL",         # obligatoria (tipo de inmueble → UF)
-    "barrio":          "DSC_BAIRRO",              # opcional
-    "status_contrato": "DSC_STATUS_CONTRATO",     # opcional
-    "status_node":     "COD_NODE",                # opcional
+# ── Contrato de columnas del relevamiento anterior, POR PERFIL ────────────────
+# Cada cliente/país entrega el CSV con SUS nombres de columna. El perfil no se pide al
+# operador ni se deduce del país (el país todavía no se conoce al importar: se detecta
+# geocodificando la ciudad, que sale de este mismo CSV) — **se detecta de los headers**,
+# eligiendo el perfil que más columnas obligatorias matchea. Para sumar un cliente nuevo
+# alcanza con agregar una entrada acá: no hay que tocar la lógica de import.
+_BASELINE_PERFILES: dict[str, dict] = {
+    # Operadora brasilera (Várzea Grande) — el contrato original.
+    "BRA": {
+        "etiqueta": "Operadora Brasil",
+        "campos": {
+            "direccion":       "DSC_ENDERECO_COMPLETO",   # obligatoria
+            "ciudad":          "DSC_CIDADE",              # obligatoria
+            "estado":          "COD_UF",                  # obligatoria (sigla/código/nombre de UF)
+            "cep":             "NUM_CEP",                 # obligatoria
+            "uso":             "DSC_TIPO_IMOVEL",         # obligatoria (tipo de inmueble → UF)
+            "barrio":          "DSC_BAIRRO",              # opcional
+            "status_contrato": "DSC_STATUS_CONTRATO",     # opcional
+            "status_node":     "COD_NODE",                # opcional
+        },
+        "obligatorias": ["DSC_ENDERECO_COMPLETO", "DSC_CIDADE", "COD_UF",
+                         "NUM_CEP", "DSC_TIPO_IMOVEL"],
+        "opcionales": ["DSC_BAIRRO", "DSC_STATUS_CONTRATO", "COD_NODE"],
+    },
+    # Argentina — nombres genéricos en español. En AR no hay "UF" ni "CEP": son PROVINCIA
+    # y CÓDIGO POSTAL. Cuando haya un cliente concreto con su propio layout, se agrega su
+    # perfil acá (o se ajusta éste) sin tocar nada más.
+    "ARG": {
+        "etiqueta": "Genérico Argentina",
+        "campos": {
+            "direccion":       "DIRECCION",       # obligatoria
+            "ciudad":          "LOCALIDAD",       # obligatoria
+            "estado":          "PROVINCIA",       # obligatoria
+            "cep":             "CODIGO_POSTAL",   # obligatoria
+            "uso":             "TIPO_INMUEBLE",   # obligatoria
+            "barrio":          "BARRIO",          # opcional
+            "status_contrato": "ESTADO_CONTRATO", # opcional
+            "status_node":     "NODO",            # opcional
+        },
+        "obligatorias": ["DIRECCION", "LOCALIDAD", "PROVINCIA",
+                         "CODIGO_POSTAL", "TIPO_INMUEBLE"],
+        "opcionales": ["BARRIO", "ESTADO_CONTRATO", "NODO"],
+    },
 }
-_BASELINE_OBLIGATORIAS = ["DSC_ENDERECO_COMPLETO", "DSC_CIDADE", "COD_UF",
-                          "NUM_CEP", "DSC_TIPO_IMOVEL"]
-_BASELINE_OPCIONALES = ["DSC_BAIRRO", "DSC_STATUS_CONTRATO", "COD_NODE"]
+_BASELINE_PERFIL_DEFECTO = "BRA"
+
+# Compatibilidad: el resto del módulo sigue leyendo estos nombres para el perfil brasilero.
+_BASELINE_COLUMNAS = _BASELINE_PERFILES["BRA"]["campos"]
+_BASELINE_OBLIGATORIAS = _BASELINE_PERFILES["BRA"]["obligatorias"]
+_BASELINE_OPCIONALES = _BASELINE_PERFILES["BRA"]["opcionales"]
+
+
+def _detectar_perfil_baseline(headers: list[str]) -> tuple[str, dict]:
+    """Elige el perfil de columnas que mejor matchea los headers del CSV subido.
+
+    Devuelve (clave_perfil, perfil). Si ninguno matchea nada se devuelve el de defecto,
+    para que el error que ve el operador nombre las columnas del contrato conocido.
+    """
+    norm = {_norm_header(h) for h in headers if str(h).strip()}
+    mejor, mejor_n = _BASELINE_PERFIL_DEFECTO, -1
+    for clave, perfil in _BASELINE_PERFILES.items():
+        n = sum(1 for c in perfil["obligatorias"] if _norm_header(c) in norm)
+        if n > mejor_n:
+            mejor, mejor_n = clave, n
+    return mejor, _BASELINE_PERFILES[mejor]
 
 
 def _norm_header(h: str) -> str:
+    """Normaliza un header para comparar: sin acentos, minúsculas y con `_`/`-` tratados
+    como espacio — el layout de una operadora usa `CODIGO_POSTAL` y una planilla hecha a
+    mano escribe `Código Postal`, y son la misma columna. Se aplica a los DOS lados de la
+    comparación, así que no cambia lo que ya matcheaba."""
     import unicodedata
     s = "".join(c for c in unicodedata.normalize("NFKD", str(h or ""))
                 if not unicodedata.combining(c))
-    return re.sub(r"\s+", " ", s.lower().strip())
+    return re.sub(r"\s+", " ", re.sub(r"[_\-]+", " ", s).lower().strip())
 
 
 def _leer_csv_baseline(data: bytes, filename: str) -> tuple[list[str], list[list[str]], str]:
@@ -3481,39 +3576,48 @@ def _leer_csv_baseline(data: bytes, filename: str) -> tuple[list[str], list[list
 
 
 def _resolver_columnas(headers: list[str]) -> dict:
-    """Resuelve el `mapeo_d` interno {campo: header_real} buscando las columnas de nombre
-    fijo (`_BASELINE_COLUMNAS`) en los headers del CSV. Match case/acento-insensible.
+    """Resuelve el `mapeo_d` interno {campo: header_real} con el perfil de columnas que
+    matchea el CSV (`_detectar_perfil_baseline`). Match case/acento-insensible.
     Lanza ValueError si falta alguna columna OBLIGATORIA (con el nombre exacto esperado)."""
     norm = {_norm_header(h): h for h in headers if str(h).strip()}
+    _, perfil = _detectar_perfil_baseline(headers)
     mapeo: dict[str, str] = {}
-    for campo, columna in _BASELINE_COLUMNAS.items():
+    for campo, columna in perfil["campos"].items():
         real = norm.get(_norm_header(columna))
         if real:
             mapeo[campo] = real
-    faltan = [c for c in _BASELINE_OBLIGATORIAS if _norm_header(c) not in norm]
+    faltan = [c for c in perfil["obligatorias"] if _norm_header(c) not in norm]
     if faltan:
         raise ValueError(
-            "Al CSV le faltan columnas obligatorias: " + ", ".join(faltan) +
+            f"Al CSV le faltan columnas obligatorias del formato «{perfil['etiqueta']}»: "
+            + ", ".join(faltan) +
             ". El relevamiento anterior debe traer estas columnas (nombre exacto): " +
-            ", ".join(_BASELINE_OBLIGATORIAS) + ".")
+            ", ".join(perfil["obligatorias"]) + ".")
     return mapeo
 
 
 def _validar_columnas_csv(headers: list[str], datos: list, sep: str) -> dict:
-    """Payload de preview: valida que estén las columnas obligatorias (por nombre fijo).
+    """Payload de preview: valida que estén las columnas obligatorias del perfil detectado.
     Devuelve detectadas/faltantes para mostrar en la UI. Ya no hay mapeo manual."""
     norm = {_norm_header(h) for h in headers if str(h).strip()}
+    clave, perfil = _detectar_perfil_baseline(headers)
+    obligatorias, opcionales = perfil["obligatorias"], perfil["opcionales"]
     presentes = lambda cols: [c for c in cols if _norm_header(c) in norm]
-    faltantes = [c for c in _BASELINE_OBLIGATORIAS if _norm_header(c) not in norm]
+    faltantes = [c for c in obligatorias if _norm_header(c) not in norm]
     return {
         "ok": not faltantes,
-        "obligatorias": _BASELINE_OBLIGATORIAS,
-        "opcionales": _BASELINE_OPCIONALES,
-        "detectadas": presentes(_BASELINE_OBLIGATORIAS + _BASELINE_OPCIONALES),
+        "perfil": clave,
+        "perfil_etiqueta": perfil["etiqueta"],
+        "perfiles": [{"clave": k, "etiqueta": p["etiqueta"], "obligatorias": p["obligatorias"]}
+                     for k, p in _BASELINE_PERFILES.items()],
+        "obligatorias": obligatorias,
+        "opcionales": opcionales,
+        "detectadas": presentes(obligatorias + opcionales),
         "faltantes": faltantes,
         "separador": sep,
         "total_filas": len(datos),
-        "error": ("Faltan columnas obligatorias: " + ", ".join(faltantes)) if faltantes else None,
+        "error": (f"Faltan columnas obligatorias del formato «{perfil['etiqueta']}»: "
+                  + ", ".join(faltantes)) if faltantes else None,
     }
 
 
@@ -3630,7 +3734,12 @@ def _construir_registros_baseline(headers: list, datos: list, mapeo_d: dict,
             "uso": (celda(fila, "uso").lower()[:30] or None),
             "barrio": (celda(fila, "barrio")[:200] or None),
             "ciudad": (celda(fila, "ciudad")[:200] or None),
-            "estado": (sigla_uf(celda(fila, "estado")) or None),  # COD_UF/nombre → sigla (51/"Mato Grosso"→MT)
+            # COD_UF/nombre → sigla (51/"Mato Grosso"→MT). `sigla_uf` sólo conoce estados
+            # BRASILEROS y devuelve '' para el resto: fuera de Brasil se conserva el valor
+            # tal cual vino (una provincia argentina —"Buenos Aires"— se perdería, y el
+            # geocoding la necesita para desambiguar calles homónimas entre provincias).
+            "estado": (sigla_uf(celda(fila, "estado"))
+                       or celda(fila, "estado").strip()[:100] or None),
             "cep": cep_norm(celda(fila, "cep")),
             "uf_v": entero(celda(fila, "uf_vivienda")),
             "uf_c": entero(celda(fila, "uf_comercio")),
