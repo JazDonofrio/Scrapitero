@@ -175,9 +175,16 @@ Servicio **oficial y gratuito** de normalización de datos geográficos de Argen
 rol que geocodebr en Brasil: interpola la altura sobre el nomenclador oficial de calles.
 Sin token, sin cuota publicada. Acepta `direccion`, `provincia`, `departamento`.
 
-> **Acción:** enchufarlo como **paso 0 del geocoding en Argentina**, igual que geocodebr en
-> Brasil, vía el helper compartido `agents/geocode_forward.py`. Con mediana 60 m y p90 130 m
-> resuelve el 90% gratis y deja para Google sólo el resto ⇒ el costo de geocoding baja ~90%.
+> ✅ **IMPLEMENTADO** — `georef_ar_lote()` en `agents/geocode_forward.py`, enchufado como
+> **paso 0 de `BaselineGeocoder`** en Argentina (`usar_georef_ar`), igual que geocodebr en
+> Brasil. **Batch por HTTP: 1.000 direcciones en ~3 s.** Sobre 200 direcciones de Hurlingham:
+> **88% resuelto, mediana 57 m, p90 144 m, máx 372 m, ninguna por encima de 500 m.**
+>
+> ⚠ **Nunca consultar sin ámbito administrativo.** Filtrando sólo por provincia, «Arturo
+> Jauretche 1401» resuelve en **Olavarría, a 350 km** de Hurlingham — el mismo tipo de error
+> que descartó a Mapbox. Una fila sin partido/localidad se saltea y cae a Nominatim/Google.
+> El helper reintenta por **localidad** cuando el nombre no es el del partido (en el conurbano
+> el CSV trae «Villa Tesei», que es localidad del partido Hurlingham).
 
 ### Mapbox en Argentina: no aporta
 
@@ -223,10 +230,10 @@ Complementos sectoriales útiles, todos por zona y no por parcela:
 ## Orden sugerido de trabajo
 
 1. **`FootprintFetcher` al flujo PBA** — gratis, ya está hecho, 94% de cobertura. Sin código nuevo.
-2. **`georef-ar` como paso 0 del geocoding argentino** — gratis y oficial; baja ~90% el gasto
-   de Google. Es el cambio que más plata ahorra por línea de código.
-3. **`OverturePlacesFetcher`** — el mayor salto en datos: comercios con nombre y dirección,
-   gratis, y deja de depender de Google Places para saber qué hay en cada parcela.
+2. ✅ **`georef-ar` como paso 0 del geocoding argentino** — hecho. Mapbox además quedó
+   **desactivado fuera de Brasil**, donde era pago y peor que Nominatim.
+3. ✅ **`OverturePlacesFetcher`** — hecho. En Hurlingham: 137 POIs en la zona, 53 UF de
+   comercio en 28 parcelas, 78 con etiqueta de la taxonomía. Costo cero.
 4. **Overture como tercera fuente de `ShoppingFetcher`.**
 5. **Guarda de `AlturaFetcher`** para no marcar `sin_declarar` donde el catastro no publica
    área construida.

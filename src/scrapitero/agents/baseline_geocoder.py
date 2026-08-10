@@ -80,7 +80,8 @@ class BaselineGeocoderInput(BaseModel):
     usar_catastro: bool = True
     usar_geocodebr: bool = True   # Brasil: geocodebr (CNEFE, gratis/offline) como paso 0
     geocodebr_max_desvio_m: float = 300.0   # escribir coord de geocodebr solo si desvío ≤ esto
-    usar_mapbox: bool = True       # capa paga barata Nominatim→**Mapbox**→Google
+    usar_georef_ar: bool = True   # Argentina: georef-ar (Datos Argentina, gratis) como paso 0
+    usar_mapbox: bool = True       # capa paga barata Nominatim→**Mapbox**→Google (solo BR)
     mapbox_max_requests: int = 1000  # tope de llamadas a Mapbox (tramo gratis); el resto cae a Google
 
 
@@ -273,6 +274,34 @@ def _mapbox(query: str, iso2: Optional[str], client: httpx.Client):
     return None
 
 
+def _georef_ar_step(engine, pendientes: list, ciudad_global: Optional[str]) -> set:
+    """Paso 0 (Argentina): georef-ar (Datos Argentina, oficial y gratis) vía el helper
+    compartido `geocode_forward`. Es el equivalente de geocodebr en Brasil.
+
+    El ámbito se arma con la provincia (`estado` de la fila) y la ciudad como partido; el
+    helper reintenta por localidad si el nombre no es el del partido. Sin ámbito no consulta:
+    la misma calle existe en decenas de partidos de Buenos Aires.
+
+    Medido sobre 200 direcciones de Hurlingham: 88% resuelto, mediana 57 m, p90 144 m,
+    ninguna a más de 372 m.
+    """
+    from scrapitero.agents.geocode_forward import georef_ar_lote
+    items = [{"id": pid, "calle": calle or "", "numero": numero or "",
+              "provincia": (est or ""), "departamento": (ciu or ciudad_global or "")}
+             for pid, calle, numero, barrio, ciu, est, cep in pendientes]
+    res = georef_ar_lote(items)
+    ids_ok: set = set()
+    with engine.begin() as conn:
+        for pid, (lat, lng, src) in res.items():
+            conn.execute(text("""
+                UPDATE baseline_direcciones
+                SET lat=:lat, lng=:lng, geocode_source=:src, geocode_confidence=NULL
+                WHERE id=:id
+            """), {"lat": lat, "lng": lng, "src": src, "id": pid})
+            ids_ok.add(pid)
+    return ids_ok
+
+
 def _geocodebr_step(engine, pendientes: list, municipio_codigo: Optional[str],
                     ciudad_global: Optional[str], max_desvio_m: float) -> set:
     """Paso 0 (Brasil): geocodifica las pendientes con geocodebr (CNEFE, gratis/offline) vía
@@ -417,6 +446,20 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
             _tg(f"📍 geocodebr (gratis): {len(ids_ok)} ubicadas, "
                 f"{len(pendientes)} van a Nominatim/Google.")
 
+    # ── Paso 0b (Argentina): georef-ar — el equivalente oficial y gratuito de geocodebr.
+    # Va antes que cualquier fuente paga: resuelve ~88% con mediana 57 m (medido en
+    # Hurlingham) en un request por lote, contra 1 request por dirección de Google.
+    if iso2 == "ar" and input.usar_georef_ar and pendientes:
+        ids_ok = _georef_ar_step(engine, pendientes, ciudad)
+        if ids_ok:
+            geocodificadas += len(ids_ok)
+            por_fuente["georef_ar"] = len(ids_ok)
+            pendientes = [t for t in pendientes if t[0] not in ids_ok]
+            logger.info(f"georef-ar paso 0: {len(ids_ok)} ubicadas gratis, "
+                        f"{len(pendientes)} restantes → Nominatim/Google")
+            _tg(f"📍 georef-ar (gratis): {len(ids_ok)} ubicadas, "
+                f"{len(pendientes)} van a Nominatim/Google.")
+
     # Caché de geocoding (migración 021): reusa coordenadas ya resueltas por
     # dirección normalizada + país, sin volver a pegarle a Nominatim/Google.
     # Con usar_cache=False se omite la precarga → se geocodifica todo de nuevo
@@ -448,10 +491,17 @@ def run(input: BaselineGeocoderInput) -> BaselineGeocoderOutput:
     delay = max(input.delay_ms, 0) / 1000.0
 
     # Mapbox: capa paga barata entre Nominatim y Google, con tope para no pasar el tramo gratis.
-    mapbox_on = input.usar_mapbox and bool(_mapbox_token())
+    # **Sólo Brasil.** Medido en Argentina (30 direcciones de Hurlingham contra el centroide
+    # catastral): mediana 810 m y un caso a 398 km, o sea PEOR que Nominatim, que es gratis —
+    # pagarlo ahí sería pagar por empeorar. Ver memoria project_mapbox_benchmark.
+    mapbox_util = iso2 == "br"
+    mapbox_on = input.usar_mapbox and mapbox_util and bool(_mapbox_token())
     mapbox_reqs = 0
     mapbox_aviso = False
-    if input.usar_mapbox and not _mapbox_token():
+    if input.usar_mapbox and not mapbox_util:
+        logger.info(f"BaselineGeocoder: Mapbox omitido en '{iso2}' — sólo rinde en Brasil "
+                    "(en Argentina mide peor que Nominatim y es pago)")
+    elif input.usar_mapbox and not _mapbox_token():
         logger.info("BaselineGeocoder: usar_mapbox=True pero falta MAPBOX_TOKEN — se omite Mapbox")
 
     def _guardar(dir_id, lat, lng, src, conf):

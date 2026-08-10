@@ -1,18 +1,22 @@
 """Geocoding forward (dirección → coordenada) — capa única y compartida.
 
-Orden de preferencia, **geocodebr PRIMERO para Brasil**:
-  1. **geocodebr** (CNEFE/IBGE, gratis, offline) — **batch** (un `Rscript` carga el CNEFE
-     una sola vez y resuelve toda la lista).
+Hay un geocoder oficial y gratuito por país, y va SIEMPRE primero:
+  - **Brasil → geocodebr** (CNEFE/IBGE, offline, batch por `Rscript`).
+  - **Argentina → georef-ar** (`apis.datos.gob.ar/georef`, oficial, sin token, batch por
+    HTTP: 1.000 direcciones en ~3 s).
+Después, para lo que quede sin resolver:
   2. Nominatim (OSM, gratis, ~1 req/s) — por dirección (lo aporta `baseline_geocoder`).
-  3. Google Geocoding (pago) — fallback por dirección.
+  3. Mapbox (pago barato) — **sólo Brasil**: en Argentina midió peor que Nominatim
+     (mediana 810 m y un caso a 398 km) y sus POIs tienen cobertura cero.
+  4. Google Geocoding (pago) — fallback final por dirección.
 
-geocodebr es **batch por diseño**: el arranque del worker R carga el CNEFE (~4 s), así que
-NO se llama por-dirección dentro de un loop — se geocodifica una lista de una sola vez y lo
-que no ubique con desvío aceptable cae a Nominatim/Google.
+Ambos son **batch por diseño**: geocodebr porque el worker R carga el CNEFE (~4 s) y
+georef-ar porque resuelve mil direcciones en un request. NO se llaman por-dirección dentro
+de un loop — se geocodifica la lista entera y lo que no ubique cae a las fuentes de abajo.
 
 Lo usan **BaselineGeocoder** (relevamiento anterior) y **HotelFetcher** (hoteles
-Cadastur/Receita sin coordenadas), para que geocodebr sea la primera opción en TODO camino
-forward de Brasil. Ver memoria [[project_geocodebr]].
+Cadastur/Receita sin coordenadas). Ver memorias [[project_geocodebr]] y
+[[project_mapbox_benchmark]].
 """
 
 from __future__ import annotations
@@ -143,4 +147,103 @@ def geocodebr_lote(items: list[dict], *, uf: Optional[str] = None,
         if (g.get("lat") is not None and prec not in _PRECISION_DESCARTE
                 and (desv is None or desv <= max_desvio_m)):
             out[rid] = (g["lat"], g["lng"], f"g:{prec}"[:20])  # geocode_source VARCHAR(20)
+    return out
+
+
+# ── Argentina: georef-ar (Datos Argentina, oficial y gratis) ──────────────────
+
+_GEOREF_URL = "https://apis.datos.gob.ar/georef/api/direcciones"
+_GEOREF_LOTE = 500          # medido: 1.000 direcciones en ~3 s; 500 deja margen de timeout
+
+
+def georef_ar_lote(items: list[dict], *, timeout: float = 90.0) -> dict[str, tuple]:
+    """Geocodifica en lote direcciones ARGENTINAS con georef-ar (gratis, sin token).
+
+    `items`: dicts con `id` + `calle`, `numero` y el ámbito administrativo para acotar:
+    `provincia` y `departamento` (el partido) y/o `localidad`. El `id` es la clave de
+    retorno. Devuelve `{id: (lat, lng, source)}` sólo para las resueltas.
+
+    ⚠ **Sin ámbito NO se consulta.** Verificado: "Arturo Jauretche 1401" filtrando sólo por
+    provincia Buenos Aires resuelve en **Olavarría, a 350 km** de la Hurlingham buscada. Una
+    fila sin departamento ni localidad se saltea (cae a Nominatim/Google) en vez de arriesgar
+    un punto en otro partido — el mismo tipo de error que descartó a Mapbox en Argentina.
+
+    Precisión medida contra el catastro (30 direcciones de Hurlingham): mediana 60 m,
+    p90 130 m, peor caso 320 m, 27/30 resueltas.
+    """
+    if not items:
+        return {}
+    try:
+        import httpx
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"geocode_forward: httpx no disponible ({e}) — georef-ar omitido")
+        return {}
+
+    # Sólo las filas que traen calle + ámbito: el resto iría a parar a otro partido.
+    base: list[tuple[str, str, str, str]] = []   # (id, direccion, provincia, ambito)
+    sin_ambito = 0
+    for it in items:
+        calle = (it.get("calle") or "").strip()
+        if not calle:
+            continue
+        ambito = (it.get("departamento") or it.get("localidad") or "").strip()
+        provincia = (it.get("provincia") or "").strip()
+        if not ambito or not provincia:
+            sin_ambito += 1
+            continue
+        numero = str(it.get("numero") or "").strip()
+        base.append((str(it["id"]), f"{calle} {numero}".strip(), provincia, ambito))
+    if sin_ambito:
+        logger.warning(
+            f"geocode_forward: {sin_ambito}/{len(items)} filas sin provincia+partido/localidad "
+            "— se omiten de georef-ar (van a Nominatim/Google). Sin ámbito el geocoder puede "
+            "devolver la misma calle en otro partido, a cientos de km.")
+    if not base:
+        return {}
+
+    def _consultar(client, filas: list, campo: str) -> dict[str, tuple]:
+        """Una pasada por lotes, filtrando el ámbito por `campo` (departamento|localidad)."""
+        res_out: dict[str, tuple] = {}
+        for i in range(0, len(filas), _GEOREF_LOTE):
+            trozo = filas[i:i + _GEOREF_LOTE]
+            cuerpo = [{"direccion": d, "provincia": p, campo: a, "max": 1}
+                      for _, d, p, a in trozo]
+            try:
+                r = client.post(_GEOREF_URL, json={"direcciones": cuerpo})
+                r.raise_for_status()
+                resultados = r.json().get("resultados", [])
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"geocode_forward: georef-ar falló en un lote de "
+                               f"{len(trozo)} ({str(e)[:120]}) — esas direcciones "
+                               "siguen con Nominatim/Google")
+                continue
+            for (rid, *_), res in zip(trozo, resultados):
+                dirs = (res or {}).get("direcciones") or []
+                if not dirs:
+                    continue
+                ub = (dirs[0].get("ubicacion") or {})
+                lat, lon = ub.get("lat"), ub.get("lon")
+                if lat is None or lon is None:
+                    continue
+                # con altura = interpolada sobre la cuadra; sin altura = eje de la calle
+                tiene_altura = (dirs[0].get("altura") or {}).get("valor") is not None
+                res_out[rid] = (float(lat), float(lon),
+                                "ar:numero" if tiene_altura else "ar:calle")
+        return res_out
+
+    out: dict[str, tuple] = {}
+    with httpx.Client(timeout=timeout) as client:
+        out.update(_consultar(client, base, "departamento"))
+        # Segundo intento por LOCALIDAD para lo que no matcheó como partido: en el conurbano
+        # el CSV suele traer la localidad ("Villa Tesei"), que no es el nombre del partido
+        # ("Hurlingham") y como `departamento` no devuelve nada.
+        faltan = [f for f in base if f[0] not in out]
+        if faltan:
+            recuperadas = _consultar(client, faltan, "localidad")
+            if recuperadas:
+                logger.info(f"geocode_forward: georef-ar recuperó {len(recuperadas)} "
+                            "direcciones filtrando por localidad en vez de partido")
+            out.update(recuperadas)
+    logger.info(f"geocode_forward: georef-ar resolvió {len(out)}/{len(base)} direcciones "
+                "(gratis)")
     return out
