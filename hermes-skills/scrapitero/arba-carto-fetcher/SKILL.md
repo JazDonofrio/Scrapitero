@@ -101,3 +101,8 @@ python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar"
 - Si la sesión expiró, el agente borra el archivo y vuelve a pedir cookies
 - `total_uf` = unidades funcionales (subparcelas ≥ 25 m²)
 - `total_cocheras` = subparcelas < 25 m²
+- La UF de cada parcela se guarda en `uf_vivienda` (total del lote, `uf_fuente='arba_carto'`)
+  y en `unidades_funcionales_estimadas`. **ARBA no dice el destino** de cada subparcela (el
+  campo `sp` es su número, no el uso), así que el reparto vivienda/comercio lo hace después
+  `uso-classifier` con Google Places — correrlo siempre, es el último paso de UF en PBA
+- No pisa lo corregido a mano: respeta `uf_fuente='manual'` y `direccion_source='manual'`

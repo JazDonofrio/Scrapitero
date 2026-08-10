@@ -57,7 +57,7 @@ escribilo a un archivo y redirigí `python -m scrapitero.rpc.<agente> < input.js
 ### Fuentes de parcelas — Argentina
 | Agente | RPC | Cuándo usarlo |
 |--------|-----|---------------|
-| ARBACartoFetcher | `arba_carto_fetcher` | **PBA: SIEMPRE primero.** Requiere JSESSIONID. Si falla login → Telegram al usuario. Si no hay parcelas en DB las baja de IDERA por **filtro espacial** (polígono de la zona) o por nomenclatura si se pasa completa. |
+| ARBACartoFetcher | `arba_carto_fetcher` | **PBA: SIEMPRE primero.** Requiere JSESSIONID. Si falla login → Telegram al usuario. Si no hay parcelas en DB las baja de IDERA por **filtro espacial** (polígono de la zona) o por nomenclatura si se pasa completa. Cuenta las subparcelas (≥25 m² → UF, menores → cochera) y carga la **UF total** en `uf_vivienda` (`uf_fuente='arba_carto'`): ARBA **no dice el destino**, así que el reparto vivienda/comercio lo hace después `UsoClassifier` — ver **Regla PBA**. |
 | ARBACadastralFetcher | `arba_cadastral_fetcher` | PBA alternativo: WFS público de IDERA, sin autenticación. **Filtra por el polígono de la zona (`zone_geojson`) por default** — no requiere nomenclatura catastral; pasarla (partido/circ/secc/manzana) es opcional para bajar una manzana puntual. |
 | SaltaCatastroFetcher | `salta_catastro_fetcher` | **Salta: SIEMPRE primero.** WFS público sin autenticación. Capital → IDEMSA (~125k parcelas). Interior → IDESA provincial. Selección automática por centroide de zona. |
 | SaltaZonificacionFetcher | `salta_zonificacion_fetcher` | Después de SaltaCatastroFetcher. Clasifica uso_principal por CPUA 2019 (residencial/comercial/mixto/industrial/equipamiento/vacante). Cubre ciudad de Salta Capital. |
@@ -234,14 +234,30 @@ clave independiente; el agrupamiento solo está en la cédula paga de inmuebles.
 
 **Regla PBA — uso_principal SIEMPRE se clasifica:** PBA no tiene fuente nativa de uso
 (a diferencia de Brasil=BCI y Salta=CPUA/SIGSA). La única señal es `UsoClassifier`, que
-combina la **UF de ARBA** (`uf_vivienda`/`uf_comercio` que llena ARBACartoFetcher desde las
-subparcelas de carto.arba.gov.ar) + **Google Places** (comercios alrededor). Por eso:
-- `UsoClassifier` es **paso estándar** del flujo PBA (no opcional) — si no se corre, todas
-  las parcelas quedan `uso_principal = NULL` ("sin clasificar").
+combina la **UF de ARBA** + **Google Places** (comercios alrededor). Cómo se reparte:
+- **ARBA da el CUÁNTAS, nunca el destino.** `ARBACartoFetcher` cuenta las subparcelas de
+  `carto.arba.gov.ar` (≥ `COCHERA_M2`=25 m² → UF; menores → cochera), pero el campo `sp`
+  es el **número** de subparcela, **no el uso**: no hay forma de saber por ARBA si una UF
+  es vivienda o comercio. Por eso carga la UF **total** en `uf_vivienda` con
+  `uf_fuente='arba_carto'` (y `uf_comercio=0`), además de `unidades_funcionales_estimadas`.
+- **`UsoClassifier` es el que reparte y el ÚLTIMO paso de UF del flujo PBA:** Places
+  (radio 15 m ≈ la propia parcela) es la única señal de comercio, y lo que confirma se
+  **descuenta** del total de ARBA — no se suma encima, porque una casa con local al frente
+  no gana una UF. Persiste `uf_vivienda`/`uf_comercio` con `uf_fuente='clasificador'`
+  **además** de `uso_principal`.
+- `UsoClassifier` es **paso estándar** (no opcional) — si no se corre, las parcelas quedan
+  `uso_principal = NULL` ("sin clasificar") y **sin desglose de UF**.
 - **Depende de ARBACartoFetcher:** si las parcelas entraron solo por IDERA (`arba_idera`,
   geometría sin UF), `UsoClassifier` no tiene UF y cae a Google Places / `sin_datos`. Para
   uso útil, correr ARBACartoFetcher (con JSESSIONID) **antes**.
 - Requiere `GOOGLE_MAPS_API_KEY`. Opcional: `GooglePlacesFetcher` para conteo real de comercios.
+- ⚠ **Modo de falla ya visto (Hurlingham, 2026-08-10):** ARBACartoFetcher escribía la UF
+  **sólo** en `unidades_funcionales_estimadas`, y como `UsoClassifier` lee
+  `uf_vivienda`/`uf_comercio`, recibía `(0,0)` en todas: el survey terminó con **0 UF** y
+  346 `sin_datos` / 95 `comercial` (nunca `residencial` ni `mixto`, porque con
+  `uf_vivienda=0` cualquier comercio detectado da `comercial`). Si un relevamiento PBA sale
+  con 0 residenciales, es este síntoma. Corregido: ambos agentes escriben el desglose y el
+  classifier cae a `unidades_funcionales_estimadas` si el desglose está sin poblar.
 
 **Regla PBA — la zona (GeoJSON) maneja la descarga de parcelas:** como todo relevamiento
 parte de un GeoJSON, **no hace falta la nomenclatura catastral** para entrar a ARBA. Tanto

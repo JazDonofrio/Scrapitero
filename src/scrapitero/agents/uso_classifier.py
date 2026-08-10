@@ -1,10 +1,15 @@
 """UsoClassifier — clasifica parcelas como residencial/comercial/mixto.
 
-Paso 1 (ARBA): la clasificación viene del campo sp de arba_carto_fetcher
-               (uf_vivienda y uf_comercio ya guardados en parcelas).
-Paso 2 (Google Places): valida con negocios reales activos en el lugar.
-               Si Places encuentra comercios donde ARBA no los vio → ajusta.
-               Si ARBA vio comercios pero Places no → confía en ARBA.
+Paso 1 (ARBA): arba_carto_fetcher deja en `uf_vivienda` la UF TOTAL del lote
+               (subparcelas ≥ COCHERA_M2). Ojo: ARBA NO dice el destino de cada
+               subparcela — el campo `sp` es el número de subparcela, no el uso —
+               así que de ARBA sale el CUÁNTAS, nunca el vivienda-vs-comercio.
+Paso 2 (Google Places): única señal de comercio (radio 15 m ≈ la propia parcela).
+               Lo que confirma se DESCUENTA del total de ARBA, no se suma encima.
+
+Este agente es el que persiste el reparto final en uf_vivienda/uf_comercio
+(`uf_fuente='clasificador'`) además de uso_principal: es el último paso de UF del
+flujo PBA, y sin él la web y el CSV muestran 0 UF.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents.precedencia import UF_FUENTES_PROTEGIDAS as _UF_FUENTES_PROTEGIDAS
 
 
 PLACES_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -79,29 +85,41 @@ def _places_comercios(lat: float, lng: float, api_key: str, client: httpx.Client
         return -1  # -1 = no se pudo consultar
 
 
-def _uso_final(uf_vivienda: int, uf_comercio_arba: int, comercios_places: int) -> str:
+def _desglose_uf(uf_vivienda_arba: int, uf_comercio_arba: int,
+                 comercios_places: int) -> tuple[int, int, str]:
     """
-    Combina ARBA + Google Places para determinar uso_principal.
+    Reparte la UF del lote entre vivienda y comercio, y deriva uso_principal.
 
-    Reglas:
-    - Si Places encuentra comercios Y ARBA no los vio → ajustar a mixto/comercial
-    - Si ARBA vio comercios Y Places no → confiar en ARBA (puede estar sin ficha)
-    - Si ambos coinciden → usar esa clasificación
+    ARBA no dice el DESTINO de cada subparcela, así que ARBACartoFetcher carga la
+    UF TOTAL del lote en `uf_vivienda`. Places (radio 15 m ≈ la propia parcela) es
+    lo único que distingue comercio, así que la parte comercial se DESCUENTA de ese
+    total en vez de sumarse encima: una casa con local al frente sigue teniendo las
+    UF que declara ARBA, no una más.
+
+    `comercios_places = -1` significa que la API no respondió: no se toca el reparto.
+
+    Devuelve (uf_vivienda, uf_comercio, uso_principal).
     """
-    uf_comercio = uf_comercio_arba
+    total = uf_vivienda_arba + uf_comercio_arba
 
-    # Places encontró comercios que ARBA no clasificó → sumar
-    if comercios_places > 0 and uf_comercio_arba == 0:
-        uf_comercio = comercios_places
+    if comercios_places > 0:
+        # Sin UF de ARBA (parcela sin subparcelas) el comercio es lo único que hay.
+        uf_comercio = comercios_places if total == 0 else min(comercios_places, total)
+    else:
+        uf_comercio = uf_comercio_arba
 
-    total = uf_vivienda + uf_comercio
-    if total == 0:
-        return "sin_datos"
-    if uf_comercio == 0:
-        return "residencial"
-    if uf_vivienda == 0:
-        return "comercial"
-    return "mixto"
+    uf_vivienda = max(total - uf_comercio, 0)
+
+    if uf_vivienda + uf_comercio == 0:
+        uso = "sin_datos"
+    elif uf_comercio == 0:
+        uso = "residencial"
+    elif uf_vivienda == 0:
+        uso = "comercial"
+    else:
+        uso = "mixto"
+
+    return uf_vivienda, uf_comercio, uso
 
 
 @agent_run
@@ -115,7 +133,13 @@ def run(input: ClassifierInput) -> ClassifierOutput:
     with engine.begin() as conn:
         q = """
             SELECT parcela_id::text, centroid_lat, centroid_lng,
-                   COALESCE(uf_vivienda, 0) AS uf_vivienda,
+                   -- Total de UF del lote. Si uf_vivienda/uf_comercio están sin
+                   -- poblar (survey corrido con la versión de ARBACartoFetcher que
+                   -- sólo escribía unidades_funcionales_estimadas), se cae a ese
+                   -- campo en vez de clasificar todo como sin_datos.
+                   CASE WHEN COALESCE(uf_vivienda, 0) + COALESCE(uf_comercio, 0) = 0
+                        THEN COALESCE(unidades_funcionales_estimadas, 0)
+                        ELSE COALESCE(uf_vivienda, 0) END AS uf_vivienda,
                    COALESCE(uf_comercio, 0) AS uf_comercio
             FROM parcelas
             WHERE region_id = :region
@@ -138,25 +162,33 @@ def run(input: ClassifierInput) -> ClassifierOutput:
 
     with httpx.Client() as client:
         for row in parcelas:
-            parcela_id, lat, lng, uf_vivienda, uf_comercio_arba = row
+            parcela_id, lat, lng, uf_vivienda_arba, uf_comercio_arba = row
 
             comercios_places = _places_comercios(lat, lng, api_key, client)
-            uso = _uso_final(uf_vivienda, uf_comercio_arba, comercios_places)
+            uf_vivienda, uf_comercio, uso = _desglose_uf(
+                uf_vivienda_arba, uf_comercio_arba, comercios_places)
             counts[uso] += 1
             procesadas += 1
 
             with engine.begin() as conn:
-                # `uso_fuente='manual'` = corrección del operador desde el panel de incidencias.
+                # `manual` = corrección del operador desde el panel de incidencias.
                 # Es el único origen irreconstruible, así que nunca se pisa (ver la regla de
-                # precedencia de fuentes en CLAUDE.md).
+                # precedencia de fuentes en CLAUDE.md). El reparto se persiste además del
+                # uso: sin esto la UF de ARBA no llegaba a la web ni al CSV.
                 conn.execute(text(
                     "UPDATE parcelas SET uso_principal = :uso, uso_fuente = 'clasificador' "
                     "WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'"
                 ), {"uso": uso, "pid": parcela_id})
+                conn.execute(text(
+                    "UPDATE parcelas SET uf_vivienda = :viv, uf_comercio = :com, "
+                    "uf_fuente = 'clasificador' "
+                    "WHERE parcela_id = :pid "
+                    f"AND COALESCE(uf_fuente, '') NOT IN {_UF_FUENTES_PROTEGIDAS}"
+                ), {"viv": uf_vivienda, "com": uf_comercio, "pid": parcela_id})
 
             logger.debug(
-                f"Parcela {parcela_id[:8]}… ARBA(v={uf_vivienda},c={uf_comercio_arba}) "
-                f"Places={comercios_places} → {uso}"
+                f"Parcela {parcela_id[:8]}… ARBA(total={uf_vivienda_arba + uf_comercio_arba}) "
+                f"Places={comercios_places} → {uso} (v={uf_vivienda},c={uf_comercio})"
             )
 
             if procesadas % input.batch_notify == 0:

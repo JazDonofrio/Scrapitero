@@ -32,6 +32,10 @@ from scrapitero.agents._run import agent_run
 from scrapitero.agents.arba_cadastral_fetcher import (
     fetch_idera, fetch_idera_spatial, _load_zone_polygon, _upsert_parcelas,
 )
+from scrapitero.agents.precedencia import (
+    UF_FUENTES_PROTEGIDAS as _UF_FUENTES_PROTEGIDAS,
+    DIRECCION_FUENTE_PROTEGIDA as _DIR_PROTEGIDA,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -308,12 +312,27 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
     else:
         numero_final = numero
 
-    conn.execute(text("""
+    # ARBA no dice el DESTINO de cada subparcela (el campo `sp` es el número de
+    # subparcela, no el uso), así que lo que devuelve es la UF TOTAL del lote.
+    # Se carga entera como vivienda —el caso dominante— y `UsoClassifier` corre
+    # después para pasar a comercio la parte que Google Places confirme.
+    # Sin esto la UF quedaba sólo en `unidades_funcionales_estimadas` y la web,
+    # el CSV y el propio UsoClassifier (que lee uf_vivienda/uf_comercio) veían 0.
+    conn.execute(text(f"""
         UPDATE parcelas SET
-            calle                          = :calle,
-            numero                         = :numero,
-            direccion_source               = :src,
+            calle                          = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+                                                  THEN calle ELSE :calle END,
+            numero                         = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+                                                  THEN numero ELSE :numero END,
+            direccion_source               = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+                                                  THEN direccion_source ELSE :src END,
             unidades_funcionales_estimadas = :n_uf,
+            uf_vivienda                    = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
+                                                  THEN uf_vivienda ELSE :n_uf END,
+            uf_comercio                    = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
+                                                  THEN uf_comercio ELSE 0 END,
+            uf_fuente                      = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
+                                                  THEN uf_fuente ELSE 'arba_carto' END,
             nomenclatura_catastral         = :nomencla,
             partida_inmobiliaria           = :partida,
             fuente_parcela                 = 'arba_carto'
