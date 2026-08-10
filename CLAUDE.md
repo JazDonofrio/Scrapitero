@@ -591,8 +591,25 @@ normal** (columnas Unidad/Código vacías). Las unidades se guardan en `parcela_
 `parcelas` (la web/KPIs/mapa siguen mostrando el conteo). La expansión es **sólo de este
 CSV** (no del CSV Operadora ni del consolidado).
 
-**CSV Operadora (solo Brasil):** botón verde Brasil "⬇ CSV Operadora" en el detalle de
-cada relevamiento (vistas cliente y operador), visible solo si `country_code='BRA'`.
+**El entregable es POR CLIENTE, no por país:** Brasil y Argentina van a clientes distintos,
+así que el formato de entrega no puede estar clavado en el código. Dos registries en
+`web/app.py`, y sumar un cliente nuevo es agregarles una entrada — no tocar lógica:
+- **`_BASELINE_PERFILES`** (import del relevamiento anterior): cada cliente entrega su CSV
+  con SUS nombres de columna. El perfil **no se pide al operador ni se deduce del país** —al
+  importar el país todavía no se conoce, se detecta geocodificando la ciudad, que sale de ese
+  mismo CSV— sino que **se detecta de los headers**, eligiendo el que más obligatorias
+  matchea. Definidos: `BRA` (operadora, `DSC_ENDERECO_COMPLETO`/`COD_UF`/`NUM_CEP`…) y `ARG`
+  (`DIRECCION`/`PROVINCIA`/`CODIGO_POSTAL`… — en Argentina no hay UF ni CEP). `_norm_header`
+  trata `_`/`-` como espacio, así `CODIGO_POSTAL` y `Código Postal` son la misma columna.
+  Ojo: **`sigla_uf` sólo conoce estados brasileros** y devuelve `''` para el resto; fuera de
+  Brasil se conserva el valor original o la provincia se pierde (y el geocoding la necesita).
+- **`_EXPORT_PERFILES_CLIENTE`** (salida): formato de entrega propio de cada cliente. Hoy sólo
+  `BRA`. El front muestra el botón según `export_cliente` del payload del survey (no con
+  `country_code === 'BRA'`), y `GET /api/surveys/{id}/export/perfiles` dice qué aplica.
+  **El CSV genérico y el DXF no dependen del país** y son el entregable argentino actual.
+
+**CSV Operadora (perfil de cliente `BRA`):** botón verde Brasil "⬇ CSV Operadora" en el
+detalle de cada relevamiento (vistas cliente y operador), visible si el país tiene perfil.
 Endpoint `GET /api/surveys/{id}/export/csv-operadora`. Layout de base de logradouros de
 operadora: `COD_OPERADORA` (=858 fijo), `NOME_LOCALIDADE`, `UF`, `BAIRRO`,
 `BAIRRO_ABREVIADO` (vacío), `NOME_TIPO_LOGR`/`NOME_TITULO`/`PREPOSICAO`/
@@ -649,10 +666,14 @@ recortados) exacta + fuzzy difflib (≥0.78, misma altura). Endpoints:
 **Crear como "actualización" (sobre el CSV anterior geocodificado):** el formulario "Nueva
 zona" tiene un toggle **⦿ Nueva zona / ◯ Actualización de un relevamiento anterior**. En
 modo *actualización* el operador sube el **CSV del relevamiento anterior** (sin coordenadas).
-**Ya NO hay mapeo manual de columnas:** el CSV debe traer las columnas con el **nombre exacto
-de la operadora** (case/acento-insensible), y el backend las resuelve solo (`_resolver_columnas`
-+ `_BASELINE_COLUMNAS`/`_BASELINE_OBLIGATORIAS` en `web/app.py`). Si falta una **obligatoria**,
-el import se **rechaza** nombrándola (no crea región ni baseline). Contrato de columnas:
+**Ya NO hay mapeo manual de columnas:** el CSV debe traer las columnas con el nombre exacto
+del **perfil de su cliente** (case/acento-insensible, `_`≡espacio), y el backend detecta el
+perfil por los headers y las resuelve solo (`_resolver_columnas` + `_BASELINE_PERFILES` en
+`web/app.py` — ver **entregable por cliente** más arriba). Si falta una **obligatoria**, el
+import se **rechaza** nombrándola y nombrando el formato detectado (no crea región ni
+baseline). Contrato del perfil **`BRA`** (el `ARG` es el mismo en español —`DIRECCION`,
+`LOCALIDAD`, `PROVINCIA`, `CODIGO_POSTAL`, `TIPO_INMUEBLE`— con `BARRIO`/`ESTADO_CONTRATO`/
+`NODO` opcionales):
 - **Obligatorias:** `DSC_ENDERECO_COMPLETO` (dirección), `DSC_CIDADE` (ciudad), `COD_UF`
   (estado/UF — acepta sigla `MT`, código IBGE `51` o nombre `Mato Grosso` vía `sigla_uf`),
   `NUM_CEP` (CEP — señal de **máxima precisión** en Brasil, va a geocodebr + texto de
