@@ -759,6 +759,87 @@ TIPOS_EDIFICACION: dict[str, list[str]] = {
 _TIPO_CATEGORIA: dict[str, str] = {
     t: cat for cat, ts in TIPOS_EDIFICACION.items() for t in ts}
 
+# ── Localización de la taxonomía (relevamientos fuera de Brasil) ───────────────
+# La lista de arriba es el contrato del cliente BRASILERO y por eso se guarda SIEMPRE
+# en portugués (DB, `parcela_tipo_manual`, CSV Operadora, comparativas). Pero en un
+# relevamiento argentino esas etiquetas se muestran en la leyenda del mapa, el popup y
+# el CSV, y ahí el portugués no tiene sentido: se traducen al SALIR, nunca al guardar.
+# Así el dato sigue siendo comparable entre países y sólo cambia la presentación.
+_TIPO_ES: dict[str, str] = {
+    "RESIDÊNCIA": "VIVIENDA",
+    "APARTAMENTO": "DEPARTAMENTO",
+    "PENSÃO": "PENSIÓN",
+    "LOTE VAZIO": "LOTE BALDÍO",
+    "COMÉRCIO EM GERAL": "COMERCIO EN GENERAL",
+    "INDÚSTRIA": "INDUSTRIA",
+    "AGÊNCIA DE AUTOMOVEIS": "AGENCIA DE AUTOMOTORES",
+    "BAR": "BAR",
+    "BUFFET": "SALÓN DE EVENTOS",
+    "CASA NOTURNA": "BOLICHE",
+    "ESCRITÓRIO DE SERVICOS": "OFICINA DE SERVICIOS",
+    "IMOBILIÁRIA": "INMOBILIARIA",
+    "INSTITUIÇÃO FINANCEIRA": "ENTIDAD FINANCIERA",
+    "LANCHONETE": "ROTISERÍA",
+    "OFICINA": "TALLER",
+    "PADARIA": "PANADERÍA",
+    "RESTAURANTE": "RESTAURANTE",
+    "ASSOCIAÇÃO / SINDICATO": "ASOCIACIÓN / SINDICATO",
+    "CLÍNICA PARTICULAR": "CLÍNICA PRIVADA",
+    "CLÍNICA PUBLICA": "CLÍNICA PÚBLICA",
+    "CONSULTÓRIO PARTICULAR": "CONSULTORIO PRIVADO",
+    "CONSULTÓRIO PÚBLICO": "CONSULTORIO PÚBLICO",
+    "CRECHE": "JARDÍN MATERNAL",
+    "ESCOLA": "ESCUELA",
+    "ESCOLA PARTICULAR": "ESCUELA PRIVADA",
+    "ESCOLA PÚBLICA": "ESCUELA PÚBLICA",
+    "ESCOLA PÚBLICA ESTADUAL": "ESCUELA PROVINCIAL",
+    "ESCOLA PÚBLICA MUNICIPAL": "ESCUELA MUNICIPAL",
+    "ESTACIONAMENTO": "ESTACIONAMIENTO",
+    "FLAT": "APART HOTEL",
+    "HOSPITAL PARTICULAR": "HOSPITAL PRIVADO",
+    "HOSPITAL PÚBLICO": "HOSPITAL PÚBLICO",
+    "HOTEL": "HOTEL",
+    "INSTITUICAO ESPORTIVA": "CLUB DEPORTIVO",
+    "MÉDICO / HOSPITALAR": "SALUD",
+    "MOTEL": "ALBERGUE TRANSITORIO",
+    "ÓRGÃO PÚBLICO": "ORGANISMO PÚBLICO",
+    "POSTO DE GASOLINA": "ESTACIÓN DE SERVICIO",
+    "SERVICOS": "SERVICIOS",
+    "SHOPPING": "SHOPPING",
+    "SUPERMERCADO": "SUPERMERCADO",
+    "UNIVERSIDADE/FACULDADE": "UNIVERSIDAD / FACULTAD",
+}
+# ES → PT, para volver a la etiqueta canónica cuando el operador etiqueta a mano
+# en un relevamiento argentino (lo que se guarda es siempre el portugués).
+_TIPO_CANONICO: dict[str, str] = {es: pt for pt, es in _TIPO_ES.items()}
+
+
+def _tipo_localizado(label: Optional[str], country_code: Optional[str]) -> Optional[str]:
+    """Traduce la etiqueta de tipo de edificación al idioma del relevamiento.
+
+    Brasil (o país desconocido) → se deja la taxonomía original del cliente.
+    Cualquier otro país → español. Una etiqueta que no esté en el diccionario
+    (p.ej. una descripción CNPJ suelta) se devuelve tal cual.
+    """
+    if not label or (country_code or "").upper() == "BRA":
+        return label
+    return _TIPO_ES.get(label, label)
+
+
+def _tipo_canonico(label: Optional[str]) -> Optional[str]:
+    """Inverso de `_tipo_localizado`: lo que llega de la UI vuelve a portugués."""
+    if not label:
+        return label
+    return _TIPO_CANONICO.get(label.strip().upper(), label)
+
+
+def _country_de_survey(conn, survey_id: str) -> str:
+    row = conn.execute(text(
+        "SELECT COALESCE(r.country_code,'') FROM surveys s "
+        "JOIN regions r ON r.region_id = s.region_id WHERE s.survey_id = :sid"
+    ), {"sid": survey_id}).first()
+    return (row[0] if row else "") or ""
+
 
 def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str],
                       hotel_tipo: Optional[str], manual: Optional[str] = None) -> str:
@@ -769,9 +850,19 @@ def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str]
     if descripcion:                                  # 1+ descripciones CNPJ → la primera
         return descripcion.split(",")[0].strip()
     u = (uso or "").lower()
-    if u == "vacante" or not area:
+    if u == "vacante":
+        return "LOTE VAZIO"
+    # "Hay algo construido" se decide por área construida O por UF: el área es la señal
+    # del BCI brasilero, pero NO todas las fuentes la publican —ARBA (PBA) no la trae—, y
+    # con `not area → LOTE VAZIO` un relevamiento argentino entero salía como baldío
+    # aunque tuviera cientos de UF declaradas (Hurlingham: 441 parcelas, 570 UF).
+    if not area and not (uf_v or 0):
         return "LOTE VAZIO"
     if u == "residencial":
+        return "APARTAMENTO" if (uf_v or 0) > 1 else "RESIDÊNCIA"
+    # Uso todavía sin clasificar pero con UF de vivienda declarada (típico de PBA antes de
+    # correr UsoClassifier): la UF manda, es dato del catastro.
+    if u in ("", "sin_datos") and (uf_v or 0) > 0:
         return "APARTAMENTO" if (uf_v or 0) > 1 else "RESIDÊNCIA"
     if u == "industrial":
         return "INDÚSTRIA"
@@ -789,6 +880,9 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
     """Devuelve centroide + metadata de cada parcela para renderizar en el mapa."""
     engine = get_engine()
     with engine.connect() as conn:
+        # La taxonomía se guarda en portugués (contrato del cliente brasilero) pero se
+        # muestra en el idioma del relevamiento: en Argentina la leyenda va en español.
+        pais = _country_de_survey(conn, survey_id)
         rows = conn.execute(text("""
             SELECT p.centroid_lat, p.centroid_lng,
                    p.uso_principal, p.uf_vivienda, p.uf_comercio,
@@ -871,7 +965,8 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "categoria_uso": r[27] or None,
             "descripcion_uso": r[28] or None,
             # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override manual.
-            "tipo_edificacion": _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]) or None,
+            "tipo_edificacion": _tipo_localizado(
+                _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]), pais) or None,
             # Ítems críticos a los que pertenece la parcela (capas toggleables del mapa). Una
             # parcela puede estar en varias (un edificio de deptos es Edificio Y PH).
             "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
@@ -1430,12 +1525,22 @@ async def set_cerrado_manual(hotel_id: str, request: Request) -> JSONResponse:
 
 
 @app.get("/api/tipos-edificacion")
-async def tipos_edificacion() -> JSONResponse:
+async def tipos_edificacion(survey_id: Optional[str] = None) -> JSONResponse:
     """Taxonomía fija del cliente (R/C/E) para que el operador elija una etiqueta a mano.
-    Fuente de verdad: docs/TIPOS_PROPIEDAD.md / TIPOS_EDIFICACION."""
+    Fuente de verdad: docs/TIPOS_PROPIEDAD.md / TIPOS_EDIFICACION.
+
+    Con `survey_id` de un relevamiento fuera de Brasil las etiquetas salen en español
+    (`_tipo_localizado`); lo que el operador elija vuelve a la etiqueta canónica en
+    portugués al guardarse (`_tipo_canonico`), así la DB queda igual en todos los países.
+    """
+    pais = ""
+    if survey_id:
+        with get_engine().connect() as conn:
+            pais = _country_de_survey(conn, survey_id)
     etiquetas = {"R": "Residencial", "C": "Comercial", "E": "Especial"}
     return JSONResponse({"ok": True, "grupos": [
-        {"categoria": cat, "titulo": etiquetas[cat], "tipos": TIPOS_EDIFICACION[cat]}
+        {"categoria": cat, "titulo": etiquetas[cat],
+         "tipos": [_tipo_localizado(t, pais) for t in TIPOS_EDIFICACION[cat]]}
         for cat in ("C", "R", "E")]})     # Comercial primero (lo más común al corregir un falso hotel)
 
 
@@ -1447,7 +1552,9 @@ async def hotel_no_es_hotel(hotel_id: str, request: Request) -> JSONResponse:
     parcela en `parcela_tipo_manual` (gana al cálculo automático de _tipo_edificacion)."""
     try:
         body = await request.json()
-        tipo = (body.get("tipo_edificacion") or "").strip()
+        # En un relevamiento no-brasilero la UI ofrece la etiqueta en español: se guarda
+        # siempre la canónica en portugués, para que la DB no dependa del país.
+        tipo = _tipo_canonico((body.get("tipo_edificacion") or "").strip())
     except Exception:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": "body inválido"}, status_code=400)
     if tipo not in _TIPO_CATEGORIA:
@@ -1739,9 +1846,11 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
                        ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
                    p.descripcion_uso,
                    -- al final a propósito: el resto se lee por índice posicional
-                   p.centroid_lat, p.centroid_lng, p.ubicacion_source, p.uso_fuente
+                   p.centroid_lat, p.centroid_lng, p.ubicacion_source, p.uso_fuente,
+                   COALESCE(reg.country_code, '') AS country_code
             FROM parcelas p
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
+            LEFT JOIN regions reg ON reg.region_id = p.region_id
             WHERE p.parcela_id = CAST(:p AS uuid)
         """), {"p": parcela_id}).fetchone()
     if not r:
@@ -1754,9 +1863,11 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
         "uso_principal": r[7] or "", "uf_vivienda": uf_v, "uf_comercio": uf_c,
         "uf_fuente": r[10] or "", "direccion_source": r[11] or "",
         "numero_estimado": r[12] or "", "numero_estimado_metodo": r[13] or "",
-        # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro)
-        "tipo_edificacion": _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]) or "",
-        "tipo_manual": r[16] or "",
+        # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro),
+        # traducido al idioma del relevamiento (r[23]=país) igual que en el mapa y el CSV
+        "tipo_edificacion": _tipo_localizado(
+            _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]), r[23]) or "",
+        "tipo_manual": _tipo_localizado(r[16], r[23]) or "",
         "lat": float(r[19]) if r[19] is not None else None,
         "lng": float(r[20]) if r[20] is not None else None,
         "ubicacion_source": r[21] or "", "uso_fuente": r[22] or "",
@@ -2026,7 +2137,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                 return JSONResponse({"ok": False, "error": detalle}, status_code=409)
 
         elif accion == "no_es_hotel":
-            tipo_ed = (str(valor or "")).strip()
+            tipo_ed = _tipo_canonico((str(valor or "")).strip())
             if tipo_ed not in _TIPO_CATEGORIA:
                 return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
                                     status_code=400)
@@ -2039,7 +2150,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                 return JSONResponse({"ok": False, "error": detalle}, status_code=409)
 
         elif accion == "tipo_edificacion":
-            tipo_ed = (str(valor or "")).strip()
+            tipo_ed = _tipo_canonico((str(valor or "")).strip())
             if tipo_ed not in _TIPO_CATEGORIA:
                 return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
                                     status_code=400)
@@ -2172,7 +2283,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
             # ── Sin parcela: etiqueta y UF van a la dirección del relevamiento anterior ──
             if not parcela_id:
                 bid = datos.get("baseline_direccion_id")
-                tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
+                tipo_ed = _tipo_canonico((str(v.get("tipo_edificacion") or "")).strip())
                 hay_uf = (v.get("uf_vivienda") not in (None, "")
                           or v.get("uf_comercio") not in (None, ""))
                 if bid and (tipo_ed or hay_uf):
@@ -2221,7 +2332,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                                         status_code=400)
                 aplicados += _guardar_uso_manual(conn, parcela_id, uso, nota)
 
-            tipo_ed = (str(v.get("tipo_edificacion") or "")).strip()
+            tipo_ed = _tipo_canonico((str(v.get("tipo_edificacion") or "")).strip())
             if tipo_ed:
                 if tipo_ed not in _TIPO_CATEGORIA:
                     return JSONResponse({"ok": False, "error": f"etiqueta desconocida: {tipo_ed!r}"},
@@ -2653,6 +2764,7 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         """), {"sid": survey_id}).fetchone()
         if not meta:
             return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+        pais = _country_de_survey(conn, survey_id)   # taxonomía en el idioma del relevamiento
 
         rows = conn.execute(text("""
             SELECT
@@ -2796,7 +2908,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[3] or "",
                 # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
                 # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38], override manual=r[39]
-                _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39]),
+                _tipo_localizado(
+                    _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39]), pais),
                 r[40] or "", r[41] or "",
                 f"{r[42]:.2f}" if r[42] is not None else "",
             ]

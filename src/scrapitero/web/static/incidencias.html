@@ -231,7 +231,8 @@ let TIPOS_HTML = '';
 // Mismo catálogo agrupado, pero con el tipo ACTUAL preseleccionado (form de corrección).
 let TIPOS_GRUPOS = [];
 async function cargarTipos(){
-  try{ const d = await fetch('/api/tipos-edificacion').then(r=>r.json());
+  // con el survey, el backend devuelve la taxonomía en el idioma del relevamiento
+  try{ const d = await fetch('/api/tipos-edificacion?survey_id='+encodeURIComponent(SID)).then(r=>r.json());
     if(d.ok){ TIPOS_GRUPOS = d.grupos || [];
       TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
       d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+

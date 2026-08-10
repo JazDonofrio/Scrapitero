@@ -78,7 +78,7 @@ function updateSub(){ document.getElementById('sub').textContent =
 // Taxonomía de etiquetas (R/C/E) para el flujo "no es hotel".
 let TIPOS_HTML = '';
 async function cargarTipos(){
-  try{ const d = await fetch('/api/tipos-edificacion').then(r=>r.json());
+  try{ const d = await fetch('/api/tipos-edificacion?survey_id='+encodeURIComponent(SID)).then(r=>r.json());
     if(d.ok){ TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
       d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+
         g.tipos.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')+'</optgroup>').join(''); }
