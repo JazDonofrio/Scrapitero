@@ -66,9 +66,13 @@ def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
 class ShoppingFetcherInput(BaseModel):
     region_id: str
     survey_id: Optional[str] = None
+    # `shoppings_ar` = directorio shoppings.com.ar (gratis, solo Argentina). No entra en el
+    # default para no pegarle al sitio en cada corrida de una región brasilera.
     fuentes: list[str] = ["osm", "google"]
     max_requests: int = 40              # tope de teselas Google (pago)
     merge_dist_m: float = 150.0         # dedupe entre fuentes
+    shoppings_ar_urls: list[str] = []           # [] = la página de provincia de Buenos Aires
+    shoppings_ar_provincia: str = "Buenos Aires"
     # Buffer de la zona para el recorte: un shopping tiene HUELLA GRANDE y su punto (centro del
     # edificio) puede caer retirado de la calle → fuera de un corredor angosto (scope calle+rango).
     # Con un buffer, el POI sobrevive y `ParcelaCategoria` lo aterriza si cae dentro de una parcela
@@ -175,6 +179,20 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
             crudos.extend(g)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"ShoppingFetcher Google falló: {e}")
+    if "shoppings_ar" in input.fuentes:
+        # Directorio curado de shoppings argentinos (shoppings.com.ar). Aporta el NOMBRE
+        # comercial real, que OSM/Google suelen tener incompleto o mal tageado. Gratis: se
+        # geocodifica con georef-ar y, lo que no tiene dirección postal (accesos de ruta),
+        # por nombre en OSM validando el partido. Cubre toda la provincia, así que el
+        # recorte a la zona de abajo es el que deja los que corresponden.
+        try:
+            from scrapitero.agents.shoppings_ar import fetch_shoppings_ar
+            d = fetch_shoppings_ar(urls=input.shoppings_ar_urls or None,
+                                   provincia=input.shoppings_ar_provincia)
+            out.por_fuente["shoppings_ar"] = len(d)
+            crudos.extend(d)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ShoppingFetcher shoppings.com.ar falló: {e}")
 
     # recorte a zona (buffereada)
     ubicados = [h for h in crudos if poly_clip.contains(Point(h["lng"], h["lat"]))]

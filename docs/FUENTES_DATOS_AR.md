@@ -125,7 +125,27 @@ token sobre catálogo Iceberg, contra el S3 anónimo de Overture. Overture es m�
 
 Overture trae **7** `shopping_center`/`mall` en el bbox, incluido *Paseo Florido* (shopping
 real de Hurlingham). `ShoppingFetcher` ya existe y hace OSM + Google con dedupe por nombre y
-proximidad: **sumarle Overture como tercera fuente** es barato y lo vuelve gratis.
+proximidad: **sumarle Overture como cuarta fuente** es barato y lo vuelve gratis.
+
+### ✅ `shoppings_ar` — directorio curado (implementado)
+
+[shoppings.com.ar](https://shoppings.com.ar/provincia-de-buenos-aires.html) es un directorio
+**editado a mano** con el nombre comercial real, la dirección y el partido de cada shopping —
+donde OSM y Google dependen de un tag y traen falsos positivos y faltantes. Es fuente de
+`ShoppingFetcher` (`fuentes=["osm","shoppings_ar"]`), **gratis**: la ubicación sale de
+geocodificar con georef-ar y, para los que están sobre accesos de ruta sin dirección postal,
+de buscarlos **por nombre en OSM validando con el reverse de georef** que el punto caiga en
+el partido declarado.
+
+**Resultado: 16 de 23 ubicados.** Los 7 restantes (Unicenter no, ese entró; Nordelta, Soleil,
+Tortugas Open…) están sobre "Panamericana Km N" y ninguna fuente los interpola; se reportan
+en el log en vez de recibir una coordenada inventada.
+
+`robots.txt` del sitio: `User-agent: * / Disallow:` (vacío) ⇒ permite el crawleo. Se baja una
+página por corrida.
+
+⚠ **Tampoco trae la cantidad de locales.** Ese sigue siendo el dato que no tiene fuente
+gratuita en ningún país (ver el párrafo de abajo).
 
 Sigue sin resolverse —igual que en Brasil— **la cantidad de locales de un shopping**:
 ninguna fuente gratuita la publica. En Argentina existe además el listado de la Cámara
