@@ -21,6 +21,8 @@ sobre la zona real de **Hurlingham** (bbox `-34.5968,-58.6418,-34.5886,-58.6312`
 | **Edificios (footprints)** | Google Open Buildings (mirror VIDA) | gratis | ✅ **Ya implementado** (`FootprintFetcher`), falta sumarlo al flujo PBA |
 | **Altura / pisos** | Google Solar API | 10.000 req/mes gratis | ⚠ Funciona, pero hay que ajustar el criterio de discrepancia (ver abajo) |
 | **Comercios** | **Overture Places** | gratis | ❌ **A construir** — es lo de mayor valor por esfuerzo |
+| **Geocoding (dirección→coord)** | **`georef-ar` (Datos Argentina)** → Google el resto | gratis + USD 5/1.000 | ❌ A enchufar. **Mapbox NO** (ver §4 bis) |
+| **Dirección de la parcela** | hoy Google reverse (pago) | USD 5/1.000 | ⚠ ARBA **no** devolvió domicilio registral en Hurlingham |
 | **Shoppings** | Overture Places + OSM | gratis | Parcial: `ShoppingFetcher` ya existe (OSM+Google), falta Overture |
 | **Hoteles** | Overture/OSM + registro provincial | gratis | ❌ Sin equivalente a Cadastur; ver limitaciones |
 | **Universo fiscal (tipo Receita)** | — | — | ❌ **No existe abierto en Argentina** |
@@ -148,6 +150,52 @@ es justo lo que Cadastur aporta en Brasil. Para hoteles en Argentina hay que con
 
 ---
 
+## 4 bis. Geocoding — `georef-ar` es el "geocodebr argentino" · **Mapbox NO sirve en Argentina**
+
+En Brasil la cadena es `geocodebr → Nominatim → Mapbox → Google`. **En Argentina hay que
+sacar a Mapbox del medio** y poner `georef-ar` adelante.
+
+**Verificado** sobre 30 direcciones reales de Hurlingham, contra el centroide catastral
+(IDERA) como verdad de referencia:
+
+| Fuente | Mediana | p90 | Peor caso | Resueltas | Costo |
+|---|---|---|---|---|---|
+| **`georef-ar` (Datos Argentina)** | **60 m** | **130 m** | 320 m | 27/30 | **gratis** |
+| Nominatim | 414 m | 883 m | — | 29/30 | gratis |
+| **Mapbox Geocoding v6** | **810 m** | **24.596 m** | **398 km** | 30/30 | pago |
+| Google Geocoding | 10 m ⚠ | 18 m ⚠ | — | 30/30 | USD 5 / 1.000 |
+
+⚠ El número de Google es **circular y no debe tomarse como su precisión real**: las
+direcciones de Hurlingham las produjo el propio Google por reverse-geocoding
+(`direccion_source='google'` en 438 de 441), así que se lo está midiendo contra sí mismo.
+
+### `georef-ar-api` — https://apis.datos.gob.ar/georef/api/direcciones
+
+Servicio **oficial y gratuito** de normalización de datos geográficos de Argentina. Mismo
+rol que geocodebr en Brasil: interpola la altura sobre el nomenclador oficial de calles.
+Sin token, sin cuota publicada. Acepta `direccion`, `provincia`, `departamento`.
+
+> **Acción:** enchufarlo como **paso 0 del geocoding en Argentina**, igual que geocodebr en
+> Brasil, vía el helper compartido `agents/geocode_forward.py`. Con mediana 60 m y p90 130 m
+> resuelve el 90% gratis y deja para Google sólo el resto ⇒ el costo de geocoding baja ~90%.
+
+### Mapbox en Argentina: no aporta
+
+- **POIs: cobertura CERO.** Verificado con `Search Box /category`: Times Square 5 resultados,
+  Av. Paulista (Brasil) 5 resultados, **Obelisco 0, Hurlingham 0**. El token funciona — es
+  falta de datos, no de credencial. Mapbox no puede aportar comercios ni hoteles en Argentina.
+- **Geocoding: el peor de los cuatro**, con outliers catastróficos (una dirección de
+  Hurlingham resuelta a 398 km). Es **pago** y rinde peor que Nominatim, que es gratis.
+- **Edificios**: Mapbox Streets deriva su capa `building` de OSM ⇒ en el conurbano hereda los
+  mismos 4 edificios de OSM. Nada nuevo sobre Open Buildings.
+- Precio de referencia: Search Box 500 sesiones/mes gratis, después USD 11,50/1.000
+  (el endpoint `/category` se factura **por request**, no por sesión).
+
+**Conclusión:** Mapbox se queda **sólo para Brasil**, donde sí midió bien (mediana 44 m, ver
+`project_mapbox_benchmark`). En Argentina no debe usarse.
+
+---
+
 ## 5. Lo que NO existe: el equivalente a Receita CNPJ
 
 **ARCA (ex AFIP) no publica un dump masivo de contribuyentes.** El padrón se consulta:
@@ -175,13 +223,21 @@ Complementos sectoriales útiles, todos por zona y no por parcela:
 ## Orden sugerido de trabajo
 
 1. **`FootprintFetcher` al flujo PBA** — gratis, ya está hecho, 94% de cobertura. Sin código nuevo.
-2. **`OverturePlacesFetcher`** — el mayor salto: comercios con nombre y dirección, gratis,
-   y deja de depender de Google Places para saber qué hay en cada parcela.
-3. **Overture como tercera fuente de `ShoppingFetcher`.**
-4. **Guarda de `AlturaFetcher`** para no marcar `sin_declarar` donde el catastro no publica
+2. **`georef-ar` como paso 0 del geocoding argentino** — gratis y oficial; baja ~90% el gasto
+   de Google. Es el cambio que más plata ahorra por línea de código.
+3. **`OverturePlacesFetcher`** — el mayor salto en datos: comercios con nombre y dirección,
+   gratis, y deja de depender de Google Places para saber qué hay en cada parcela.
+4. **Overture como tercera fuente de `ShoppingFetcher`.**
+5. **Guarda de `AlturaFetcher`** para no marcar `sin_declarar` donde el catastro no publica
    área construida.
-5. **Hoteles**: pedir formalmente el Registro de Prestadores Turísticos de PBA; mientras
+6. **Hoteles**: pedir formalmente el Registro de Prestadores Turísticos de PBA; mientras
    tanto, Overture/OSM + IA + asistencia humana.
+
+**Qué queda pago, y por qué es poco:** sólo el **geocoding de lo que `georef-ar` no resuelve**
+(Google Geocoding, USD 5/1.000 ≈ **USD 0,22 por cada 441 parcelas** si georef resuelve el 90%).
+Google **Places** —lo caro, USD 32/1.000— **se puede eliminar** de Argentina: lo reemplaza
+Overture. En Hurlingham se gastaron ~USD 14 de Places para responder "¿hay comercio sí/no?"
+sin guardar un solo nombre.
 
 ## Fuentes consultadas
 
@@ -195,3 +251,6 @@ Complementos sectoriales útiles, todos por zona y no por parcela:
 - Datos Abiertos PBA — https://catalogo.datos.gba.gob.ar/
 - IGN — https://www.ign.gob.ar/geoservicios · https://www.ign.gob.ar/NuestrasActividades/InformacionGeoespacial/CapasSIG
 - ARCA/AFIP padrón — https://www.arca.gob.ar/ws/ws_sr_padron_a10/manual_ws_sr_padron_a10_v1.2.pdf
+- georef-ar API (Datos Argentina) — https://apis.datos.gob.ar/georef/api/direcciones
+- Mapbox Search Box — https://docs.mapbox.com/api/search/search-box/ · precios
+  https://docs.mapbox.com/mapbox-search-js/guides/pricing/
