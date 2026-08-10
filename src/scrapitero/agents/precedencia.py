@@ -15,9 +15,11 @@ from __future__ import annotations
 # Sellos de `uf_fuente` que NO se pisan al reescribir uf_vivienda/uf_comercio:
 #   manual        → corrección del operador (panel de incidencias), irreconstruible
 #   google        → conteo real de comercios de GooglePlacesFetcher
+#   overture      → conteo real de comercios de OverturePlacesFetcher (mismo rango que
+#                   google, pero gratis; es la fuente de comercios fuera de Brasil)
 #   cadastur      → habitaciones de hotel (fuente oficial)
 #   shopping_min  → piso de UF=1 que pone ParcelaCategoria a un shopping
-UF_FUENTES_PROTEGIDAS = "('manual','google','cadastur','shopping_min')"
+UF_FUENTES_PROTEGIDAS = "('manual','google','overture','cadastur','shopping_min')"
 
 # Sello de `direccion_source` que nunca se pisa: la dirección corregida a mano.
 DIRECCION_FUENTE_PROTEGIDA = "manual"

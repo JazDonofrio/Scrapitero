@@ -327,8 +327,14 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
             direccion_source               = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
                                                   THEN direccion_source ELSE :src END,
             unidades_funcionales_estimadas = :n_uf,
-            uf_vivienda                    = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
+            -- `uf_vivienda` es EL campo de ARBA: se actualiza siempre, salvo corrección
+            -- manual. Ojo que el sello `uf_fuente` es uno solo para dos campos de fuentes
+            -- distintas (la vivienda la da ARBA, el comercio lo cuenta Overture/Google):
+            -- si acá se respetara la lista entera de protegidas, una parcela con comercio
+            -- sellado quedaba congelada y nunca más se le actualizaba la vivienda.
+            uf_vivienda                    = CASE WHEN COALESCE(uf_fuente,'') = 'manual'
                                                   THEN uf_vivienda ELSE :n_uf END,
+            -- el comercio sí lo conservan las fuentes que lo cuentan de verdad
             uf_comercio                    = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
                                                   THEN uf_comercio ELSE 0 END,
             uf_fuente                      = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
