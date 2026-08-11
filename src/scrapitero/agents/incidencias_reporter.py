@@ -18,9 +18,11 @@ Tipos que genera hoy:
   - `uf_imposible`: la UF declarada no cabe en el volumen visible (m²/UF absurdo) — detecta
     errores de carga tanto del baseline como del BCI. El umbral vive acá (no en
     `altura_fetcher`) para no tocar el criterio de una capa ya corrida.
-  - `uf_sin_declarar`: el espejo del anterior — el catastro declara área construida pero CERO
-    unidades, o sea se contradice solo y la parcela aporta 0 al relevamiento. No necesita
-    satélite: la contradicción está dentro del propio BCI.
+  - `uf_sin_declarar`: el espejo del anterior — hay construcción y CERO unidades declaradas, o
+    sea la parcela aporta 0 al relevamiento. Dos vías de evidencia: el **área construida** del
+    catastro donde la publican (BCI: la contradicción está dentro del propio dato, sin
+    satélite), y la **huella de los footprints** donde no la publican (ARBA la deja en NULL, así
+    que fuera de Brasil el caso era invisible).
 
 **Idempotente preservando el trabajo humano**: upsert por `(survey_id, tipo, clave)`, donde
 `clave` es natural y estable entre corridas — `<tipo>:<parcela_id>` para parcelas y
@@ -99,8 +101,10 @@ class IncidenciasInput(BaseModel):
     # justo las extrapolaciones (más allá del último ancla de la calle), que es donde el
     # estimador mide peor. MISMO valor que usa el export — si se cambia, cambiar los dos.
     numero_conf_min: float = 0.4
-    # Área construida mínima para reclamar UF a una parcela que declara 0 unidades. Por debajo
-    # puede ser un galpón/garaje sin unidad propia. En VG con 30 m² salen 13 casos (mínimo 54).
+    # Superficie construida mínima para reclamar UF a una parcela que declara 0 unidades. Por
+    # debajo puede ser un galpón/garaje sin unidad propia. En VG con 30 m² salen 13 casos
+    # (mínimo 54). Aplica a las DOS vías de evidencia: el área construida del catastro donde la
+    # publican (BCI) y la huella de los footprints donde no (ARBA) — ver `_casos_uf_sin_declarar`.
     area_construida_min: float = 30.0
     # Radio para emparejar dos registros del mismo hotel por cercanía (ver `_casos_duplicados`).
     # 80 m alcanza para el pin de Google contra la dirección fiscal geocodificada de la misma
@@ -501,17 +505,55 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
     `area_min` filtra lo que puede ser un galpón, tapera o garaje sin unidad propia; en VG con
     30 m² quedan 13 casos, el menor de 54 m². Se adjunta la medición satelital cuando existe:
     no hace falta para detectar, pero al operador le sirve para decidir sin salir de la tarjeta.
+
+    **Dos vías de evidencia, porque el área construida no existe en todos lados.** El criterio
+    original sólo miraba `area_m2_construida`, que la publica el BCI brasilero; **ARBA no la
+    publica** (viene NULL en las 2.059 parcelas de Malvinas Argentinas), así que fuera de Brasil
+    el caso no se detectaba nunca aunque estuviera a la vista. La segunda vía usa los
+    **footprints de Open Buildings** que ya cargó `FootprintFetcher`: si hay huella suficiente
+    dentro de la parcela y CERO unidades, la contradicción es la misma. Medido en Malvinas el
+    11-ago-2026: **18 parcelas** con edificios adentro y 0 UF, la peor con 9 edificios y 488 m²
+    de huella sobre 864 m² de terreno.
+
+    La pertenencia es estricta —el **centroide** del footprint dentro del polígono de la
+    parcela—, no "el edificio más cercano": es la misma guarda que `AlturaFetcher` necesitó
+    cuando `findClosest` le hacía medir la casa del vecino en los lotes vacíos, y acá el sesgo
+    apuntaría al mismo lado, porque el caso se dispara justo donde no hay nada declarado.
     """
     rows = conn.execute(text("""
+        WITH sin_uf AS (
+            SELECT p.* FROM parcelas p
+            WHERE p.survey_id = :sid
+              AND COALESCE(p.uf_vivienda, 0) + COALESCE(p.uf_comercio, 0) = 0
+        )
         SELECT p.parcela_id::text, p.calle, p.numero, p.cca_code, p.uso_principal, p.uf_fuente,
                p.area_m2_terreno, p.area_m2_construida, p.centroid_lat, p.centroid_lng,
                p.numero_estimado, p.barrio,
-               a.altura_m, a.pisos_satelital, a.ground_area_m2, a.imagery_year
-        FROM parcelas p
+               a.altura_m, a.pisos_satelital, a.ground_area_m2, a.imagery_year,
+               f.n_edificios, f.huella_m2
+        FROM sin_uf p
         LEFT JOIN parcela_altura a ON a.parcela_id = p.parcela_id
-        WHERE p.survey_id = :sid
-          AND COALESCE(p.uf_vivienda, 0) + COALESCE(p.uf_comercio, 0) = 0
-          AND COALESCE(p.area_m2_construida, 0) >= :amin
+        LEFT JOIN LATERAL (
+            -- La huella se RECORTA al lote: un galpón que cubre varias parcelas no es
+            -- "901 m² construidos" en cada una. Medido en Malvinas: Illia 4836 (206 m² de
+            -- terreno) recibía entero un edificio de 901 m² porque su centroide caía adentro,
+            -- y la tarjeta le mostraba al operador un ratio de 4,37 — un número imposible que
+            -- le hace desconfiar del caso entero. Se suma sólo el área de intersección, que es
+            -- el techo que efectivamente pisa ESTE lote, y por eso los demás lotes que el mismo
+            -- galpón cubre también aparecen, cada uno con su parte.
+            SELECT COUNT(*) AS n_edificios,
+                   COALESCE(SUM(ST_Area(ST_Intersection(p.geometry, fr.footprint)::geography)), 0)
+                       AS huella_m2
+            FROM footprints_revision fr
+            WHERE fr.survey_id = :sid
+              AND p.geometry IS NOT NULL
+              AND ST_Intersects(p.geometry, fr.footprint)
+              -- Solape mínimo: un footprint que apenas roza el borde (error de digitalización
+              -- entre lote y lote) no es un edificio de esta parcela.
+              AND ST_Area(ST_Intersection(p.geometry, fr.footprint)::geography) >= 10
+        ) f ON TRUE
+        WHERE COALESCE(p.area_m2_construida, 0) >= :amin
+           OR COALESCE(f.huella_m2, 0) >= :amin
     """), {"sid": survey_id, "amin": area_min}).fetchall()
 
     casos = []
@@ -519,22 +561,41 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
         pid, calle, numero, cca, uso, uf_fuente = r[0], r[1], r[2], r[3], r[4], r[5]
         area_t, area_c, lat, lng, num_est, barrio = r[6], r[7], r[8], r[9], r[10], r[11]
         altura, pisos, huella, img_year = r[12], r[13], r[14], r[15]
+        n_edif, huella_fp = int(r[16] or 0), float(r[17] or 0)
         dir_txt = _direccion(calle, numero, num_est)
-        ratio = (float(area_c) / float(area_t)) if area_t else None
+        area_c = float(area_c) if area_c else 0.0
+        # Vía de evidencia: el área construida del catastro si la publica, la huella satelital
+        # si no. Se nombra en el texto para que el operador sepa qué está mirando — no es lo
+        # mismo "el municipio se contradice" que "el municipio calla y el satélite ve un techo".
+        por_catastro = area_c >= area_min
+        superficie = area_c if por_catastro else huella_fp
+        ratio = (superficie / float(area_t)) if area_t else None
         # Un ratio construido/terreno > 1 sólo se explica con más de una planta: es la señal
         # más fuerte de que la parcela tiene unidades sin declarar.
         extra = (f" El construido supera al terreno (ratio {ratio:.2f}), así que hay más de una "
                  f"planta." if ratio and ratio > 1 else "")
         if pisos:
             extra += f" El satélite ve {pisos} piso/s sobre {float(huella or 0):.0f} m² de huella."
+        if por_catastro:
+            titulo = f"🧮 {dir_txt} — {area_c:.0f} m² construidos y 0 UF"
+            detalle = (f"El catastro la da como «{uso or 's/d'}» con **{area_c:.0f} m² "
+                       f"construidos** sobre {float(area_t or 0):.0f} m² de terreno, pero no "
+                       f"declara ninguna unidad. Se contradice solo, y así la parcela aporta 0 "
+                       f"al relevamiento.{extra} Cargá las UF que corresponden.")
+        else:
+            plural = "s" if n_edif != 1 else ""
+            titulo = f"🧮 {dir_txt} — {n_edif} edificio{plural} visible{plural} y 0 UF"
+            detalle = (f"El catastro la da como «{uso or 's/d'}» y **no declara ninguna unidad**, "
+                       f"pero el satélite ve **{n_edif} edificio{plural}** "
+                       f"dentro del lote, con {huella_fp:.0f} m² de huella sobre "
+                       f"{float(area_t or 0):.0f} m² de terreno. Acá el catastro no publica la "
+                       f"superficie construida (ARBA no la da), así que la contradicción la "
+                       f"muestra la imagen.{extra} Verificá en el frente y cargá las UF.")
         casos.append({
             "tipo": "uf_sin_declarar",
             "clave": f"uf_sin_declarar:{pid}",
-            "titulo": f"🧮 {dir_txt} — {float(area_c):.0f} m² construidos y 0 UF",
-            "detalle": (f"El catastro la da como «{uso or 's/d'}» con **{float(area_c):.0f} m² "
-                        f"construidos** sobre {float(area_t or 0):.0f} m² de terreno, pero no "
-                        f"declara ninguna unidad. Se contradice solo, y así la parcela aporta 0 "
-                        f"al relevamiento.{extra} Cargá las UF que corresponden."),
+            "titulo": titulo,
+            "detalle": detalle,
             "lat": float(lat) if lat is not None else None,
             "lng": float(lng) if lng is not None else None,
             "parcela_id": pid,
@@ -544,8 +605,14 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
                 "numero_estimado": num_est or None, "uso": uso, "uf_fuente": uf_fuente,
                 "uf_vivienda": 0, "uf_comercio": 0,
                 "area_m2_terreno": round(float(area_t), 0) if area_t else None,
-                "area_m2_construida": round(float(area_c), 0),
+                "area_m2_construida": round(area_c, 0) if area_c else None,
                 "ratio_constr_terreno": round(ratio, 2) if ratio else None,
+                # De dónde salió la evidencia y, si fue el satélite, cuánta: sin esto la
+                # tarjeta de una parcela argentina mostraría área construida vacía y el
+                # operador no sabría por qué se la reclama.
+                "evidencia": "catastro" if por_catastro else "footprints",
+                "footprints_dentro": n_edif or None,
+                "footprints_huella_m2": round(huella_fp, 0) if huella_fp else None,
                 "altura_m": round(float(altura), 1) if altura is not None else None,
                 "pisos_satelital": pisos,
                 "ground_area_m2": round(float(huella), 0) if huella else None,
