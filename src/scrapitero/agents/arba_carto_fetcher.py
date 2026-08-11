@@ -34,6 +34,7 @@ from scrapitero.agents.arba_cadastral_fetcher import (
 )
 from scrapitero.agents.precedencia import (
     UF_FUENTES_PROTEGIDAS as _UF_FUENTES_PROTEGIDAS,
+    USO_FUENTES_PROTEGIDAS as _USO_FUENTES_PROTEGIDAS,
     DIRECCION_FUENTE_PROTEGIDA as _DIR_PROTEGIDA,
 )
 
@@ -47,6 +48,20 @@ NOMINATIM        = "https://nominatim.openstreetmap.org/reverse"
 COCHERA_M2       = 25   # subparcela < 25 m² → cochera; >= 25 m² → unidad funcional
 ARBA_SESSION_FILE = Path(os.environ.get("ARBA_SESSION_FILE",
                                          "/opt/scrapitero/.arba_session.json"))
+# Reintentos de `getInfo` ante un fallo que NO es de sesión. carto corre sobre Tomcat y
+# devuelve 500 esporádicos; antes cualquier no-200 se leía como "JSESSIONID expirado",
+# abortaba la corrida entera y borraba la cookie (medido: 372 de 619 parcelas en Malvinas
+# el 10-ago-2026, con la sesión todavía válida).
+GETINFO_REINTENTOS = 3
+GETINFO_BACKOFF_S  = 1.5
+
+
+class FalloTransitorio(Exception):
+    """`getInfo` falló por algo que NO es la sesión: 500 de Tomcat, timeout, red.
+
+    Se distingue del `None` —que sí significa sesión muerta (401/403)— para que un hipo
+    del servidor saltee **esa parcela** en lugar de matar la corrida y tirar el JSESSIONID.
+    """
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -61,12 +76,18 @@ class ARBACartoInput(BaseModel):
     jsessionid: Optional[str] = None
     cookie_header: Optional[str] = None
     delay_ms: int = 400                     # delay entre requests a carto
+    # Por defecto la corrida es REANUDABLE: saltea las parcelas que ya tienen
+    # nomenclatura de carto. Así un corte a mitad de camino se retoma donde quedó, sin
+    # re-pagarle a Google el reverse geocoding de lo ya resuelto. `rehacer=True` fuerza
+    # el barrido completo (p. ej. para refrescar subparcelas contra un carto actualizado).
+    rehacer: bool = False
 
 
 class ARBACartoOutput(BaseModel):
     ok: bool
     parcelas_procesadas: int = 0
     parcelas_con_subparcelas: int = 0
+    parcelas_saltadas_error: int = 0        # fallos transitorios de carto, no de sesión
     total_uf: int = 0
     total_cocheras: int = 0
     needs_cookies: bool = False
@@ -103,28 +124,70 @@ def _save_session(jsessionid: str) -> None:
     ARBA_SESSION_FILE.write_text(json.dumps({"jsessionid": jsessionid}))
 
 
-def _parc_num_from_cca(cca: str) -> str:
-    """Extrae el número de parcela del CCA (posición 32-38 + sufijo)."""
+# Campo de parcela del CCA, ya sin los ceros de relleno: una letra OPCIONAL seguida del
+# número. Esa letra NO es de la parcela, es el sufijo de la manzana (ver `_split_cca`).
+_CCA_PARCELA_RE = re.compile(r"^([A-Za-z])?(\d+)$")
+
+
+def _split_cca(cca: str) -> tuple[str, str, str]:
+    """Descompone el CCA de ARBA en (manzana, numero_parcela, sufijo_parcela).
+
+    Layout fijo de 42 caracteres: `[28:32]` manzana, `[32:39]` parcela, `[39:42]` subparcela.
+
+    El campo de parcela mezcla dos cosas distintas y hay que separarlas:
+
+    - **Sufijo de la MANZANA**, al principio. Cuando la manzana lleva letra, el número va
+      en su campo y la letra se guarda encabezando el de parcela:
+      `…0074` + `00B0006` = **manzana 74B, parcela 6**.
+    - **Sufijo de la PARCELA**, que va aparte en el campo de subparcela:
+      `…0000016` + `00M` = **parcela 16M**.
+
+    Antes se leía el campo entero como número de parcela (`'B0006'`), así que la respuesta
+    correcta de carto (`Manzana: 74B Parcela: 6`) se descartaba como si fuera de otro lote:
+    la parcela quedaba sin nomenclatura, sin UF y sólo con el geocoding.
+    """
     if not cca or len(cca) < 39:
+        return "", "", ""
+    campo = cca[32:39].lstrip("0") or "0"
+    sufijo = cca[39:].lstrip("0")
+    num_mz = cca[28:32].lstrip("0")
+    m = _CCA_PARCELA_RE.match(campo)
+    if not m:                       # forma inesperada: devolverlo crudo, no inventar
+        return num_mz, campo, sufijo
+    letra_mz, numero = (m.group(1) or "").upper(), m.group(2)
+    return f"{num_mz}{letra_mz}", (numero.lstrip("0") or "0"), sufijo
+
+
+def _parc_num_from_cca(cca: str) -> str:
+    """Identificador de parcela tal como lo escribe carto: '21', '16M', '6'."""
+    _, numero, sufijo = _split_cca(cca)
+    if not numero:
         return ""
-    num = cca[32:39].lstrip("0") or "0"
-    suffix = cca[39:].lstrip("0")
-    return f"{num}{suffix}" if suffix else num
+    return f"{numero}{sufijo}" if sufijo else numero
 
 
 def _nomencla_matches_cca(nomencla: str, cca: str) -> bool:
     """Verifica que la nomenclatura de carto corresponda al CCA de IDERA."""
     if not nomencla or not cca:
         return True  # sin datos suficientes, aceptar
-    expected = _parc_num_from_cca(cca)
+    manzana, numero, sufijo = _split_cca(cca)
+    expected = f"{numero}{sufijo}" if sufijo else numero
     if not expected:
         return True
     # Buscar "Parcela: <N>" en la nomenclatura
-    import re as _re
-    m = _re.search(r"Parcela:\s*(\w+)", nomencla, _re.IGNORECASE)
+    m = re.search(r"Parcela:\s*(\w+)", nomencla, re.IGNORECASE)
     if not m:
         return True
-    return m.group(1).upper() == expected.upper()
+    if m.group(1).upper() != expected.upper():
+        return False
+    # Y la MANZANA completa, número y letra. Al separar los dos campos el número de parcela
+    # se volvió menos específico ('6' en vez de 'B0006'), así que sin este chequeo el
+    # validador se aflojaba: la parcela 6 de la manzana 75B pasaría por la de la 74B.
+    if manzana:
+        mz = re.search(r"Manzana:\s*(\w+)", nomencla, re.IGNORECASE)
+        if mz and mz.group(1).upper().lstrip("0") != manzana.upper():
+            return False
+    return True
 
 
 def _extract_jsessionid(cookie_header: str) -> Optional[str]:
@@ -134,6 +197,46 @@ def _extract_jsessionid(cookie_header: str) -> Optional[str]:
         if part.strip().upper().startswith("JSESSIONID="):
             return part.split("=", 1)[1].strip()
     return None
+
+
+# ── Caché de reverse geocoding (compartido con AddressResolver, mig. 032) ─────
+# Misma clave y mismo dict de componentes que `address_resolver._rev_key` /
+# `_reverse_geocode_cached`: los dos agentes reverse-geocodifican los mismos puntos
+# (el interior de cada parcela), así que comparten caché en vez de pagar dos veces.
+_REV_LANG = "es"     # PBA: las respuestas de Google se piden en español
+
+
+def _rev_cache_get(lat: float, lng: float) -> Optional[dict]:
+    """Componentes cacheados para ese punto, o None si es miss."""
+    clave = f"{lat:.6f}|{lng:.6f}|{_REV_LANG}"
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT componentes FROM reverse_geocode_cache WHERE clave = :k"),
+                {"k": clave},
+            ).fetchone()
+        return (row[0] or {}) if row is not None else None
+    except Exception as e:      # el caché nunca debe romper la corrida
+        logger.debug(f"caché reverse no disponible: {e}")
+        return None
+
+
+def _rev_cache_put(lat: float, lng: float, calle: str, numero: str) -> None:
+    """Guarda sólo resultados útiles (con calle o número); los vacíos se reintentan."""
+    if not (calle or numero):
+        return
+    clave = f"{lat:.6f}|{lng:.6f}|{_REV_LANG}"
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text("""
+                INSERT INTO reverse_geocode_cache (clave, componentes)
+                VALUES (:k, CAST(:comp AS JSONB))
+                ON CONFLICT (clave) DO NOTHING
+            """), {"k": clave,
+                   "comp": json.dumps({"calle": calle, "numero": numero},
+                                      ensure_ascii=False)})
+    except Exception as e:
+        logger.debug(f"no se pudo cachear el reverse: {e}")
 
 
 # ── Conversión de coordenadas ─────────────────────────────────────────────────
@@ -186,23 +289,30 @@ def _get_info(client: httpx.Client, lon: float, lat: float,
         "scale": "846", "width": str(W), "height": str(H),
         "lon": str(cx), "lat": str(cy),
     }
-    try:
-        r = client.get(
-            f"{CARTO_BASE}/client/getInfo", params=params,
-            headers={"X-Requested-With": "XMLHttpRequest",
-                     "Referer": f"{CARTO_BASE}/"},
-            timeout=25,
-        )
-        if r.status_code == 200 and "json" in r.headers.get("content-type", ""):
-            return r.json()
-        if r.status_code in (401, 403):
-            logger.warning(f"getInfo: HTTP {r.status_code} — sesión inválida")
-            return None
-        logger.warning(f"getInfo: HTTP {r.status_code} — {r.text[:120]!r}")
-        return None
-    except Exception as e:
-        logger.warning(f"getInfo excepción: {e}")
-        return None
+    for intento in range(GETINFO_REINTENTOS):
+        try:
+            r = client.get(
+                f"{CARTO_BASE}/client/getInfo", params=params,
+                headers={"X-Requested-With": "XMLHttpRequest",
+                         "Referer": f"{CARTO_BASE}/"},
+                timeout=25,
+            )
+            if r.status_code == 200 and "json" in r.headers.get("content-type", ""):
+                return r.json()
+            # SÓLO el 401/403 es sesión muerta. Cualquier otro código es del servidor y
+            # merece reintento, no dar por vencida la cookie.
+            if r.status_code in (401, 403):
+                logger.warning(f"getInfo: HTTP {r.status_code} — sesión inválida")
+                return None
+            motivo = f"HTTP {r.status_code} — {r.text[:120]!r}"
+        except Exception as e:
+            motivo = f"excepción: {e}"
+        if intento < GETINFO_REINTENTOS - 1:
+            espera = GETINFO_BACKOFF_S * (2 ** intento)
+            logger.warning(f"getInfo: {motivo} — reintento "
+                           f"{intento + 1}/{GETINFO_REINTENTOS - 1} en {espera:.1f}s")
+            time.sleep(espera)
+    raise FalloTransitorio(motivo)
 
 
 def _parsear_subparcelas(data: dict) -> tuple[str, str, list[dict]]:
@@ -256,8 +366,19 @@ def _parsear_subparcelas(data: dict) -> tuple[str, str, list[dict]]:
 # ── Geocodificación ────────────────────────────────────────────────────────────
 
 def _geocodificar(client: httpx.Client, lat: float, lon: float) -> tuple[str, str, str]:
-    """Devuelve (calle, numero, fuente). Intenta Google Maps → Nominatim."""
+    """Devuelve (calle, numero, fuente). Caché → Google Maps → Nominatim.
+
+    El caché es `reverse_geocode_cache` (mig. 032), el MISMO que usa `AddressResolver`:
+    mismo formato de clave e idéntico dict de componentes, así que los dos agentes se
+    aprovechan mutuamente. Importa porque acá el reverse es por parcela y se paga: sin
+    caché, retomar una corrida cortada volvía a comprarle a Google direcciones que ya
+    teníamos.
+    """
     google_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+
+    cacheado = _rev_cache_get(lat, lon)
+    if cacheado is not None:
+        return cacheado.get("calle", ""), cacheado.get("numero", ""), "google"
 
     if google_key:
         for _ in range(3):
@@ -275,6 +396,7 @@ def _geocodificar(client: httpx.Client, lat: float, lon: float) -> tuple[str, st
                     road = comps.get("route", "")
                     num  = comps.get("street_number", "")
                     if road:
+                        _rev_cache_put(lat, lon, road, num)
                         return road, num, "google"
                 break
             except Exception:
@@ -339,6 +461,24 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
                                                   THEN uf_comercio ELSE 0 END,
             uf_fuente                      = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
                                                   THEN uf_fuente ELSE 'arba_carto' END,
+            -- Uso deducido de las propias UF: con unidades y sin comercio conocido, la
+            -- parcela es RESIDENCIAL. Es la misma regla que aplica el BCI en Brasil
+            -- (`bci_parser._parse_bci`), sólo que acá la única señal es el conteo.
+            -- Sin esto el uso quedaba NULL en todo lo que no tocara una fuente de
+            -- comercios: en Malvinas, 592 de 619 parcelas (96%) salían al mapa sin color
+            -- y al CSV sin uso, con 628 viviendas ya contadas.
+            -- Con 0 UF no se infiere nada: puede ser un baldío o un lote que carto no
+            -- devolvió, y no hay cómo distinguirlos desde acá.
+            uso_principal                  = CASE
+                                                WHEN COALESCE(uso_fuente,'') IN {_USO_FUENTES_PROTEGIDAS}
+                                                     THEN uso_principal
+                                                WHEN :n_uf > 0 THEN 'residencial'
+                                                ELSE uso_principal END,
+            uso_fuente                     = CASE
+                                                WHEN COALESCE(uso_fuente,'') IN {_USO_FUENTES_PROTEGIDAS}
+                                                     THEN uso_fuente
+                                                WHEN :n_uf > 0 THEN 'arba_carto'
+                                                ELSE uso_fuente END,
             nomenclatura_catastral         = :nomencla,
             partida_inmobiliaria           = :partida,
             fuente_parcela                 = 'arba_carto'
@@ -407,7 +547,23 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
             params["sid"] = input.survey_id
         if input.manzana:
             q += " AND fuente_parcela = 'arba_idera'"
+        if not input.rehacer:
+            # Reanudar: las que ya trajeron nomenclatura de carto están hechas.
+            q += " AND nomenclatura_catastral IS NULL"
         parcelas_db = conn.execute(text(q), params).fetchall()
+        # Cuántas hay en total, sin el filtro de reanudación: distingue "la región está
+        # vacía" (hay que bajar de IDERA) de "ya están todas enriquecidas" (no hay nada
+        # que hacer). Sin esto, una corrida completa volvería a descargar de IDERA.
+        q_total = "SELECT count(*) FROM parcelas WHERE region_id = :region"
+        if input.survey_id:
+            q_total += " AND survey_id = :sid"
+        parcelas_totales = conn.execute(text(q_total), params).scalar() or 0
+
+    if not parcelas_db and parcelas_totales:
+        logger.info(f"Nada que hacer: las {parcelas_totales} parcelas ya tienen "
+                    "nomenclatura de carto. Usar rehacer=true para forzar el barrido.")
+        return ARBACartoOutput(ok=True, parcelas_procesadas=0,
+                               fuentes=["carto.arba.gov.ar"])
 
     # Si no hay parcelas, descargarlas de IDERA WFS primero.
     # Por nomenclatura si viene completa; si no, por filtro espacial (polígono de la zona).
@@ -477,6 +633,7 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
     con_subparcelas = 0
     total_uf = 0
     total_cocheras = 0
+    saltadas_error = 0
     session_invalida = False
     prev_partidas: Optional[list] = None
 
@@ -495,7 +652,13 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                 calle, numero, fuente_dir = _geocodificar(client, lat, lng)
 
                 # getInfo desde carto
-                data = _get_info(client, lng, lat)
+                try:
+                    data = _get_info(client, lng, lat)
+                except FalloTransitorio as e:
+                    saltadas_error += 1
+                    logger.warning(f"Parcela {parcela_id[:8]}… se saltea ({e}) — sigue la corrida")
+                    time.sleep(input.delay_ms / 1000)
+                    continue
                 procesadas += 1
 
                 if data is None:
@@ -523,7 +686,10 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                                (0.00003,0.00003), (-0.00003,-0.00003)]
                     matched = False
                     for dlat, dlng in OFFSETS:
-                        data2 = _get_info(client, lng + dlng, lat + dlat)
+                        try:
+                            data2 = _get_info(client, lng + dlng, lat + dlat)
+                        except FalloTransitorio:
+                            continue     # el offset falló por el servidor: probar el siguiente
                         if not data2:
                             continue
                         dom2, nom2, rows2 = _parsear_subparcelas(data2)
@@ -568,15 +734,21 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
         return ARBACartoOutput(
             ok=False,
             parcelas_procesadas=procesadas,
+            parcelas_saltadas_error=saltadas_error,
             needs_cookies=True,
             cookie_instructions="Sesión expirada.\n\n" + COOKIE_INSTRUCTIONS,
             error="JSESSIONID expirado"
         )
 
+    if saltadas_error:
+        logger.warning(f"{saltadas_error} parcelas salteadas por fallos de carto "
+                       "(no de sesión). Volver a correr el agente las retoma.")
+
     return ARBACartoOutput(
         ok=True,
         parcelas_procesadas=procesadas,
         parcelas_con_subparcelas=con_subparcelas,
+        parcelas_saltadas_error=saltadas_error,
         total_uf=total_uf,
         total_cocheras=total_cocheras,
         fuentes=["arba_carto_getInfo", "google_maps" if os.environ.get("GOOGLE_MAPS_API_KEY") else "nominatim"],

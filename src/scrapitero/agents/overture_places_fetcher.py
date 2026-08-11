@@ -359,12 +359,24 @@ def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int
                 parcelas_con += 1
                 total_uf += n
             if set_uso:
+                # El uso sale de las UF, que es el dato, no del `uso_principal` anterior.
+                # Antes el CASE ascendía a 'mixto' sólo si la parcela ya venía marcada
+                # 'residencial'; pero fuera de Brasil el catastro no clasifica uso (ARBA no
+                # publica el destino de la subparcela), así que llegan en 'sin_datos' y
+                # caían en el ELSE → 'comercial', tapando las viviendas que el propio
+                # agente acababa de contar. Medido en Hurlingham: 27 de 28 parcelas con
+                # vivienda Y comercio quedaron 'comercial', 0 mixtas.
+                # Misma regla que el BCI (`bci_parser._parse_bci`): comercio + vivienda →
+                # mixto; comercio solo → comercial. Se leen las dos UF de la fila y no se
+                # asume que el UPDATE de arriba haya entrado: si la guarda de `uf_fuente` lo
+                # bloqueó, el uso tiene que seguir al dato que quedó, no al que quisimos poner.
                 r2 = conn.execute(text("""
                     UPDATE parcelas SET
                         uso_principal = CASE
-                            WHEN uso_principal = 'residencial' THEN 'mixto'
-                            WHEN uso_principal IN ('comercial', 'mixto') THEN uso_principal
-                            ELSE 'comercial'
+                            WHEN COALESCE(uf_comercio, 0) > 0
+                             AND COALESCE(uf_vivienda, 0) > 0 THEN 'mixto'
+                            WHEN COALESCE(uf_comercio, 0) > 0 THEN 'comercial'
+                            ELSE uso_principal
                         END,
                         uso_fuente = 'overture'
                     WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'

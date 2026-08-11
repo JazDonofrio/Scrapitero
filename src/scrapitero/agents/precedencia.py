@@ -23,3 +23,15 @@ UF_FUENTES_PROTEGIDAS = "('manual','google','overture','cadastur','shopping_min'
 
 # Sello de `direccion_source` que nunca se pisa: la dirección corregida a mano.
 DIRECCION_FUENTE_PROTEGIDA = "manual"
+
+# Sellos de `uso_fuente` que NO pisa un fetcher de catastro al deducir el uso desde sus UF.
+# El catastro sabe CUÁNTAS unidades hay, pero no si alguna es comercio: eso lo saben las
+# fuentes de negocios. Un 'residencial' inferido de las UF nunca debe degradar el
+# 'mixto'/'comercial' que puso quien sí vio los comercios.
+#   manual       → corrección del operador
+#   overture     → OverturePlacesFetcher (comercios reales; la fuente fuera de Brasil)
+#   google       → GooglePlacesFetcher
+#   clasificador → UsoClassifier (catastro + Places)
+#   bci          → el BCI declara el uso de cada unidad (Brasil)
+#   cadastur     → hotel oficial
+USO_FUENTES_PROTEGIDAS = "('manual','overture','google','clasificador','bci','cadastur')"

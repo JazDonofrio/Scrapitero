@@ -138,6 +138,15 @@ def _load_zone_polygon(region_id: str, survey_id=None):
     return poly if poly.is_valid else poly.buffer(0)
 
 
+# El GeoServer de IDERA impone su PROPIO tope por request y trunca en silencio: pedirle
+# `count=50000` devuelve 1000 igual. Como el chequeo de truncamiento comparaba contra el
+# count pedido, nunca saltaba y la zona quedaba cortada sin aviso. Medido en Malvinas
+# Argentinas el 11-ago-2026: 1000 features crudas → 481 parcelas, cuando la zona tiene
+# ~1000. El 38% de la superficie quedó sin parcelas, con 2032 edificios adentro.
+# Por eso se pagina con `startIndex` hasta que el servidor devuelva menos de una página.
+IDERA_PAGE_SIZE = 1000
+
+
 def fetch_idera_spatial(zone_poly, max_features: int = 50000) -> list[dict]:
     """Baja parcelas de IDERA por el bbox del polígono de la zona y las recorta
     exactamente al polígono con shapely.
@@ -145,25 +154,40 @@ def fetch_idera_spatial(zone_poly, max_features: int = 50000) -> list[dict]:
     Se usa el parámetro WFS `bbox=minx,miny,maxx,maxy,EPSG:4326` (que reproyecta
     desde el CRS nativo del layer) en vez de CQL INTERSECTS (que falla por orden de
     ejes / CRS nativo). El recorte fino al polígono se hace localmente.
+
+    **Paginado** (`startIndex` + `count`): ver `IDERA_PAGE_SIZE`. Se corta cuando una
+    página vuelve incompleta —no hay más— o al llegar a `max_features`, que ahora sí es
+    un tope nuestro y no el del servidor disfrazado.
     """
     minx, miny, maxx, maxy = zone_poly.bounds
     bbox = f"{minx},{miny},{maxx},{maxy},EPSG:4326"
     logger.info(f"IDERA WFS — bbox espacial: {bbox}")
 
+    raw: list[dict] = []
     with httpx.Client(timeout=60) as client:
-        r = client.get(IDERA_WFS, params={
-            "service": "WFS",
-            "version": "2.0.0",
-            "request": "GetFeature",
-            "typeNames": "idera:Parcela",
-            "srsName": "EPSG:4326",
-            "outputFormat": "application/json",
-            "count": str(max_features),
-            "bbox": bbox,
-        })
-        r.raise_for_status()
+        while len(raw) < max_features:
+            page = min(IDERA_PAGE_SIZE, max_features - len(raw))
+            r = client.get(IDERA_WFS, params={
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typeNames": "idera:Parcela",
+                "srsName": "EPSG:4326",
+                "outputFormat": "application/json",
+                "count": str(page),
+                "startIndex": str(len(raw)),
+                "bbox": bbox,
+            })
+            r.raise_for_status()
+            lote = r.json().get("features", [])
+            raw.extend(lote)
+            logger.info(f"IDERA WFS — página desde {len(raw) - len(lote)}: "
+                        f"{len(lote)} features (acumulado {len(raw)})")
+            # Página incompleta = no hay más. Página vacía también corta (defensa por si el
+            # servidor ignorara `startIndex`: sin esto el bucle se repetiría para siempre).
+            if len(lote) < page:
+                break
 
-    raw = r.json().get("features", [])
     logger.info(f"IDERA WFS bbox devolvió {len(raw)} features (sin recortar)")
     if len(raw) >= max_features:
         logger.warning(
@@ -242,12 +266,23 @@ def _upsert_parcelas(features: list[dict], region_id: str,
             area = _area_m2(geom)
             geom_wkt = geom.wkt
 
+            # Re-corrida sobre un survey ya poblado: hay que RECONOCER la parcela que ya está.
+            # El filtro `fuente_parcela = 'arba_idera'` que había acá lo impedía: el
+            # enriquecimiento de carto reescribe ese campo a 'arba_carto', así que toda parcela
+            # ya procesada dejaba de matchear y se re-insertaba. Medido en Malvinas el
+            # 11-ago-2026: 2059 features sobre 619 existentes → 2678 filas, 620 duplicadas.
+            #
+            # La identidad sigue siendo la COORDENADA, no el `cca_code`: hay inscripciones
+            # repartidas en más de un polígono (José León Suárez 1397 y 1466 comparten
+            # `133050J…0160000001000`, "Manzana 16 Parcela 1" las dos, a 70 m una de otra).
+            # Deduplicar por cca las fusionaría y perderíamos una parcela real.
             existing = conn.execute(text("""
                 SELECT parcela_id FROM parcelas
-                WHERE region_id = :region AND fuente_parcela = 'arba_idera'
+                WHERE survey_id = CAST(:sid AS uuid)
                   AND ABS(centroid_lat - :lat) < 0.00005
                   AND ABS(centroid_lng - :lng) < 0.00005
-            """), {"region": region_id, "lat": lat, "lng": lng}).fetchone()
+                LIMIT 1
+            """), {"sid": survey_id, "lat": lat, "lng": lng}).fetchone()
 
             if existing:
                 conn.execute(text("""

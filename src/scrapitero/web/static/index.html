@@ -714,7 +714,9 @@ const actuState = { baselineId: null, regionId: null, map: null, drawnLayer: nul
                     logEntries: [], logLastId: 0,
                     // para el resumen en vivo del polígono dibujado
                     puntos: [], ptsGroup: null, seleccion: 0 };
-const ACTU_USO_COLOR = { residencial:'#3b82f6', comercial:'#f59e0b', mixto:'#a855f7', industrial:'#ef4444', vacante:'#9ca3af' };
+// Mismos hues que CAT_COLOR: dos pantallas que dicen "residencial" tienen que pintarlo
+// igual. Antes cada una tenía su propia lista y el vacante salía gris acá y verde allá.
+const ACTU_USO_COLOR = { residencial:'#2a78d6', comercial:'#eda100', mixto:'#4a3aa7', industrial:'#e34948', vacante:'#008300' };
 
 // Contrato de columnas del CSV del relevamiento anterior (sin mapeo manual): el CSV debe
 // traer estas columnas con el nombre exacto. Debe coincidir con app.py (_BASELINE_*).
@@ -2067,16 +2069,32 @@ const mapPollTimers = {};    // sid → setInterval para live update de marcador
 
 // Tipología que se muestra en el mapa: combina uso_principal + cantidad de UF estimada
 // para distinguir una unidad suelta de un edificio de varias unidades.
+// El color codifica el USO (6 hues), NO la escala. Antes las 8 tipologías se metían todas
+// en el color y quedaban cuatro pares del mismo tono separados sólo por claridad
+// (vivienda/edificio, comercio/edificio, y los dos grises industrial/equipamiento).
+// Medido con el validador de la paleta documentada, sobre las 28 combinaciones que puede
+// haber en un mapa —donde cualquier marcador puede caer al lado de cualquier otro—:
+//
+//   antes (8 colores)  peor par ΔE 0,3 con daltonismo · 10,2 con visión normal  → FAIL
+//   ahora (6 colores)  peor par ΔE 6,9 con daltonismo · 15,6 con visión normal  → PASS
+//
+// Ningún conjunto de 8 colores pasa el piso: es un límite de la paleta, no de la elección.
+// Por eso la escala (1 unidad vs edificio de varias) sale del color y pasa al ANILLO del
+// marcador + el emoji, que ya distinguía 🏠/🏢 y 🏪/🏬. La banda 6–8 de daltonismo es
+// legal justamente porque existe ese encoding secundario.
+// Hexes: paleta documentada de la skill `dataviz` (columna light) — no elegidos a ojo.
 const CAT_COLOR = {
-  vivienda:           '#60a5fa',   // residencial, 1 UF
-  edificio_viviendas: '#2563eb',   // residencial, ≥2 UF (edificio en altura)
-  comercio:           '#fb923c',   // comercial, 1 UF
-  edificio_comercios: '#ea580c',   // comercial, ≥2 UF
-  mixto:              '#a78bfa',   // uso mixto (vivienda O comercio)
-  vacante:            '#4ade80',
-  industrial:         '#94a3b8',
-  equipamiento:       '#64748b',
+  vivienda:           '#2a78d6',   // azul
+  edificio_viviendas: '#2a78d6',   // mismo azul: lo distingue el anillo + 🏢
+  comercio:           '#eda100',   // ámbar
+  edificio_comercios: '#eda100',   // mismo ámbar: lo distingue el anillo + 🏬
+  mixto:              '#4a3aa7',   // violeta
+  vacante:            '#008300',   // verde
+  equipamiento:       '#1baf7a',   // aqua  (antes gris: no llegaba al piso de croma)
+  industrial:         '#e34948',   // rojo  (antes gris: idem)
 };
+// Tipologías que son "varias unidades": se dibujan con anillo doble en vez de otro color.
+const CAT_EDIFICIO = new Set(['edificio_viviendas', 'edificio_comercios']);
 const CAT_LABEL = {
   vivienda:           t('Vivienda'),
   edificio_viviendas: t('Edificio de viviendas'),
@@ -2087,7 +2105,11 @@ const CAT_LABEL = {
   industrial:         t('Industrial'),
   equipamiento:       t('Equipamiento'),
 };
-const CAT_DEFAULT = '#f8d347';  // amarillo claro para "sin clasificar" — visible en satélite
+// "Sin clasificar" NO es una categoría más: es ausencia de dato, y por eso va en neutro en
+// vez de competir por un hue. Antes era amarillo, que ahora chocaría con el ámbar de
+// comercio. Blanco puro + el anillo oscuro que ya llevan los círculos: se ve sobre satélite
+// (que fue el motivo original del amarillo) y se lee como "vacío", no como un uso.
+const CAT_DEFAULT = '#ffffff';
 
 // Clasifica una parcela en la tipología del mapa según uso + UF estimadas.
 function categoriaMapa(p) {
@@ -2162,6 +2184,11 @@ function initMap(sid) {
   map.createPane('footprintsPane');
   map.getPane('footprintsPane').style.zIndex = 380;
 
+  // Límites de parcela (🧩): más abajo todavía que los footprints. Es el sustrato —
+  // el contorno del lote sobre el que se apoyan el edificio y el marcador.
+  map.createPane('parcelasPane');
+  map.getPane('parcelasPane').style.zIndex = 370;
+
   // Google Maps (opcional): si hay API key configurada, se agregan como capas base
   // seleccionables vía Leaflet.GoogleMutant. Da imágenes de Google y más zoom nativo.
   addGoogleLayers(map, layersCtl);
@@ -2181,6 +2208,10 @@ function initMap(sid) {
   }
 
   maps[sid] = map;
+
+  // Contornos catastrales: se registran siempre en el control de capas (apagados), para
+  // que estén a un clic sin depender de haber corrido ningún agente.
+  loadParcelasLayer(sid);
 
   // Mientras el usuario no toque el mapa, cada actualización lo deja centrado en la zona
   // marcada. Si el usuario hace pan/zoom para inspeccionar, dejamos de re-centrar (para no
@@ -2247,7 +2278,7 @@ async function loadComerciosMarcados(sid) {
       const emoji = CAT_EMOJI[cat] || '🏪';
       const mk = L.marker([p.lat, p.lng], { icon: L.divIcon({
         className: 'comercio-marcado-pin',
-        html: `<div style="background:${col};border:2px solid #fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 0 3px rgba(0,0,0,.4)">${emoji}</div>`,
+        html: `<div style="background:${col};border:2px solid #fff;${CAT_EDIFICIO.has(cat) ? 'outline:2px solid #0f172a;outline-offset:-4px;' : ''}border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:11px;box-shadow:0 0 3px rgba(0,0,0,.4)">${emoji}</div>`,
         iconSize: [20, 20], iconAnchor: [10, 10],
       }) });
       mk.bindPopup(`<div style="font-size:.82rem;line-height:1.6">${emoji} <b>${escHtml(p.nombre || 'Comercio')}</b>`
@@ -2443,6 +2474,67 @@ async function runFootprints(sid, btn) {
 // OSM) para comparar a ojo contra lo que dice el catastro. Se llena on-demand (al correr
 // el botón), no se carga en cada visita al mapa — evita pagar el peso del GeoJSON de arranque.
 const FOOTPRINTS_COLOR = { google_open_buildings: '#2563eb', osm: '#f97316' };
+
+// Zoom desde el que se dibujan los contornos catastrales. Por debajo, 600 polígonos son
+// ruido y no información: a escala de ciudad los lotes miden pocos píxeles y sólo ensucian
+// los colores de tipología. Se registra igual en el control de capas, para que el usuario
+// vea que existe aunque todavía no se dibuje.
+const PARCELAS_ZOOM_MIN = 16;
+
+// Capa 🧩 Límites de parcela: contorno fino, SIN relleno. El relleno lo sigue diciendo el
+// círculo de tipología; si esta capa pintara adentro, competiría con la paleta de uso.
+async function loadParcelasLayer(sid) {
+  const map = maps[sid];
+  if (!map) return;
+  let gj;
+  try { gj = await fetch(`/api/surveys/${sid}/parcelas.geojson`).then(r => r.json()); }
+  catch(_) { return; }
+  if (map._parcelasLayer) {
+    try { map._layersCtl.removeLayer(map._parcelasLayer); map.removeLayer(map._parcelasLayer); } catch(_) {}
+    map._parcelasLayer = null;
+  }
+  if (!gj || !gj.features || !gj.features.length) return;
+
+  const layer = L.geoJSON(gj, {
+    pane: 'parcelasPane',
+    // renderer canvas: con ~600 lotes SVG va cómodo, pero una zona grande (miles) hace
+    // que el DOM se arrastre. Canvas escala sin que haya que volver a tocar esto.
+    renderer: L.canvas({ pane: 'parcelasPane' }),
+    style: f => ({
+      color: f.properties.validado_manual ? '#2a78d6' : '#0f172a',
+      weight: f.properties.validado_manual ? 3 : 2,
+      opacity: 0.9, fill: false,
+    }),
+    onEachFeature: (f, lyr) => {
+      const p = f.properties;
+      lyr.bindPopup(
+        `<b>🧩 ${escHtml(p.direccion || t('Parcela'))}</b>`
+        + (p.cca_code ? `<br><span style="font-size:.72rem;color:hsl(var(--muted-fg))">${escHtml(p.cca_code)}</span>` : '')
+        + (p.area_m2_terreno != null ? `<br>${t('Terreno')}: ${p.area_m2_terreno} m²` : '')
+        + (p.uso_principal ? `<br>${t('Uso')}: ${escHtml(p.uso_principal)}` : '')
+      );
+    },
+  });
+  map._parcelasLayer = layer;
+  if (map._layersCtl) {
+    // El umbral va en la etiqueta: si no, prender la capa a zoom de ciudad no dibuja nada
+    // y parece que está rota.
+    map._layersCtl.addOverlay(layer,
+      `🧩 ${t('Límites de parcela')} (${gj.features.length}) <span style="opacity:.6">· ${t('desde zoom')} ${PARCELAS_ZOOM_MIN}</span>`);
+  }
+
+  // El umbral de zoom sólo aplica mientras la capa está encendida: si el usuario la apaga,
+  // no se la volvemos a prender sola al acercarse.
+  const aplicarZoom = () => {
+    if (!map._parcelasOn) return;
+    const visible = map.getZoom() >= PARCELAS_ZOOM_MIN;
+    if (visible && !map.hasLayer(layer)) layer.addTo(map);
+    else if (!visible && map.hasLayer(layer)) map.removeLayer(layer);
+  };
+  map.on('overlayadd',    e => { if (e.layer === layer) { map._parcelasOn = true;  aplicarZoom(); } });
+  map.on('overlayremove', e => { if (e.layer === layer) { map._parcelasOn = false; } });
+  map.on('zoomend', aplicarZoom);
+}
 
 async function loadFootprintsLayer(sid) {
   const map = maps[sid];
@@ -3033,9 +3125,13 @@ async function loadParcelasMap(sid) {
       if (!(tipoLbl in tipoColor)) tipoColor[tipoLbl] = color;
     }
 
+    // El anillo grueso marca "varias unidades" (edificio). Es el segundo canal que
+    // reemplaza al tono más oscuro que antes distinguía vivienda de edificio_viviendas:
+    // se lee sin depender del color, que es lo que pedía el validador de la paleta.
+    const esEdificio = !compEst && CAT_EDIFICIO.has(cat);
     const m = L.circleMarker([p.lat, p.lng], {
-      radius: 7, fillColor: color,
-      color: '#0f172a', weight: 1.5, fillOpacity: 0.9,
+      radius: esEdificio ? 8 : 7, fillColor: color,
+      color: '#0f172a', weight: esEdificio ? 3.5 : 1.5, fillOpacity: 0.9,
     });
 
     // Número de puerta: el del catastro manda. Si no lo trae y hay uno estimado

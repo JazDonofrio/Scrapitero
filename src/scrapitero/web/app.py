@@ -1123,6 +1123,47 @@ async def run_footprints(survey_id: str) -> JSONResponse:
     return JSONResponse(data, status_code=200 if data.get("ok") else 422)
 
 
+@app.get("/api/surveys/{survey_id}/parcelas.geojson")
+async def get_parcelas_geojson(survey_id: str) -> dict:
+    """Contorno catastral de cada parcela, para la capa 🧩 Límites de parcela del mapa.
+
+    El marcador del mapa es un `ST_PointOnSurface`: un punto cualquiera **dentro** del
+    polígono, o sea un derivado. Si la geometría del catastro vino mal, el punto también
+    está mal y no hay forma de notarlo mirando puntos. Esta capa muestra el dato de origen.
+
+    La geometría va **sin simplificar** a propósito: son 6-9 vértices por lote (110 kB las
+    619 de Malvinas, 168 kB las 567 de Várzea Grande), así que simplificar ahorraría
+    centenares de bytes a cambio de deformar un límite catastral — que es justo lo que la
+    capa existe para poder verificar.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT ST_AsGeoJSON(geometry), parcela_id::text, cca_code, calle, numero,
+                   area_m2_terreno, uso_principal, validado_manual
+            FROM parcelas
+            WHERE survey_id = :sid AND geometry IS NOT NULL
+        """), {"sid": survey_id}).fetchall()
+
+    features = []
+    for geom_gj, parcela_id, cca, calle, numero, area, uso, validado in rows:
+        if not geom_gj:
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": json.loads(geom_gj),
+            "properties": {
+                "parcela_id": parcela_id,
+                "cca_code": cca,
+                "direccion": " ".join(x for x in (calle, numero) if x and x != "0"),
+                "area_m2_terreno": round(float(area), 1) if area is not None else None,
+                "uso_principal": uso,
+                "validado_manual": bool(validado),
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
 @app.get("/api/surveys/{survey_id}/footprints")
 async def get_footprints(survey_id: str) -> dict:
     """GeoJSON FeatureCollection de los footprints ya traídos por 🏗️ Footprints (revisión).

@@ -47,6 +47,7 @@ from sqlalchemy import text
 
 from scrapitero.db.engine import get_engine
 from scrapitero.agents._run import agent_run
+from scrapitero.agents.precedencia import UF_FUENTES_PROTEGIDAS
 
 
 # ── Mapeo tipo_osm (building=*) → categoría de unidad ──────────────────────────
@@ -194,9 +195,12 @@ def _get_parcelas(region_id: str, survey_id: Optional[str], overwrite: bool) -> 
     params: dict = {"rid": region_id}
     if not overwrite:
         base += " AND COALESCE(footprints_count, 0) = 0"
-        # No pisar el conteo real de comercios de GooglePlacesFetcher (autoritativo).
-        # Con overwrite=true el usuario pide recálculo explícito y sí se reprocesa.
-        base += " AND COALESCE(uf_fuente, '') <> 'google'"
+        # No pisar un CONTEO REAL con una estimación. La lista vive en `precedencia.py`;
+        # acá estaba copiada a mano y sólo nombraba a 'google', así que 'overture',
+        # 'cadastur' y 'shopping_min' quedaban desprotegidas — exactamente el modo de falla
+        # que ese módulo documenta. Medido en Malvinas (11-ago-2026): esta query se llevó
+        # puestas 81 viviendas y los 88 comercios que Overture acababa de contar.
+        base += f" AND COALESCE(uf_fuente, '') NOT IN {UF_FUENTES_PROTEGIDAS}"
     if survey_id:
         base += " AND survey_id = :sid"
         params["sid"] = survey_id
