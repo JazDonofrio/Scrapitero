@@ -703,7 +703,11 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
 
         if not crudos:
             motivo = "; ".join(f"{k}: {v}" for k, v in out.fuentes_fallidas.items()) or "0 hoteles"
-            if out.fuentes_fallidas and not out.por_fuente:
+            # `not out.por_fuente` no alcanzaba: una fuente que corrió y devolvió 0 deja la clave
+            # puesta ({'osm': 0}, que es truthy) y tapaba el fallo de las otras. Sólo se puede
+            # afirmar "0 hoteles" si ninguna fuente se cayó; si alguna lo hizo y las demás no
+            # encontraron nada, el resultado es desconocido, no cero.
+            if out.fuentes_fallidas and not any(out.por_fuente.values()):
                 return HotelFetcherOutput(ok=False, region_id=input.region_id, municipio=out.municipio,
                                           fuentes_fallidas=out.fuentes_fallidas,
                                           error=f"ninguna fuente devolvió hoteles ({motivo})")

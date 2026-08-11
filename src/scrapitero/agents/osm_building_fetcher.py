@@ -128,7 +128,9 @@ out geom;
 
 def _try_mirrors(query: str, mirrors: list, proxy: str = None, timeout: float = None) -> dict:
     last_error = ""
-    empty_fallback = None   # un 200 vacío (sin datos ni remark): mirror que probablemente punteó
+    errores: list[str] = []     # fallos DUROS (HTTP != 200, timeout, red): el mirror no contestó
+    empty_fallback = None       # un 200 vacío (sin datos ni remark): mirror que probablemente punteó
+    vacios = 0                  # cuántos mirrors coincidieron en ese vacío
     kwargs = {"proxies": proxy} if proxy else {}
     cli_timeout = (timeout if timeout is not None else OVERPASS_TIMEOUT) + 10
     for mirror in mirrors:
@@ -148,18 +150,35 @@ def _try_mirrors(query: str, mirrors: list, proxy: str = None, timeout: float = 
                 if j is not None and (j.get("elements") or j.get("remark")):
                     logger.info(f"Overpass OK{via} — {mirror}")
                     return j
-                if j is not None and empty_fallback is None:
-                    empty_fallback = j
+                if j is not None:
+                    vacios += 1
+                    if empty_fallback is None:
+                        empty_fallback = j
                 last_error = f"200 vacío ({mirror})"
                 logger.warning(f"Overpass {last_error}")
             else:
                 last_error = f"HTTP {r.status_code} ({mirror})"
+                errores.append(last_error)
                 logger.warning(f"Overpass {last_error}")
         except httpx.HTTPError as exc:
             last_error = f"HTTPError ({mirror}): {exc}"
+            errores.append(last_error)
             logger.warning(f"Overpass {last_error}")
+
+    # "Sin resultados" hay que GANÁRSELO: un solo 200-vacío mientras los demás mirrors se caían
+    # no distingue "acá no hay nada" de "Overpass está caído", y quien llama devuelve 0 como si
+    # fuera el dato. Medido en Malvinas (11-ago-2026): 406 + 504 + un vacío de overpass.osm.ch +
+    # 504 ⇒ HotelFetcher informó `ok:true, osm:0, fuentes_fallidas:{}`, indistinguible de una
+    # zona sin hoteles. El comentario de arriba ya pedía "sólo si TODOS coinciden"; el código no
+    # lo verificaba. Se acepta el vacío si NINGÚN mirror falló duro, o si al menos DOS coinciden
+    # en vacío (dos servidores independientes son confirmación suficiente y mantienen vivo el
+    # caso legítimo —p.ej. una calle que OSM no tiene, que `baseline_interp` cachea en negativo—
+    # aunque un mirror esté sistemáticamente caído).
+    if empty_fallback is not None and (not errores or vacios >= 2):
+        return empty_fallback
     if empty_fallback is not None:
-        return empty_fallback   # todos los mirrors coinciden en vacío → genuinamente sin resultados
+        last_error = (f"{vacios} mirror(s) devolvieron 200 vacío pero {len(errores)} falló/fallaron "
+                      f"({'; '.join(errores)}): no se puede afirmar que la consulta no tenga resultados")
     return None, last_error
 
 

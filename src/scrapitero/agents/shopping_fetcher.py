@@ -63,6 +63,22 @@ def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82
 
 
+def _nombre_fuerte(a: Optional[str], b: Optional[str]) -> bool:
+    """Nombre IDÉNTICO (normalizado) o mismo conjunto de tokens significativos.
+
+    Habilita el radio amplio del dedupe. Es más estricto que `_nombre_similar`: no le
+    alcanza el 0.82 de difflib ni compartir 2 tokens — 'Plaza Oeste' y 'Plaza Norte'
+    comparten uno y se parecen, y son shoppings distintos.
+    """
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    sa, sb = _tokens_sig(na), _tokens_sig(nb)
+    return bool(sa) and sa == sb
+
+
 class ShoppingFetcherInput(BaseModel):
     region_id: str
     survey_id: Optional[str] = None
@@ -71,6 +87,14 @@ class ShoppingFetcherInput(BaseModel):
     fuentes: list[str] = ["osm", "google"]
     max_requests: int = 40              # tope de teselas Google (pago)
     merge_dist_m: float = 150.0         # dedupe entre fuentes
+    # Radio amplio cuando el nombre es FUERTE (idéntico o mismos tokens significativos).
+    # Un shopping ocupa una manzana entera y cada fuente lo apunta donde quiere: OSM da el
+    # centro del polígono del edificio, Overture el POI de una tienda ancla o la entrada.
+    # Medido en Malvinas (11-ago-2026): 'Terrazas de Mayo Shopping' entró dos veces —OSM y
+    # Overture— con el nombre IDÉNTICO y a 175 m, o sea 25 m por encima del corte. Mismo
+    # criterio escalonado que `hotel_fetcher` (merge_dist_fuerte_m), con un radio acorde a
+    # la huella de un mall en vez de a la dirección fiscal de un hotel.
+    merge_dist_fuerte_m: float = 600.0
     shoppings_ar_urls: list[str] = []           # [] = la página de provincia de Buenos Aires
     shoppings_ar_provincia: str = "Buenos Aires"
     # Buffer de la zona para el recorte: un shopping tiene HUELLA GRANDE y su punto (centro del
@@ -85,6 +109,12 @@ class ShoppingFetcherOutput(BaseModel):
     error: Optional[str] = None
     region_id: str = ""
     por_fuente: dict = {}
+    # fuente → motivo del fallo (Overpass caído, Google sin key…). Iba sólo a un
+    # `logger.warning`, así que el output decía "0 shoppings" sin distinguirlo de una zona
+    # que no tiene ninguno — el mismo agujero que tapamos en `hotel_fetcher`. Las filas de
+    # una fuente caída NO se pierden: `fuentes_run` sale de `por_fuente`, que sólo se llena
+    # cuando la fuente respondió, así que no entran al DELETE y vuelven como semillas.
+    fuentes_fallidas: dict = {}
     en_zona: int = 0
 
 
@@ -171,6 +201,7 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
             out.por_fuente["osm"] = len(o)
             crudos.extend(o)
         except Exception as e:  # noqa: BLE001
+            out.fuentes_fallidas["osm"] = str(e)
             logger.warning(f"ShoppingFetcher OSM falló: {e}")
     if "google" in input.fuentes:
         try:
@@ -178,6 +209,7 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
             out.por_fuente["google"] = len(g)
             crudos.extend(g)
         except Exception as e:  # noqa: BLE001
+            out.fuentes_fallidas["google"] = str(e)
             logger.warning(f"ShoppingFetcher Google falló: {e}")
     if "shoppings_ar" in input.fuentes:
         # Directorio curado de shoppings argentinos (shoppings.com.ar). Aporta el NOMBRE
@@ -192,6 +224,7 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
             out.por_fuente["shoppings_ar"] = len(d)
             crudos.extend(d)
         except Exception as e:  # noqa: BLE001
+            out.fuentes_fallidas["shoppings_ar"] = str(e)
             logger.warning(f"ShoppingFetcher shoppings.com.ar falló: {e}")
 
     # recorte a zona (buffereada)
@@ -218,13 +251,19 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
     for h in ubicados:
         destino = None
         for f in final:
-            if _dist_m(h["lat"], h["lng"], f["lat"], f["lng"]) > input.merge_dist_m:
+            d = _dist_m(h["lat"], h["lng"], f["lat"], f["lng"])
+            if d > input.merge_dist_fuerte_m:
                 continue
             if h.get("nombre") and f.get("nombre"):
-                if _nombre_similar(h["nombre"], f["nombre"]):
+                # Nombre fuerte → radio amplio (la huella del mall); nombre apenas parecido
+                # → hay que estar cerca, para no fusionar dos galerías distintas.
+                if _nombre_fuerte(h["nombre"], f["nombre"]) or (
+                        d <= input.merge_dist_m and _nombre_similar(h["nombre"], f["nombre"])):
                     destino = f
                     break
-            else:
+            elif d <= input.merge_dist_m:
+                # Sin nombre en alguno (nodo OSM shop=mall sin tag `name`): sólo distancia,
+                # y por eso se exige el radio corto — no hay nada que confirme que es el mismo.
                 destino = f
                 break
         if destino is None:
@@ -234,6 +273,17 @@ def run(input: ShoppingFetcherInput) -> ShoppingFetcherOutput:
                 destino["nombre"] = h["nombre"]
             destino["_dirty"] = True
     out.en_zona = len(final)
+
+    # Ninguna fuente respondió: lo que hay en `final` son las semillas de corridas viejas, no
+    # el resultado de ésta. Devolverlo como éxito diría "la zona tiene N shoppings" cuando en
+    # realidad no se pudo mirar. No se escribe nada (el DELETE tendría `fuentes_run` vacío,
+    # pero igual conviene salir sin tocar la tabla).
+    if out.fuentes_fallidas and not out.por_fuente:
+        motivo = "; ".join(f"{k}: {v}" for k, v in out.fuentes_fallidas.items())
+        return ShoppingFetcherOutput(
+            ok=False, region_id=input.region_id, por_fuente=out.por_fuente,
+            fuentes_fallidas=out.fuentes_fallidas, en_zona=0,
+            error=f"ninguna fuente de shoppings respondió ({motivo})")
 
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM establecimientos_poi WHERE region_id=:r AND fuente=ANY(:f)"),
