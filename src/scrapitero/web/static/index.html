@@ -1959,8 +1959,8 @@ function renderCard(s) {
 
           <div class="detail-footer">
             <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">${t('↻ Actualizar')}</button>
-            ${s.export_cliente ? `<a class="btn btn-sm" href="/api/surveys/${sid}/export/csv-operadora" download
-               style="text-decoration:none;background:#009C3B;color:#fff;border:1px solid #007A2E"
+            ${s.export_cliente ? `<a class="btn btn-sm btn-green" href="/api/surveys/${sid}/export/csv-operadora" download
+               style="text-decoration:none"
                title="${tAttr('Descargar el CSV con el formato de entrega propio del cliente')}: ${escHtml(s.export_cliente.descripcion || '')}">⬇ ${escHtml(s.export_cliente.etiqueta)}</a>` : ''}
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
                style="text-decoration:none"

@@ -616,7 +616,7 @@ async def list_surveys(request: Request) -> list[dict]:
             # Formato de entrega propio del cliente, si su país tiene uno definido
             # (`_EXPORT_PERFILES_CLIENTE`). El front muestra el botón según esto, en vez
             # de preguntar `country_code === 'BRA'` en cada página.
-            "export_cliente": _EXPORT_PERFILES_CLIENTE.get((r[6] or "").upper()),
+            "export_cliente": _perfil_cliente_ui((r[6] or "").upper()),
             "total_edificios": int(r[8] or 0),
             "total_parcelas": int(r[9] or 0),
             "total_uf_vivienda": int(r[10] or 0),
@@ -3007,17 +3007,82 @@ def _vocabulario_tipo_logradouro(filas_extras: list) -> dict:
 
 # ── Perfiles de export "formato del cliente" ──────────────────────────────────
 # El CSV genérico (`/export/csv`) sirve en cualquier país; ADEMÁS cada cliente puede
-# tener su propio layout de entrega. Hoy sólo está definido el de la operadora brasilera.
-# Para sumar el de otro cliente: agregar la entrada acá y su generador, sin tocar el
-# resto del endpoint. Ver docs/FUENTES_DATOS_AR.md § entregable.
+# tener su propio layout de entrega. Para sumar el de otro cliente: agregar la entrada
+# acá y su generador (`layout`), sin tocar el resto del endpoint.
+# Ver docs/FUENTES_DATOS_AR.md § entregable.
+#
+# Claves de UI (`etiqueta`/`descripcion`, las únicas que viajan al front) e internas:
+#   layout        · qué generador usa el survey SIN baseline (con baseline manda el
+#                   header del CSV que el cliente importó, en cualquier país).
+#   tipos_uso     · cómo se rotula una unidad de vivienda / de comercio en ESE idioma.
+#   cod_operadora · el código de la base del cliente, primera columna del layout.
 _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
     "BRA": {
         "etiqueta": "CSV Operadora",
         "descripcion": "Layout de base de logradouros de operadora (Brasil)",
+        "layout": "operadora_br",
+        "tipos_uso": ("RESIDENCIAL", "COMERCIO EM GERAL"),
+        "cod_operadora": CSV_OPERADORA_COD,
     },
-    # "ARG": pendiente de definir con el cliente argentino. Mientras no exista, en
-    # Argentina se entrega el CSV genérico + DXF, que no dependen del país.
+    # Argentina: mismas columnas que el contrato de import `ARG` de `_BASELINE_PERFILES`
+    # (DIRECCION/LOCALIDAD/PROVINCIA/CODIGO_POSTAL/TIPO_INMUEBLE), así el entregable se
+    # puede volver a importar como baseline del próximo relevamiento sin traducir nada.
+    "ARG": {
+        "etiqueta": "CSV Operadora",
+        "descripcion": "Layout de base de calles de operadora (Argentina)",
+        "layout": "operadora_ar",
+        "tipos_uso": ("RESIDENCIAL", "COMERCIAL"),
+        "cod_operadora": CSV_OPERADORA_COD,
+    },
 }
+_EXPORT_PERFIL_UI = ("etiqueta", "descripcion")
+
+
+_LOCALIDAD_REGION_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _localidad_provincia_region(conn, region_id: str,
+                                region_nombre: str = "") -> tuple[str, str]:
+    """(localidad, provincia) de la región, para rellenar las parcelas que no las traen.
+
+    Fuera de Brasil el catastro no siempre publica municipio/provincia por parcela (ARBA
+    e IDERA no los traen: en Hurlingham las 441 parcelas vienen en NULL), y el entregable
+    no puede salir con esas columnas vacías. Como son las MISMAS para toda la región, se
+    resuelven una sola vez por reverse-geocoding del centroide (Nominatim, gratis) y se
+    cachean en memoria — no una llamada por fila ni una por descarga.
+
+    Respaldo si el reverse falla: el nombre de la región como localidad. Nunca lanza.
+    """
+    if region_id in _LOCALIDAD_REGION_CACHE:
+        return _LOCALIDAD_REGION_CACHE[region_id]
+
+    localidad, provincia = "", ""
+    try:
+        pt = conn.execute(text("""
+            SELECT AVG(centroid_lat), AVG(centroid_lng) FROM parcelas
+            WHERE region_id = :rid AND centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL
+        """), {"rid": region_id}).fetchone()
+        if pt and pt[0] is None:
+            pt = None
+        if pt:
+            from scrapitero.agents.geo import detect_localidad_provincia
+            loc, prov = detect_localidad_provincia(float(pt[0]), float(pt[1]))
+            localidad, provincia = (loc or ""), (prov or "")
+    except Exception as e:      # el export no se cae por un reverse que no anduvo
+        logger.warning(f"No se pudo resolver localidad/provincia de {region_id}: {e}")
+
+    if not localidad:
+        localidad = (region_nombre or "").strip()
+    _LOCALIDAD_REGION_CACHE[region_id] = (localidad, provincia)
+    logger.info(f"Entregable {region_id}: localidad={localidad!r} provincia={provincia!r}")
+    return localidad, provincia
+
+
+def _perfil_cliente_ui(pais: str) -> dict | None:
+    """El perfil de entrega del país, recortado a lo que necesita el front. Las claves
+    internas (`layout`, `tipos_uso`, `cod_operadora`) no viajan en la API."""
+    perfil = _EXPORT_PERFILES_CLIENTE.get((pais or "").upper())
+    return {k: perfil[k] for k in _EXPORT_PERFIL_UI} if perfil else None
 
 
 @app.get("/api/surveys/{survey_id}/export/perfiles")
@@ -3033,18 +3098,23 @@ async def export_perfiles(survey_id: str) -> JSONResponse:
         # siempre disponibles: no dependen del país
         "genericos": [{"clave": "csv", "etiqueta": "CSV"},
                       {"clave": "dxf", "etiqueta": "DXF (AutoCAD)"}],
-        "cliente": ({"clave": "csv-operadora", **perfil} if perfil else None),
+        "cliente": ({"clave": "csv-operadora",
+                     **{k: perfil[k] for k in _EXPORT_PERFIL_UI}} if perfil else None),
     })
 
 
 @app.get("/api/surveys/{survey_id}/export/csv-operadora")
 async def export_csv_operadora(survey_id: str) -> StreamingResponse:
-    """CSV con el layout del cliente (hoy definido sólo para Brasil: base de logradouros).
+    """CSV con el layout de entrega del cliente (`_EXPORT_PERFILES_CLIENTE`).
 
-    Una fila por parcela con dirección. Descompone `calle` en tipo/título/
-    preposição/nome oficial (heurística por diccionario — logradouro_br.py).
-    CODIGO_LOGRADOURO sale de parcelas.codigo_logradouro (BCI, migración 016);
-    vacío para parcelas parseadas antes de esa migración.
+    Con baseline vinculado se usa el header del CSV que el cliente importó (cualquier
+    país). Sin baseline, el layout del perfil de su país:
+      · `operadora_br` — base de logradouros. Descompone `calle` en tipo/título/
+        preposição/nome oficial (heurística por diccionario — logradouro_br.py).
+        CODIGO_LOGRADOURO sale de parcelas.codigo_logradouro (BCI, migración 016);
+        vacío para parcelas parseadas antes de esa migración.
+      · `operadora_ar` — base de calles en español, con las columnas del contrato de
+        import `ARG` para que el entregable se pueda re-importar como baseline.
     """
     engine = get_engine()
     with engine.connect() as conn:
@@ -3056,7 +3126,8 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
         if not meta:
             return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
         pais_survey = (meta[3] or "").upper()
-        if pais_survey not in _EXPORT_PERFILES_CLIENTE:
+        perfil = _EXPORT_PERFILES_CLIENTE.get(pais_survey)
+        if not perfil:
             definidos = ", ".join(sorted(_EXPORT_PERFILES_CLIENTE)) or "(ninguno)"
             return JSONResponse(
                 {"error": f"No hay formato de entrega de cliente definido para {pais_survey or '?'}. "
@@ -3135,8 +3206,33 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                          _vocabulario_tipo_logradouro(extras_base))
 
         rows = None
-        if not plantilla:
-            # Fallback (survey sin baseline): layout de base de logradouros de operadora.
+        if not plantilla and perfil["layout"] == "operadora_ar":
+            # Fallback ARG: layout de base de calles, columnas del contrato de import `ARG`.
+            # Una fila por DIRECCIÓN única, con la UF SUMADA de las parcelas que comparten
+            # esa dirección (a diferencia del layout brasilero, que no lleva UF: acá es el
+            # dato del relevamiento y el que permite re-importar el archivo como baseline).
+            rows = conn.execute(text("""
+                SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
+                       CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
+                            WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 THEN numero_estimado
+                            ELSE NULL END AS numero,
+                       SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
+                       SUM(COALESCE(uf_comercio, 0))::int AS uf_c,
+                       MIN(uso_principal) AS uso
+                FROM parcelas
+                WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
+                GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, 6
+                ORDER BY calle,
+                         NULLIF(regexp_replace(COALESCE(
+                             CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
+                                  WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                                       THEN numero_estimado
+                                  ELSE NULL END, ''), '\\D', '', 'g'), '')::bigint
+                           NULLS LAST
+            """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN}).fetchall()
+        elif not plantilla:
+            # Fallback BRA (survey sin baseline): layout de base de logradouros de operadora.
             # Una fila por DIRECCIÓN COMPLETA única (varias parcelas con la misma
             # calle+número+CEP+bairro colapsan en un solo registro).
             rows = conn.execute(text("""
@@ -3150,14 +3246,33 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                            NULLS LAST
             """), {"sid": survey_id}).fetchall()
 
+        # Localidad/provincia de respaldo: ARBA/IDERA no las publican por parcela (en
+        # Hurlingham las 441 vienen en NULL) y el entregable no puede salir sin ellas.
+        # Se resuelven UNA vez por región desde su centroide, no por fila — y sólo si
+        # falta alguna: donde el catastro sí las trae (el BCI de Brasil) no se paga el
+        # reverse-geocoding, que además es lo único de este export que sale a la red.
+        loc_region, prov_region = "", ""
+        if conn.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM parcelas
+                           WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
+                             AND (municipio IS NULL OR estado_provincia IS NULL))
+        """), {"sid": survey_id}).scalar():
+            loc_region, prov_region = _localidad_provincia_region(conn, meta[0], meta[1])
+
     fecha = meta[2].strftime("%Y-%m-%d") if meta[2] else ""
     filename = f"operadora_{meta[0]}_{fecha}.csv".replace(" ", "_")
 
     if plantilla:
         header, mapeo_d, parc, constantes, voc_tipo = plantilla
         inv = {h: f for f, h in mapeo_d.items() if h}   # header → campo
-        TIPO_VIV, TIPO_COM = "RESIDENCIAL", "COMERCIO EM GERAL"
+        # Cómo rotula el cliente una unidad de vivienda / de comercio, en SU idioma.
+        TIPO_VIV, TIPO_COM = perfil["tipos_uso"]
         idx = {h: i for i, h in enumerate(header)}
+        # El respaldo de provincia sale del reverse con el nombre completo, pero el
+        # `COD_UF` brasilero es la SIGLA. `sigla_uf` sólo conoce estados de Brasil y
+        # devuelve '' para el resto, así que "Mato Grosso"→MT y "Buenos Aires" queda igual.
+        from scrapitero.agents.geocode_forward import sigla_uf
+        prov_plantilla = sigla_uf(prov_region) or prov_region
 
         def _set(fila, col, valor):
             """Escribe una columna del layout sólo si existe y hay algo que poner."""
@@ -3200,9 +3315,12 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 pares_unidad = partes_unidad(unidad)
 
                 for tipo in unidades:
+                    # Ciudad/provincia: la de la parcela y, si el catastro no las publica
+                    # (ARBA/IDERA), la de la región — la columna no puede salir vacía.
                     val = {"direccion": full, "calle": calle or "", "numero": numero or "",
-                           "barrio": barrio or "", "ciudad": muni or "",
-                           "estado": (est or "").upper(), "cep": cep or "", "uso": tipo}
+                           "barrio": barrio or "", "ciudad": muni or loc_region,
+                           "estado": (est or prov_plantilla).upper(),
+                           "cep": cep or "", "uso": tipo}
                     fila = [val.get(inv.get(col), "") for col in header]
                     # 1) Constantes de la base del cliente (COD_OPERADORA, COD_IBGE, …).
                     for col, v in constantes.items():
@@ -3224,6 +3342,58 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
 
         return StreamingResponse(
             _gen_plantilla(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if perfil["layout"] == "operadora_ar":
+        from scrapitero.agents.calle_ar import descomponer_calle
+
+        TIPO_VIV, TIPO_COM = perfil["tipos_uso"]
+
+        def _tipo_inmueble(uf_v: int, uf_c: int, uso: str) -> str:
+            """Cómo se rotula la dirección en la columna que el import lee como uso.
+            Misma regla que `_agregar_por_direccion` al importar un baseline, para que el
+            archivo entre y salga diciendo lo mismo: residencial → vivienda, resto →
+            comercio. Sin UF no hay unidad que clasificar: sale el uso del catastro."""
+            if uf_v > 0 and uf_c > 0:
+                return "MIXTO"
+            if uf_c > 0:
+                return TIPO_COM
+            if uf_v > 0:
+                return TIPO_VIV
+            return (uso or "").upper() if uso in _USOS_VALIDOS else ""
+
+        def _gen_ar():
+            buf = io.StringIO()
+            buf.write("﻿")   # BOM para Excel
+            w = csv.writer(buf, delimiter=";")
+            w.writerow([
+                "COD_OPERADORA", "LOCALIDAD", "PROVINCIA", "BARRIO", "TIPO_CALLE",
+                "NOMBRE_CALLE", "CODIGO_POSTAL", "NUMERO", "DIRECCION",
+                "TIPO_INMUEBLE", "UF_VIVIENDA", "UF_COMERCIO",
+            ])
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+            for municipio, prov, barrio, calle, cp, numero, uf_v, uf_c, uso in rows:
+                d = descomponer_calle(calle)
+                w.writerow([
+                    perfil["cod_operadora"],
+                    (municipio or loc_region or "").upper(),
+                    (prov or prov_region or "").upper(),
+                    (barrio or "").upper(),      # ARBA/IDERA no publican barrio
+                    d["tipo"],
+                    d["nombre"],
+                    cp or "",                    # ARBA/IDERA no publican código postal
+                    numero or "",
+                    " ".join(x for x in (calle, numero) if x),
+                    _tipo_inmueble(int(uf_v or 0), int(uf_c or 0), uso),
+                    int(uf_v or 0),
+                    int(uf_c or 0),
+                ])
+                yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+        return StreamingResponse(
+            _gen_ar(),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )

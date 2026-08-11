@@ -609,12 +609,42 @@ así que el formato de entrega no puede estar clavado en el código. Dos registr
   trata `_`/`-` como espacio, así `CODIGO_POSTAL` y `Código Postal` son la misma columna.
   Ojo: **`sigla_uf` sólo conoce estados brasileros** y devuelve `''` para el resto; fuera de
   Brasil se conserva el valor original o la provincia se pierde (y el geocoding la necesita).
-- **`_EXPORT_PERFILES_CLIENTE`** (salida): formato de entrega propio de cada cliente. Hoy sólo
-  `BRA`. El front muestra el botón según `export_cliente` del payload del survey (no con
-  `country_code === 'BRA'`), y `GET /api/surveys/{id}/export/perfiles` dice qué aplica.
-  **El CSV genérico y el DXF no dependen del país** y son el entregable argentino actual.
+- **`_EXPORT_PERFILES_CLIENTE`** (salida): formato de entrega propio de cada cliente. Definidos
+  `BRA` (base de logradouros) y `ARG` (base de calles). Cada entrada trae, además de las dos
+  claves de UI (`etiqueta`/`descripcion`, **las únicas que viajan al front** — las filtra
+  `_perfil_cliente_ui`), tres internas: **`layout`** (qué generador se usa cuando el survey NO
+  tiene baseline), **`tipos_uso`** (cómo se rotula una unidad de vivienda/comercio en el idioma
+  del cliente: `RESIDENCIAL`/`COMERCIO EM GERAL` vs `RESIDENCIAL`/`COMERCIAL`) y
+  **`cod_operadora`**. El front muestra el botón según `export_cliente` del payload del survey
+  (no con `country_code === 'BRA'`), y `GET /api/surveys/{id}/export/perfiles` dice qué aplica.
+  **El CSV genérico y el DXF tampoco dependen del país.**
 
-**CSV Operadora (perfil de cliente `BRA`):** botón verde Brasil "⬇ CSV Operadora" en el
+**CSV Operadora (perfil de cliente `ARG`):** mismo botón "⬇ CSV Operadora" y mismo endpoint que
+Brasil; cambia el layout. Columnas: `COD_OPERADORA`, `LOCALIDAD`, `PROVINCIA`, `BARRIO`,
+`TIPO_CALLE`/`NOMBRE_CALLE` (descomposición de `calle` — `agents/calle_ar.py`, el equivalente
+argentino de `logradouro_br.py`: en AR la vía casi nunca trae tipo —"Arturo Jauretche"— y cuando
+lo trae viene abreviado —"Av. Vergara", "Pje. San Martín"—; si el primer token no es un tipo
+reconocido, `TIPO_CALLE` queda vacío y el texto va **entero** a `NOMBRE_CALLE`), `CODIGO_POSTAL`,
+`NUMERO`, `DIRECCION`, `TIPO_INMUEBLE`, `UF_VIVIENDA`, `UF_COMERCIO`. **Una fila por dirección
+única**, con la UF **sumada** de las parcelas que la comparten (a diferencia del layout brasilero,
+que no lleva UF).
+- **Los nombres de columna son los del contrato de import `ARG`** (`_BASELINE_PERFILES`) a
+  propósito: así el entregable se puede **volver a importar como baseline** del relevamiento
+  siguiente sin traducir nada. Por eso `TIPO_INMUEBLE` sigue la MISMA regla que
+  `_agregar_por_direccion` al importar (residencial → vivienda, resto → comercio):
+  `MIXTO` si hay UF de las dos, si no `COMERCIAL`/`RESIDENCIAL`; **sin UF** no hay unidad que
+  clasificar y sale el `uso_principal` del catastro (vacío si es `sin_datos`).
+- **`LOCALIDAD`/`PROVINCIA` se completan desde la REGIÓN**: ARBA/IDERA no las publican por
+  parcela (en Hurlingham las 441 vienen en NULL) y el entregable no puede salir con esas columnas
+  vacías. `_localidad_provincia_region` las resuelve **una sola vez por región** por
+  reverse-geocoding del centroide (`geo.detect_localidad_provincia`, Nominatim gratis) y las
+  cachea en memoria; el respaldo si el reverse falla es el nombre de la región. El reverse **sólo
+  se dispara si falta alguna** — donde el catastro sí las trae (el BCI) no se paga, y es lo único
+  de este export que sale a la red. `BARRIO` y `CODIGO_POSTAL` quedan **vacíos**: no hay fuente.
+- Medido en Hurlingham: 441 parcelas → **327 filas**, UF 570/53 (idéntico al KPI de la web), 39
+  filas con `TIPO_CALLE` (todas "Avenida Gobernador Vergara"), 4 sin `TIPO_INMUEBLE` (UF 0/0).
+
+**CSV Operadora (perfil de cliente `BRA`):** botón "⬇ CSV Operadora" en el
 detalle de cada relevamiento (vistas cliente y operador), visible si el país tiene perfil.
 Endpoint `GET /api/surveys/{id}/export/csv-operadora`. Layout de base de logradouros de
 operadora: `COD_OPERADORA` (=858 fijo), `NOME_LOCALIDADE`, `UF`, `BAIRRO`,
@@ -630,7 +660,10 @@ sin calle se excluyen.
 
 **Cuando el survey tiene baseline, el export usa el layout PROPIO del cliente** (las 65 columnas
 de su CSV, en su orden) y completa **todo lo que el relevamiento permite inferir** — el resto
-queda en blanco a propósito. De 7 columnas con dato se pasó a **24**:
+queda en blanco a propósito. Este camino **no es de Brasil**: manda el header del CSV que el
+cliente importó, en cualquier país; lo único que sale del perfil es cómo rotular la unidad
+(`tipos_uso`) y el respaldo de ciudad/provincia. Los `_set(...)` de columnas `DSC_*`/`COD_*` son
+**no-op** si el layout del cliente no las tiene. De 7 columnas con dato se pasó a **24**:
 - **Constantes de la base**, derivadas del CSV importado con `_constantes_baseline`: si una
   columna vale lo mismo en las 673 filas del cliente (`COD_OPERADORA`=858, `COD_IBGE`=5108402,
   `DSC_REGIONAL`, `DSC_CLUSTER`, `DSC_SUBCLUSTER`, `COD_CIDADE`, `COD_BASE`, `DSC_HEADEND`) no es

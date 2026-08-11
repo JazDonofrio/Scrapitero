@@ -207,6 +207,33 @@ def _nominatim_municipio_uf(lat: float, lng: float) -> tuple[Optional[str], Opti
     return None, None
 
 
+def detect_localidad_provincia(lat: float, lng: float) -> tuple[Optional[str], Optional[str]]:
+    """(localidad, provincia/estado) de un punto, con los NOMBRES completos.
+
+    Distinto de `_nominatim_municipio_uf`, que devuelve la **sigla** del ISO-3166-2 (útil
+    en Brasil, donde la UF es la sigla, e inservible en Argentina: "AR-B" no es
+    "Buenos Aires"). Acá se devuelve `address.state` tal cual, para rellenar las columnas
+    de localidad/provincia del entregable cuando el catastro no las trae (ARBA/IDERA no
+    publican ni localidad ni provincia por parcela).
+
+    Genérico para cualquier país. (None, None) si el reverse falla.
+    """
+    try:
+        with httpx.Client(timeout=15, headers=_HEADERS, follow_redirects=True) as c:
+            r = c.get(_NOMINATIM_URL,
+                      params={"format": "jsonv2", "lat": lat, "lon": lng, "zoom": 10})
+        if r.status_code == 200:
+            addr = r.json().get("address") or {}
+            localidad = (addr.get("city") or addr.get("town") or addr.get("village")
+                         or addr.get("municipality") or addr.get("suburb")
+                         or addr.get("county"))
+            provincia = addr.get("state") or addr.get("region")
+            return localidad, provincia
+    except httpx.HTTPError as e:
+        logger.warning(f"detect_localidad_provincia: reverse falló en ({lat:.4f},{lng:.4f}): {e}")
+    return None, None
+
+
 def detect_municipio_br(lat: float, lng: float) -> Optional[str]:
     """Código IBGE de 7 dígitos del municipio (Brasil) que contiene el punto. None si no se pudo.
 
