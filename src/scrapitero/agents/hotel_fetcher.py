@@ -124,9 +124,28 @@ _GENERICOS_HOTEL = {
 }
 
 
+# Puntuación que un nombre propio arrastra según la fuente y que NO lo distingue: comillas,
+# paréntesis, guiones, puntos. Se saca sólo para COMPARAR nombres (el nombre que se guarda
+# queda tal cual lo dio la fuente). Sin esto la puntuación viaja pegada al token y arruina el
+# match: medido en Malvinas (11-ago-2026), Google devolvió `Hotel "El Mesidor"` y OSM
+# `El Mesidor` — el mismo hotel entró dos veces porque los tokens eran {'"el', 'mesidor"'} vs
+# {'el', 'mesidor'}, así que no matcheó ni por núcleo ni por difflib.
+_PUNTUACION_NOMBRE = re.compile(r"""["'“”‘’()\[\]{}.,;:!¡?¿/\\|_*+~`^<>–—-]+""")
+
+
+def _norm_nombre(s: Optional[str]) -> str:
+    """`_norm` + sin puntuación. Para comparar nombres propios entre fuentes.
+
+    Aparte de `_norm` a propósito: ésa también normaliza headers de CSV y nombres de
+    município, donde sacar puntos y guiones cambiaría claves que se buscan literales.
+    """
+    return " ".join(_PUNTUACION_NOMBRE.sub(" ", _norm(s)).split())
+
+
 def _tokens_sig(n: str) -> set:
     """Tokens distintivos del nombre (sin palabras genéricas ni de 1 letra)."""
-    return {t for t in n.split() if t not in _GENERICOS_HOTEL and len(t) > 1}
+    return {t for t in _PUNTUACION_NOMBRE.sub(" ", n).split()
+            if t not in _GENERICOS_HOTEL and len(t) > 1}
 
 
 def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:

@@ -43,8 +43,15 @@ def _norm(s: Optional[str]) -> str:
     return " ".join(s.lower().split())
 
 
+# Igual que en `hotel_fetcher`: la puntuación viaja pegada al token y arruina el match
+# (`Hotel "El Mesidor"` vs `El Mesidor` daban {'"el','mesidor"'} vs {'el','mesidor'}). Se saca
+# sólo para comparar; el nombre guardado queda como lo dio la fuente.
+_PUNTUACION_NOMBRE = re.compile(r"""["'“”‘’()\[\]{}.,;:!¡?¿/\\|_*+~`^<>–—-]+""")
+
+
 def _tokens_sig(n: str) -> set:
-    return {t for t in n.split() if t not in _GENERICOS_SHOPPING and len(t) > 1}
+    return {t for t in _PUNTUACION_NOMBRE.sub(" ", n).split()
+            if t not in _GENERICOS_SHOPPING and len(t) > 1}
 
 
 def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
