@@ -818,14 +818,31 @@ _TIPO_ES: dict[str, str] = {
 _TIPO_CANONICO: dict[str, str] = {es: pt for pt, es in _TIPO_ES.items()}
 
 
-def _tipo_localizado(label: Optional[str], country_code: Optional[str]) -> Optional[str]:
-    """Traduce la etiqueta de tipo de edificación al idioma del relevamiento.
+def _vocabulario(country_code: Optional[str], lang: Optional[str] = None) -> str:
+    """En qué idioma salen las etiquetas de la taxonomía: `'es'` o `'pt'`.
 
-    Brasil (o país desconocido) → se deja la taxonomía original del cliente.
-    Cualquier otro país → español. Una etiqueta que no esté en el diccionario
-    (p.ej. una descripción CNPJ suelta) se devuelve tal cual.
+    **Manda el toggle de idioma de la UI** cuando el pedido lo trae (`?lang=`), porque quien
+    mira la pantalla no es necesariamente del país del relevamiento: un operador argentino
+    revisando Várzea Grande quiere leer «VIVIENDA», no «RESIDÊNCIA». Sin `lang` —cualquier
+    llamada vieja, o el CSV del cliente— se mantiene el criterio anterior: el país del
+    relevamiento, que es lo correcto para el entregable (la taxonomía es vocabulario
+    contractual del cliente brasilero y ahí no la decide una preferencia de pantalla).
     """
-    if not label or (country_code or "").upper() == "BRA":
+    elegido = (lang or "").strip().lower()
+    if elegido in ("es", "pt"):
+        return elegido
+    return "pt" if (country_code or "").upper() == "BRA" else "es"
+
+
+def _tipo_localizado(label: Optional[str], country_code: Optional[str],
+                     lang: Optional[str] = None) -> Optional[str]:
+    """Traduce la etiqueta de tipo de edificación al idioma en que se está mirando.
+
+    Portugués (la taxonomía original del cliente) o español, según `_vocabulario`: manda el
+    toggle de la UI si viene, y si no el país del relevamiento. Una etiqueta que no esté en
+    el diccionario (p.ej. una descripción CNPJ suelta) se devuelve tal cual.
+    """
+    if not label or _vocabulario(country_code, lang) == "pt":
         return label
     return _TIPO_ES.get(label, label)
 
@@ -837,7 +854,8 @@ def _tipo_canonico(label: Optional[str]) -> Optional[str]:
     return _TIPO_CANONICO.get(label.strip().upper(), label)
 
 
-def _descripcion_localizada(desc: Optional[str], country_code: Optional[str]) -> Optional[str]:
+def _descripcion_localizada(desc: Optional[str], country_code: Optional[str],
+                            lang: Optional[str] = None) -> Optional[str]:
     """Traduce `descripcion_uso`, que es una LISTA de etiquetas separadas por coma.
 
     `ParcelaCategoria` junta en un solo campo las etiquetas de TODOS los establecimientos
@@ -846,7 +864,7 @@ def _descripcion_localizada(desc: Optional[str], country_code: Optional[str]) ->
     ("🏢 ROTISERÍA") y justo debajo el mismo concepto en portugués ("🏷️ Comercial
     LANCHONETE"), que en un relevamiento argentino no le dice nada al operador.
     """
-    if not desc or (country_code or "").upper() == "BRA":
+    if not desc or _vocabulario(country_code, lang) == "pt":
         return desc
     partes = [x.strip() for x in desc.split(",") if x.strip()]
     return ", ".join(_TIPO_ES.get(x, x) for x in partes) or None
@@ -895,12 +913,16 @@ def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str]
 
 
 @app.get("/api/surveys/{survey_id}/parcelas")
-async def survey_parcelas(survey_id: str) -> list[dict]:
-    """Devuelve centroide + metadata de cada parcela para renderizar en el mapa."""
+async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[dict]:
+    """Devuelve centroide + metadata de cada parcela para renderizar en el mapa.
+
+    `lang` (`es`/`pt`) es el toggle de idioma de la web: manda sobre el país del
+    relevamiento para las etiquetas de la taxonomía (ver `_vocabulario`).
+    """
     engine = get_engine()
     with engine.connect() as conn:
         # La taxonomía se guarda en portugués (contrato del cliente brasilero) pero se
-        # muestra en el idioma del relevamiento: en Argentina la leyenda va en español.
+        # muestra en el idioma que eligió quien mira, y si no eligió, el del relevamiento.
         pais = _country_de_survey(conn, survey_id)
         rows = conn.execute(text("""
             SELECT p.centroid_lat, p.centroid_lng,
@@ -984,10 +1006,10 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             # La descripción se traduce al SALIR, igual que `tipo_edificacion`: en la DB la
             # etiqueta canónica sigue siendo la portuguesa.
             "categoria_uso": r[27] or None,
-            "descripcion_uso": _descripcion_localizada(r[28], pais) or None,
+            "descripcion_uso": _descripcion_localizada(r[28], pais, lang) or None,
             # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override manual.
             "tipo_edificacion": _tipo_localizado(
-                _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]), pais) or None,
+                _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]), pais, lang) or None,
             # Ítems críticos a los que pertenece la parcela (capas toggleables del mapa). Una
             # parcela puede estar en varias (un edificio de deptos es Edificio Y PH).
             "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
@@ -1587,7 +1609,8 @@ async def set_cerrado_manual(hotel_id: str, request: Request) -> JSONResponse:
 
 
 @app.get("/api/tipos-edificacion")
-async def tipos_edificacion(survey_id: Optional[str] = None) -> JSONResponse:
+async def tipos_edificacion(survey_id: Optional[str] = None,
+                            lang: Optional[str] = None) -> JSONResponse:
     """Taxonomía fija del cliente (R/C/E) para que el operador elija una etiqueta a mano.
     Fuente de verdad: docs/TIPOS_PROPIEDAD.md / TIPOS_EDIFICACION.
 
@@ -1602,7 +1625,7 @@ async def tipos_edificacion(survey_id: Optional[str] = None) -> JSONResponse:
     etiquetas = {"R": "Residencial", "C": "Comercial", "E": "Especial"}
     return JSONResponse({"ok": True, "grupos": [
         {"categoria": cat, "titulo": etiquetas[cat],
-         "tipos": [_tipo_localizado(t, pais) for t in TIPOS_EDIFICACION[cat]]}
+         "tipos": [_tipo_localizado(t, pais, lang) for t in TIPOS_EDIFICACION[cat]]}
         for cat in ("C", "R", "E")]})     # Comercial primero (lo más común al corregir un falso hotel)
 
 
@@ -1890,7 +1913,7 @@ _NUMERO_CONF_MIN = 0.4
 
 
 @app.get("/api/parcelas/{parcela_id}")
-async def get_parcela_editable(parcela_id: str) -> JSONResponse:
+async def get_parcela_editable(parcela_id: str, lang: Optional[str] = None) -> JSONResponse:
     """Valores actuales de una parcela para precargar el formulario de corrección.
 
     Devuelve la dirección + las variables derivadas que también se editan desde la tarjeta
@@ -1928,8 +1951,8 @@ async def get_parcela_editable(parcela_id: str) -> JSONResponse:
         # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro),
         # traducido al idioma del relevamiento (r[23]=país) igual que en el mapa y el CSV
         "tipo_edificacion": _tipo_localizado(
-            _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]), r[23]) or "",
-        "tipo_manual": _tipo_localizado(r[16], r[23]) or "",
+            _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]), r[23], lang) or "",
+        "tipo_manual": _tipo_localizado(r[16], r[23], lang) or "",
         "lat": float(r[19]) if r[19] is not None else None,
         "lng": float(r[20]) if r[20] is not None else None,
         "ubicacion_source": r[21] or "", "uso_fuente": r[22] or "",

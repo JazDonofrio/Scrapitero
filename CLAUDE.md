@@ -416,10 +416,21 @@ pintado** y el CSS pinta el toggle desde `:root[lang]`, sin JS.
   el 96% del texto se genera dentro de funciones que corren tras un `fetch`, y `loadSurveys()` ya
   se niega a re-renderizar cuando hay una tarjeta abierta o un formulario activo — quedaría media
   UI en cada idioma. `hayTrabajoSinGuardar()` avisa antes si hay algo cargado en el formulario.
-- **NO se traduce**: la taxonomía del cliente (`TIPOS_EDIFICACION`, `hotelTipoLabel` →
-  HOTEL/MOTEL/FLAT/PENSÃO, ya en portugués), las columnas `DSC_`/`COD_` del CSV Operadora, y el
-  `toLocaleString('pt-BR')` del **valor venal R$ / alíquota del IPTU**, que va fijo aunque la UI
-  esté en español (el resto de números y fechas sí sigue a `I18N_LOCALE`).
+- **La taxonomía del cliente (`TIPOS_EDIFICACION`, `descripcion_uso`) NO va por `i18n.js` sino
+  por el backend**: se guarda siempre en portugués (es el vocabulario contractual y así la DB
+  queda igual en todos los países) y se traduce **al salir**, con `_tipo_localizado` /
+  `_descripcion_localizada`. Quién decide el idioma lo resuelve **`_vocabulario(pais, lang)`**:
+  manda el **`?lang=` del toggle** si el pedido lo trae, y si no el **país del relevamiento**
+  (BRA → portugués, resto → español). El front se lo pasa en `/parcelas`, `/api/parcelas/{id}`
+  y `/api/tipos-edificacion` — `toggleLang()` recarga, así que alcanza con leer `LANG` al
+  fetchear; `incidencias.html` no carga `i18n.js` y lo lee de `localStorage['aim-lang']`.
+  Lo que el operador elige vuelve a la etiqueta canónica con `_tipo_canonico`.
+  ⚠ **El CSV Operadora NO lleva `lang`**: el entregable sigue al contrato del cliente, no a una
+  preferencia de pantalla.
+- **NO se traduce**: las columnas `DSC_`/`COD_` del CSV Operadora, `hotelTipoLabel`
+  (HOTEL/MOTEL/FLAT/PENSÃO) y el `toLocaleString('pt-BR')` del **valor venal R$ / alíquota del
+  IPTU**, que va fijo aunque la UI esté en español (el resto de números y fechas sí sigue a
+  `I18N_LOCALE`).
 - **Fuera de alcance hoy** (quedan en español): `incidencias.html` y los ~105 mensajes de error del
   backend. Los `alert()` ya llaman `t(data.error)`, que hoy es un no-op seguro pero deja el
   enganche puesto para traducirlos sin tocar un solo call site.

@@ -3071,7 +3071,11 @@ async function loadParcelasMap(sid) {
 
   let parcelas;
   try {
-    const res = await fetch('/api/surveys/' + sid + '/parcelas');
+    // `lang`: la taxonomía del cliente (RESIDÊNCIA / LOTE VAZIO / LANCHONETE…) se guarda en
+    // portugués y el backend la traduce al salir. Se le manda el idioma del toggle para que
+    // la tarjeta siga la pantalla y no el país del relevamiento; toggleLang() recarga, así
+    // que alcanza con leerlo acá. El CSV del cliente NO lleva `lang`: ahí manda el contrato.
+    const res = await fetch('/api/surveys/' + sid + '/parcelas?lang=' + encodeURIComponent(LANG));
     if (!res.ok) return;
     parcelas = await res.json();
   } catch(_) { return; }

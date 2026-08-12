@@ -203,12 +203,18 @@ function i18nSetLang(lang) {
    ════════════════════════════════════════════════════════════════════════════
    Las secciones espejan el orden de index.html para poder ubicarse rápido.
 
-   NO se traduce (vocabulario contractual del cliente brasilero, ya en
-   portugués): la taxonomía de TIPOS_EDIFICACION (RESIDÊNCIA, APARTAMENTO,
-   LOTE VAZIO, COMÉRCIO EM GERAL…), los tipos de hotel de hotelTipoLabel
-   (HOTEL/MOTEL/FLAT/PENSÃO) y las columnas DSC_ y COD_ del CSV de operadora
-   (escritas sin comodín a propósito: un `*` seguido de `/` cerraría este comentario).
+   NO se traduce ACÁ (vocabulario contractual del cliente brasilero, ya en
+   portugués): los tipos de hotel de hotelTipoLabel (HOTEL/MOTEL/FLAT/PENSÃO)
+   y las columnas DSC_ y COD_ del CSV de operadora (escritas sin comodín a
+   propósito: un `*` seguido de `/` cerraría este comentario).
    Tampoco los datos del relevamiento (nombres de calle, propietarios, etc.).
+
+   La taxonomía de TIPOS_EDIFICACION (RESIDÊNCIA, LOTE VAZIO, LANCHONETE…) SÍ
+   se traduce, pero **no por este diccionario**: la manda el backend
+   (`_tipo_localizado` / `_descripcion_localizada`), porque la etiqueta llega
+   ya resuelta en el JSON de la API. El front sólo le pasa el idioma elegido
+   (`?lang=` + LANG) en /parcelas, /api/parcelas/{id} y /api/tipos-edificacion.
+   Si agregás una pantalla que muestre esas etiquetas, pasale `lang` igual.
    ════════════════════════════════════════════════════════════════════════════ */
 var I18N_PT = {
 

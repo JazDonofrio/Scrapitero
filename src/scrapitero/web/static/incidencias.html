@@ -230,9 +230,17 @@ const tipoMeta = t => TIPOS[t] || {label:t, color:'#94a3b8', acciones:[]};
 let TIPOS_HTML = '';
 // Mismo catálogo agrupado, pero con el tipo ACTUAL preseleccionado (form de corrección).
 let TIPOS_GRUPOS = [];
+// Esta página no carga i18n.js, pero el idioma elegido en el mapa vive en localStorage:
+// se lee de ahí para que la taxonomía salga en el mismo idioma en las dos pantallas.
+function langElegido(){
+  try{ const l = localStorage.getItem('aim-lang'); return (l === 'pt' || l === 'es') ? l : ''; }
+  catch(e){ return ''; }
+}
 async function cargarTipos(){
-  // con el survey, el backend devuelve la taxonomía en el idioma del relevamiento
-  try{ const d = await fetch('/api/tipos-edificacion?survey_id='+encodeURIComponent(SID)).then(r=>r.json());
+  // con el survey, el backend devuelve la taxonomía en el idioma del relevamiento;
+  // `lang` (el toggle de la web) manda por encima de eso si el operador eligió uno
+  try{ const d = await fetch('/api/tipos-edificacion?survey_id='+encodeURIComponent(SID)
+                             +'&lang='+encodeURIComponent(langElegido())).then(r=>r.json());
     if(d.ok){ TIPOS_GRUPOS = d.grupos || [];
       TIPOS_HTML = '<option value="">— elegir etiqueta —</option>' +
       d.grupos.map(g=>`<optgroup label="${esc(g.titulo)}">`+
@@ -514,7 +522,8 @@ async function llenarFormDireccion(row, parcelaId, onSubmit, ctx){
              + (b.tipo_manual ? ' · etiqueta corregida a mano' : '') + `</div>` : '');
   } else {
     let d;
-    try{ d = await fetch('/api/parcelas/'+parcelaId).then(r=>r.json()); }catch(e){ d = null; }
+    try{ d = await fetch('/api/parcelas/'+parcelaId
+                         +'?lang='+encodeURIComponent(langElegido())).then(r=>r.json()); }catch(e){ d = null; }
     if(!d || !d.ok){ cont.innerHTML = '<div class="mut">No se pudieron cargar los datos.</div>'; return; }
     cont.innerHTML =
       `<div style="display:grid;grid-template-columns:2fr 1fr;gap:6px">`
