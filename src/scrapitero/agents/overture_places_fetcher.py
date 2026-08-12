@@ -291,8 +291,13 @@ def _upsert_comercios(region_id: str, survey_id: str, pois: list[dict]) -> int:
 
 
 def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True,
-                      reasignar_max_m: float = 40.0) -> tuple[int, int, int]:
-    """Vincula cada comercio de Overture a la parcela que contiene su punto.
+                      reasignar_max_m: float = 40.0,
+                      source: str = "overture") -> tuple[int, int, int]:
+    """Vincula cada comercio de `source` a la parcela que contiene su punto.
+
+    `source` existe para que otros fetchers de POIs (p.ej. `OsmPoiFetcher`, que trae las
+    estaciones de servicio que Overture no publica en Argentina) reusen esta guarda en vez
+    de copiarla — la lección de `precedencia.py`: una copia se actualiza y la otra no.
 
     **Guarda de huella.** El punto de Overture viene corrido unos metros, así que el
     `ST_Contains` puede meter el comercio en el terreno vacío de al lado. Un lote SIN una
@@ -318,11 +323,11 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
             UPDATE comercios c SET parcela_id = p.parcela_id
             FROM parcelas p
             WHERE p.region_id = :rid AND c.region_id = :rid
-              AND c.source = 'overture'
+              AND c.source = :src
               AND p.geometry IS NOT NULL AND c.location IS NOT NULL
               AND ST_Contains(p.geometry, c.location)
               AND (c.parcela_id IS NULL OR c.parcela_id <> p.parcela_id)
-        """), {"rid": region_id})
+        """), {"rid": region_id, "src": source})
         vinculados = res.rowcount or 0
 
         if not exigir_huella:
@@ -340,14 +345,15 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
         sin_construccion = conn.execute(text("""
             SELECT c.comercio_id::text
             FROM comercios c JOIN parcelas p ON p.parcela_id = c.parcela_id
-            WHERE c.region_id = :rid AND c.source = 'overture'
+            WHERE c.region_id = :rid AND c.source = :src
               AND p.geometry IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM footprints_revision f
                   WHERE f.survey_id = CAST(:sid AS uuid)
                     AND ST_Intersects(p.geometry, f.footprint)
                     AND ST_Area(ST_Intersection(p.geometry, f.footprint)::geography) >= :amin)
-        """), {"rid": region_id, "sid": survey_id, "amin": _HUELLA_MIN_M2}).fetchall()
+        """), {"rid": region_id, "sid": survey_id, "amin": _HUELLA_MIN_M2,
+              "src": source}).fetchall()
 
         reasignados = huerfanos = 0
         for (cid,) in sin_construccion:

@@ -99,13 +99,38 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
         # solo evita el 0/1 evidentemente incorrecto para una parcela con actividad
         # comercial confirmada. `uf_fuente='shopping_min'` deja explícito que es un piso,
         # no un conteo exacto (no se pisa un conteo real ya mayor).
+        # El mismo piso vale para las ESTACIONES DE SERVICIO que trae `OsmPoiFetcher`: son
+        # una unidad comercial confirmada —alguien la ve desde la vereda— sobre un lote al
+        # que ni ARBA ni Overture le cuentan comercio. Medido en Malvinas: la YPF de Av.
+        # Primera Junta 75 caía en un lote con `uf_comercio=0`. El sello sigue siendo
+        # `shopping_min` porque es el mismo concepto (piso de UF por POI de equipamiento, no
+        # conteo real) y ya está protegido en `precedencia.py`; renombrarlo obligaría a
+        # migrar las filas de Brasil que ya lo tienen puesto.
         conn.execute(text("""
             UPDATE parcelas SET
                 uf_comercio = 1,
                 unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0) + 1,
                 uf_fuente = 'shopping_min'
-            WHERE region_id=:rid AND descripcion_uso ILIKE '%SHOPPING%'
+            WHERE region_id=:rid
+              AND (descripcion_uso ILIKE '%SHOPPING%'
+                   OR descripcion_uso ILIKE '%POSTO DE GASOLINA%')
               AND COALESCE(uf_comercio, 0) < 1
+        """), {"rid": input.region_id})
+
+        # El uso tiene que seguir al piso que acabamos de poner: sin esto la parcela queda
+        # con una UF de comercio y `uso_principal='residencial'`, y el operador ve una
+        # estación de servicio rotulada como vivienda. Misma regla que el resto del
+        # pipeline (comercio + vivienda → mixto; comercio solo → comercial) y misma guarda:
+        # `manual` no se pisa nunca.
+        conn.execute(text("""
+            UPDATE parcelas SET
+                uso_principal = CASE WHEN COALESCE(uf_vivienda, 0) > 0
+                                     THEN 'mixto' ELSE 'comercial' END,
+                uso_fuente = 'shopping_min'
+            WHERE region_id=:rid AND COALESCE(uf_fuente, '') = 'shopping_min'
+              AND COALESCE(uf_comercio, 0) > 0
+              AND COALESCE(uso_fuente, '') <> 'manual'
+              AND COALESCE(uso_principal, '') NOT IN ('mixto', 'comercial')
         """), {"rid": input.region_id})
 
     out.parcelas_selladas = len(res)
