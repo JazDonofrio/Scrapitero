@@ -50,6 +50,10 @@ from scrapitero.db.engine import get_engine
 _OVERTURE_BUCKET = "s3://overturemaps-us-west-2/release"
 _RELEASE_DEFAULT = "2026-07-22.0"
 
+# Solape mínimo (m²) para dar por construida una parcela al aplicar la guarda de huella.
+# Mismo umbral que usa `IncidenciasReporter` para no contar un roce de digitalización.
+_HUELLA_MIN_M2 = 25.0
+
 # ── basic_category de Overture → taxonomía del cliente (categoria R/C/E, etiqueta) ──────
 # La etiqueta se guarda SIEMPRE en portugués, que es la forma canónica del proyecto; la web
 # la traduce al salir según el país (`_tipo_localizado`). Sólo se mapea lo que tiene
@@ -146,6 +150,11 @@ class OvertureInput(BaseModel):
     min_confidence: float = 0.0     # Overture publica `confidence` 0-1; 0 = sin filtro
     set_uso: bool = True            # marcar uso_principal comercial/mixto como GooglePlaces
     aportar_uf: bool = True         # escribir uf_comercio = conteo real de comercios
+    # Guarda de huella (ver `_link_to_parcelas`): un POI que cae en un lote sin construcción
+    # se reasigna al lote construido más cercano dentro de este radio, y si no hay ninguno
+    # se deja sin parcela. `exigir_huella=False` vuelve al comportamiento anterior.
+    exigir_huella: bool = True
+    reasignar_max_m: float = 40.0
 
 
 class OvertureOutput(BaseModel):
@@ -157,6 +166,9 @@ class OvertureOutput(BaseModel):
     parcelas_con_comercio: int = 0
     total_uf_comercio: int = 0
     parcelas_uso_actualizado: int = 0
+    pois_reasignados_por_huella: int = 0   # el punto caía en un lote vacío; se movió al vecino
+    pois_sin_edificio: int = 0             # ni el lote ni un vecino tienen construcción
+    parcelas_uf_limpiada: int = 0          # perdieron la UF de un comercio que ya no está
     release: Optional[str] = None
     bbox_usado: Optional[str] = None
     error: Optional[str] = None
@@ -278,8 +290,28 @@ def _upsert_comercios(region_id: str, survey_id: str, pois: list[dict]) -> int:
     return len(pois)
 
 
-def _link_to_parcelas(region_id: str) -> int:
-    """Vincula cada comercio de Overture a la parcela que contiene su punto."""
+def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True,
+                      reasignar_max_m: float = 40.0) -> tuple[int, int, int]:
+    """Vincula cada comercio de Overture a la parcela que contiene su punto.
+
+    **Guarda de huella.** El punto de Overture viene corrido unos metros, así que el
+    `ST_Contains` puede meter el comercio en el terreno vacío de al lado. Un lote SIN una
+    sola construcción no puede tener un comercio adentro: cuando pasa, se le busca al POI
+    el lote **construido** más cercano dentro de `reasignar_max_m` y, si no hay ninguno, se
+    lo deja sin parcela — el comercio se conserva como POI, pero no le aporta una UF a un
+    lote vacío ni lo asciende a `comercial`.
+
+    Caso que lo destapó (Malvinas, ago-2026): un «Burger King» cuya propia ficha dice *BK
+    Terrazas de Mayo Shopping* cayó adentro de una plaza de 8.022 m² **sin un solo
+    edificio**, a 27 m del lote del shopping. La plaza salió al CSV del cliente como una
+    dirección con comercio, con una UF que no existe.
+
+    La evidencia son los footprints de `FootprintFetcher`. **Si el relevamiento no los tiene
+    cargados, la guarda NO se aplica**: "no hay edificio" y "no se bajaron los edificios" no
+    son lo mismo, y castigar el segundo caso desvincularía comercios legítimos.
+
+    Devuelve `(vinculados, reasignados, sin_edificio)`.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         res = conn.execute(text("""
@@ -291,7 +323,60 @@ def _link_to_parcelas(region_id: str) -> int:
               AND ST_Contains(p.geometry, c.location)
               AND (c.parcela_id IS NULL OR c.parcela_id <> p.parcela_id)
         """), {"rid": region_id})
-        return res.rowcount or 0
+        vinculados = res.rowcount or 0
+
+        if not exigir_huella:
+            return vinculados, 0, 0
+
+        hay_footprints = conn.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM footprints_revision
+                            WHERE survey_id = CAST(:sid AS uuid))
+        """), {"sid": survey_id}).scalar()
+        if not hay_footprints:
+            logger.warning("Overture: sin footprints cargados ⇒ no se aplica la guarda de "
+                           "huella (correr FootprintFetcher antes para activarla)")
+            return vinculados, 0, 0
+
+        sin_construccion = conn.execute(text("""
+            SELECT c.comercio_id::text
+            FROM comercios c JOIN parcelas p ON p.parcela_id = c.parcela_id
+            WHERE c.region_id = :rid AND c.source = 'overture'
+              AND p.geometry IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM footprints_revision f
+                  WHERE f.survey_id = CAST(:sid AS uuid)
+                    AND ST_Intersects(p.geometry, f.footprint)
+                    AND ST_Area(ST_Intersection(p.geometry, f.footprint)::geography) >= :amin)
+        """), {"rid": region_id, "sid": survey_id, "amin": _HUELLA_MIN_M2}).fetchall()
+
+        reasignados = huerfanos = 0
+        for (cid,) in sin_construccion:
+            nuevo = conn.execute(text("""
+                UPDATE comercios c SET parcela_id = (
+                    SELECT p.parcela_id FROM parcelas p
+                    WHERE p.region_id = :rid AND p.geometry IS NOT NULL
+                      AND ST_DWithin(p.geometry::geography, c.location::geography, :maxm)
+                      AND EXISTS (
+                          SELECT 1 FROM footprints_revision f
+                          WHERE f.survey_id = CAST(:sid AS uuid)
+                            AND ST_Intersects(p.geometry, f.footprint)
+                            AND ST_Area(ST_Intersection(p.geometry,
+                                                        f.footprint)::geography) >= :amin)
+                    ORDER BY p.geometry <-> c.location
+                    LIMIT 1)
+                WHERE c.comercio_id = CAST(:cid AS uuid)
+                RETURNING c.parcela_id::text
+            """), {"rid": region_id, "sid": survey_id, "cid": cid,
+                   "maxm": reasignar_max_m, "amin": _HUELLA_MIN_M2}).scalar()
+            if nuevo:
+                reasignados += 1
+            else:
+                huerfanos += 1
+
+        if reasignados or huerfanos:
+            logger.info(f"Overture guarda de huella: {reasignados} POIs movidos al lote "
+                        f"construido vecino, {huerfanos} sin edificio a la vista")
+        return vinculados, reasignados, huerfanos
 
 
 def _sellar_pois(region_id: str, pois: list[dict]) -> int:
@@ -318,7 +403,7 @@ def _sellar_pois(region_id: str, pois: list[dict]) -> int:
     return n
 
 
-def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int, int]:
+def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int, int, int]:
     """uf_comercio = cantidad de comercios de Overture en la parcela.
 
     Respeta la precedencia de fuentes (ver CLAUDE.md): no pisa `manual` ni las fuentes más
@@ -382,7 +467,38 @@ def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int
                     WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'
                 """), {"pid": pid})
                 uso_upd += r2.rowcount or 0
-    return parcelas_con, total_uf, uso_upd
+
+        # Barrido de las que DEJARON de tener comercios de Overture: un release nuevo que ya
+        # no publica el POI, o la guarda de huella que lo desvinculó de un lote vacío. Sin
+        # esto el conteo viejo queda pegado y `uf_fuente='overture'` sigue firmando una UF
+        # que ya no tiene ni un comercio detrás — el mismo modo de falla que el sello que
+        # miente de `precedencia.py`, pero por omisión.
+        limpiadas = conn.execute(text("""
+            UPDATE parcelas p SET
+                uf_comercio = 0,
+                unidades_funcionales_estimadas = COALESCE(p.uf_vivienda, 0)
+            WHERE p.survey_id = :sid AND COALESCE(p.uf_fuente, '') = 'overture'
+              AND COALESCE(p.uf_comercio, 0) > 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM comercios c
+                  WHERE c.parcela_id = p.parcela_id AND c.source = 'overture'
+                    AND COALESCE(c.rubro, '') <> ALL(:excluidas))
+        """), {"sid": survey_id, "excluidas": list(_NO_COMERCIO)}).rowcount or 0
+
+        if set_uso:
+            # El uso vuelve a seguir al dato: sin comercios, una parcela con viviendas es
+            # residencial y una sin nada queda sin clasificar (NULL), no 'comercial'.
+            conn.execute(text("""
+                UPDATE parcelas p SET
+                    uso_principal = CASE WHEN COALESCE(p.uf_vivienda, 0) > 0
+                                         THEN 'residencial' ELSE NULL END,
+                    uso_fuente = CASE WHEN COALESCE(p.uf_vivienda, 0) > 0
+                                      THEN 'overture' ELSE NULL END
+                WHERE p.survey_id = :sid AND COALESCE(p.uso_fuente, '') = 'overture'
+                  AND COALESCE(p.uf_comercio, 0) = 0
+            """), {"sid": survey_id})
+
+    return parcelas_con, total_uf, uso_upd, limpiadas
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -414,18 +530,20 @@ def run(input: OvertureInput) -> OvertureOutput:
                               error=None)
 
     guardados = _upsert_comercios(input.region_id, input.survey_id, pois)
-    vinculados = _link_to_parcelas(input.region_id)
+    vinculados, reasignados, sin_edificio = _link_to_parcelas(
+        input.region_id, input.survey_id, input.exigir_huella, input.reasignar_max_m)
     con_taxonomia = _sellar_pois(input.region_id, pois)
 
-    parcelas_con = total_uf = uso_upd = 0
+    parcelas_con = total_uf = uso_upd = limpiadas = 0
     if input.aportar_uf:
-        parcelas_con, total_uf, uso_upd = _agregar_uf(
+        parcelas_con, total_uf, uso_upd, limpiadas = _agregar_uf(
             input.region_id, input.survey_id, input.set_uso)
 
     logger.info(
         f"Overture {input.region_id}: {len(pois)} POIs · {vinculados} vinculados · "
         f"{con_taxonomia} con etiqueta del cliente · uf_comercio={total_uf} "
-        f"en {parcelas_con} parcelas")
+        f"en {parcelas_con} parcelas · guarda de huella: {reasignados} reasignados, "
+        f"{sin_edificio} sin edificio · {limpiadas} parcelas con UF limpiada")
 
     return OvertureOutput(
         ok=True,
@@ -436,6 +554,9 @@ def run(input: OvertureInput) -> OvertureOutput:
         parcelas_con_comercio=parcelas_con,
         total_uf_comercio=total_uf,
         parcelas_uso_actualizado=uso_upd,
+        pois_reasignados_por_huella=reasignados,
+        pois_sin_edificio=sin_edificio,
+        parcelas_uf_limpiada=limpiadas,
         release=input.release,
         bbox_usado=",".join(f"{c}" for c in bbox),
     )

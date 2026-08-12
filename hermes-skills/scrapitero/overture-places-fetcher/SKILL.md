@@ -36,9 +36,13 @@ Licencias del dataset: **CDLA-Permissive-2.0** (Meta, Microsoft) y **Apache-2.0*
    **recorta al polígono exacto** con shapely.
 2. Guarda cada POI en **`comercios`** (`source='overture'`) con nombre, categoría, dirección
    y punto.
-3. Lo **vincula a su parcela** por `ST_Contains`.
+3. Lo **vincula a su parcela** por `ST_Contains`, con **guarda de huella**: si el lote que
+   contiene el punto **no tiene ninguna construcción** (footprints de `footprint-fetcher`,
+   solape ≥ 25 m²), el POI se **reasigna al lote construido más cercano** dentro de
+   `reasignar_max_m` (40 m) y, si no hay ninguno, queda **sin parcela**.
 4. Escribe **`uf_comercio` = cantidad de comercios de la parcela** (`uf_fuente='overture'`) y
-   marca el uso (`comercial`, o `mixto` si ya era residencial).
+   marca el uso (`comercial`, o `mixto` si ya era residencial). Las parcelas que **dejaron**
+   de tener comercios vuelven a `uf_comercio=0` y al uso que corresponde sin comercio.
 5. Carga en **`establecimientos_poi`** los que mapean a la taxonomía del cliente (ESCOLA,
    HOSPITAL, SHOPPING, SUPERMERCADO, POSTO DE GASOLINA…) → después correr
    **`parcela-categoria`** para que sellen `descripcion_uso` y la parcela muestre su tipo
@@ -69,6 +73,11 @@ python3 -m scrapitero.rpc.parcela_categoria <<< '{"region_id":"zona-hurlingham"}
 - `min_confidence` (default 0.0): piso de `confidence` (0-1).
 - `set_uso` (default true): marcar `uso_principal` comercial/mixto.
 - `aportar_uf` (default true): escribir `uf_comercio`.
+- `exigir_huella` (default true): guarda de huella. **Requiere haber corrido
+  `footprint-fetcher` antes**; si el relevamiento no tiene footprints la guarda se saltea
+  sola con un WARNING, porque "no hay edificio" y "no se bajaron los edificios" no son lo
+  mismo.
+- `reasignar_max_m` (default 40): radio para buscarle al POI un lote construido vecino.
 
 ## Output esperado
 
@@ -81,11 +90,21 @@ python3 -m scrapitero.rpc.parcela_categoria <<< '{"region_id":"zona-hurlingham"}
   "pois_taxonomia": 78,
   "parcelas_con_comercio": 28,
   "total_uf_comercio": 53,
+  "pois_reasignados_por_huella": 6,
+  "pois_sin_edificio": 0,
+  "parcelas_uf_limpiada": 5,
   "release": "2026-07-22.0"
 }
 ```
 
 ## Notas
+
+- **El punto de Overture viene corrido**, así que sin la guarda de huella el `ST_Contains`
+  mete el comercio en el terreno vacío de al lado. Caso real (Malvinas, ago-2026): un
+  «Burger King» cuya propia ficha dice *BK Terrazas de Mayo Shopping* quedó adentro de una
+  **plaza de 8.022 m² sin un solo edificio**, a 27 m del lote del shopping, y le aportó una
+  UF de comercio que salió al CSV del cliente. Con la guarda: 6 POIs reasignados al lote
+  construido vecino, 5 parcelas vacías devueltas a `uf_comercio=0`.
 
 - **Gratis y sin token.** No hay tope de costo que administrar ni avisos por Telegram.
 - Lee **`basic_category`**, no `categories`: esta última está **deprecada y se elimina en el

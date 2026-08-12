@@ -837,6 +837,21 @@ def _tipo_canonico(label: Optional[str]) -> Optional[str]:
     return _TIPO_CANONICO.get(label.strip().upper(), label)
 
 
+def _descripcion_localizada(desc: Optional[str], country_code: Optional[str]) -> Optional[str]:
+    """Traduce `descripcion_uso`, que es una LISTA de etiquetas separadas por coma.
+
+    `ParcelaCategoria` junta en un solo campo las etiquetas de TODOS los establecimientos
+    que caen en la parcela, así que no alcanza con pasarla por `_tipo_localizado`: hay que
+    traducir cada ítem. Sin esto la tarjeta del mapa mostraba el tipo ya traducido
+    ("🏢 ROTISERÍA") y justo debajo el mismo concepto en portugués ("🏷️ Comercial
+    LANCHONETE"), que en un relevamiento argentino no le dice nada al operador.
+    """
+    if not desc or (country_code or "").upper() == "BRA":
+        return desc
+    partes = [x.strip() for x in desc.split(",") if x.strip()]
+    return ", ".join(_TIPO_ES.get(x, x) for x in partes) or None
+
+
 def _country_de_survey(conn, survey_id: str) -> str:
     row = conn.execute(text(
         "SELECT COALESCE(r.country_code,'') FROM surveys s "
@@ -965,9 +980,11 @@ async def survey_parcelas(survey_id: str) -> list[dict]:
             "est_nombre": r[24] or None,
             "est_n_parcelas": int(r[25]) if r[25] else None,
             "parcela_id": r[26],
-            # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ)
+            # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ).
+            # La descripción se traduce al SALIR, igual que `tipo_edificacion`: en la DB la
+            # etiqueta canónica sigue siendo la portuguesa.
             "categoria_uso": r[27] or None,
-            "descripcion_uso": r[28] or None,
+            "descripcion_uso": _descripcion_localizada(r[28], pais) or None,
             # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override manual.
             "tipo_edificacion": _tipo_localizado(
                 _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]), pais) or None,
