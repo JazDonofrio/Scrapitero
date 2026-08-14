@@ -1268,8 +1268,17 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             {"r": input.region_id}).scalar() or 0
 
         if input.set_uf:
+            # `exacto` = TODOS los hoteles de la parcela traen conteo REAL de habitaciones
+            # (padrón oficial / OSM `rooms` / carga manual). Si alguno no lo trae, su aporte
+            # es el `GREATEST(COALESCE(habitaciones,1),1)` de acá arriba: un PISO, no un
+            # conteo — y el sello tiene que decirlo (`hotel_min` en lugar de `cadastur`, ver
+            # `precedencia.py`). `llm` y `bci_proxy` cuentan como NO exactos: son estimaciones.
             filas_uf = conn.execute(text("""
-                SELECT parcela_id::text, COALESCE(SUM(GREATEST(COALESCE(habitaciones,1),1)),0)
+                SELECT parcela_id::text,
+                       COALESCE(SUM(GREATEST(COALESCE(habitaciones,1),1)),0) AS uf,
+                       bool_and(habitaciones IS NOT NULL
+                                AND COALESCE(habitaciones_fuente,'')
+                                    IN ('cadastur','osm','manual')) AS exacto
                 FROM hoteles
                 WHERE region_id=:r AND parcela_id IS NOT NULL AND NOT cerrado_def
                 GROUP BY parcela_id
@@ -1280,40 +1289,53 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             # re-geocodificó a una vecina. Sin esto, uf_comercio/uso_principal quedaban
             # pegados para siempre con el valor viejo (y si el hotel se movió, terminaba
             # contado en DOS parcelas a la vez: la vieja con el valor stale + la nueva).
-            vigentes = [pid for pid, _ in filas_uf]
+            vigentes = [f.parcela_id for f in filas_uf]
+            # El barrido mira los DOS sellos que deja este agente: si sólo mirara 'cadastur',
+            # una parcela sellada `hotel_min` cuyo hotel cerró o se mudó se quedaría con la UF
+            # vieja pegada para siempre (que es justo el bug que este bloque vino a arreglar).
             conn.execute(text("""
                 UPDATE parcelas SET
                     uf_comercio = 0,
                     unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0),
                     uf_fuente = NULL,
-                    uso_principal = CASE WHEN uso_fuente = 'cadastur' THEN NULL
+                    uso_principal = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
                                          ELSE uso_principal END,
-                    uso_fuente = CASE WHEN uso_fuente = 'cadastur' THEN NULL
+                    uso_fuente = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
                                       ELSE uso_fuente END
-                WHERE region_id = :r AND uf_fuente = 'cadastur'
+                WHERE region_id = :r AND uf_fuente IN ('cadastur','hotel_min')
                   AND NOT (parcela_id::text = ANY(:vigentes))
             """), {"r": input.region_id, "vigentes": vigentes})
-            for pid, uf in filas_uf:
-                uf = int(uf)
+            for fila in filas_uf:
+                pid, uf, sello = fila.parcela_id, int(fila.uf), (
+                    "cadastur" if fila.exacto else "hotel_min")
                 out.parcelas_con_hotel += 1
                 out.total_uf_comercio += uf
-                # Las UF del hotel sí se aplican siempre (son habitaciones reales), pero el USO
-                # no se toca si el operador ya lo fijó a mano desde el panel de incidencias:
-                # `manual` es el único origen irreconstruible (ver CLAUDE.md, precedencia).
+                # ⚠ **Ni la UF ni el uso pisan un sello `manual`.** El uso ya lo respetaba; la
+                # UF NO, y era un agujero real: el operador corrige el conteo de una parcela
+                # con hotel desde el panel y la corrida siguiente se lo lleva puesto, sin
+                # aviso. Medido en Malvinas el 14-ago-2026 — dos parcelas corregidas a mano
+                # («Escuela militar, no se sabe cuántas UF tiene» en Lemos, y Mazza 1898)
+                # iban a volver a 1 comercio en el próximo botón 🏨. `manual` es el único
+                # origen irreconstruible: si se pierde, no hay forma de recalcularlo.
                 conn.execute(text("""
                     UPDATE parcelas SET
-                        uf_comercio = :uf,
-                        unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0) + :uf,
-                        uf_fuente = 'cadastur',
+                        uf_comercio = CASE WHEN COALESCE(uf_fuente, '') = 'manual'
+                                           THEN uf_comercio ELSE :uf END,
+                        unidades_funcionales_estimadas =
+                            CASE WHEN COALESCE(uf_fuente, '') = 'manual'
+                                 THEN unidades_funcionales_estimadas
+                                 ELSE COALESCE(uf_vivienda, 0) + :uf END,
+                        uf_fuente = CASE WHEN COALESCE(uf_fuente, '') = 'manual'
+                                         THEN uf_fuente ELSE :sello END,
                         uso_principal = CASE
                             WHEN COALESCE(uso_fuente, '') = 'manual' THEN uso_principal
                             WHEN uso_principal = 'residencial' THEN 'mixto'
                             WHEN uso_principal IN ('comercial','mixto') THEN uso_principal
                             ELSE 'comercial' END,
                         uso_fuente = CASE WHEN COALESCE(uso_fuente, '') = 'manual'
-                                          THEN uso_fuente ELSE 'cadastur' END
+                                          THEN uso_fuente ELSE :sello END
                     WHERE parcela_id = :pid
-                """), {"uf": uf, "pid": pid})
+                """), {"uf": uf, "pid": pid, "sello": sello})
 
     _tg(f"🏨 <b>Hoteles {out.municipio}</b>: {out.hoteles_en_zona} en zona "
         f"({out.por_fuente}), {out.vinculados_parcela} en parcela, {out.cerrados} cerrados. "

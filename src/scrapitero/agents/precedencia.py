@@ -21,9 +21,20 @@ from __future__ import annotations
 #                   OSM). Existe desde ago-2026, cuando `_agregar_uf` pasó a contar las dos:
 #                   seguir sellando 'overture' declaraba mal el origen en el CSV del cliente,
 #                   el mismo modo de falla que las parcelas argentinas selladas 'cadastur'
-#   cadastur      → habitaciones de hotel (fuente oficial)
+#   cadastur      → habitaciones de hotel con conteo EXACTO (padrón oficial / OSM `rooms` /
+#                   carga manual). Sólo cuando el número es real: ver `hotel_min`
+#   hotel_min     → piso de UF por hotel CONFIRMADO pero SIN conteo de habitaciones. Es el
+#                   `GREATEST(COALESCE(habitaciones,1),1)` del fetcher: alguien vio el hotel,
+#                   nadie contó los cuartos. Existe desde ago-2026, cuando se midió que en
+#                   Argentina **ningún** hotel tiene habitaciones —no hay Cadastur ni padrón
+#                   hotelero descargable— y sin embargo 4 parcelas de Malvinas salían selladas
+#                   'cadastur', declarando un padrón brasilero que el pipeline no consultó ni
+#                   podía consultar. El número (1) estaba bien; la etiqueta mentía, y encima
+#                   le daba a un piso la protección de un conteo oficial, con lo que ninguna
+#                   fuente mejor podía corregirlo. Mismo modo de falla que 'overture' → 'poi'
 #   shopping_min  → piso de UF=1 que pone ParcelaCategoria a un shopping
-UF_FUENTES_PROTEGIDAS = "('manual','google','overture','poi','cadastur','shopping_min')"
+UF_FUENTES_PROTEGIDAS = ("('manual','google','overture','poi','cadastur','hotel_min',"
+                         "'shopping_min')")
 
 # Sellos que `_agregar_uf` SÍ puede reescribir aunque estén protegidos: los suyos. Sin esto
 # el agente se auto-bloquea con el sello que él mismo dejó y no puede refrescar su conteo en
@@ -43,6 +54,8 @@ DIRECCION_FUENTE_PROTEGIDA = "manual"
 #   google       → GooglePlacesFetcher
 #   clasificador → UsoClassifier (catastro + Places)
 #   bci          → el BCI declara el uso de cada unidad (Brasil)
-#   cadastur     → hotel oficial
+#   cadastur     → hotel con habitaciones exactas
+#   hotel_min    → hotel confirmado sin conteo de habitaciones (ver arriba). El USO igual es
+#                  firme: que no sepamos cuántos cuartos tiene no cambia que ahí hay un hotel
 USO_FUENTES_PROTEGIDAS = ("('manual','overture','poi','google','clasificador',"
-                          "'bci','cadastur')")
+                          "'bci','cadastur','hotel_min')")

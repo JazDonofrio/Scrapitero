@@ -394,24 +394,31 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
         #     cuenta unidades del inmueble, no habitaciones).
         #   - `google`   → conteo real de comercios de Places (fuente autoritativa de
         #     `uf_comercio` según el flujo).
+        #   - `hotel_min`    → piso de UF por hotel confirmado SIN conteo de habitaciones
+        #     (ago-2026). Va con `cadastur` porque protege lo mismo: que el BCI no borre
+        #     "acá hay un hotel" al re-parsear.
         #   - `shopping_min` → piso de UF=1 de ParcelaCategoria para un SHOPPING.
+        # ⚠ Esta lista está COPIADA a mano y ya quedó corta: `precedencia.py` protege además
+        # `overture`/`poi` (conteo real de comercios) y este UPDATE los pisa. No se unificó
+        # acá porque la constante compartida incluye `'bci'` y el parser se auto-bloquearía
+        # al re-parsear. Pendiente: el mismo tratamiento que `UF_FUENTES_POI`.
         # El uso va con la misma lista: si el hotel abierto hace comercial a la
         # parcela, el BCI no debe devolverla a vacante/residencial.
         conn.execute(text("""
             UPDATE parcelas SET
-                uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','google')
+                uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
                                               THEN uso_principal ELSE COALESCE(:uso, uso_principal) END,
-                uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','google')
+                uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
                                               THEN uso_fuente
                                                    WHEN :uso IS NOT NULL THEN 'bci'
                                                    ELSE uso_fuente END,
-                uf_vivienda                 = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                uf_vivienda                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
                                               THEN uf_vivienda ELSE :uf_viv END,
-                uf_comercio                 = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                uf_comercio                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
                                               THEN uf_comercio ELSE :uf_com END,
-                uf_fuente                   = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                uf_fuente                   = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
                                               THEN uf_fuente ELSE 'bci' END,
-                unidades_funcionales_estimadas = CASE WHEN uf_fuente IN ('manual','cadastur','google','shopping_min')
+                unidades_funcionales_estimadas = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
                                               THEN unidades_funcionales_estimadas
                                               ELSE COALESCE(:uf_tot, unidades_funcionales_estimadas) END,
                 area_m2_construida          = COALESCE(:area, area_m2_construida),
