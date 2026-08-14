@@ -727,6 +727,8 @@ async def activity_stream() -> StreamingResponse:
 #   3) uso del catastro/BCI: vacante/sin construir→LOTE VAZIO, residencial→RESIDÊNCIA
 #      (uf_vivienda=1) / APARTAMENTO (>1), industrial→INDÚSTRIA, comercial y mixto→
 #      COMÉRCIO EM GERAL (la taxonomía del cliente no tiene 'MIXTO').
+# "Sin construir" NO es una sola señal: ver las cuatro en `_tipo_edificacion`. Quien agregue
+# un call site tiene que pasar `uf_c` y `huella`, o la parcela argentina vuelve a salir baldía.
 
 def _hotel_tipo_label(t: Optional[str]) -> str:
     t = (t or "").lower()
@@ -879,7 +881,8 @@ def _country_de_survey(conn, survey_id: str) -> str:
 
 
 def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str],
-                      hotel_tipo: Optional[str], manual: Optional[str] = None) -> str:
+                      hotel_tipo: Optional[str], manual: Optional[str] = None,
+                      uf_c=0, huella=None) -> str:
     if manual:                                       # etiqueta forzada a mano → gana a todo
         return manual
     if hotel_tipo:
@@ -888,12 +891,25 @@ def _tipo_edificacion(uso: Optional[str], uf_v, area, descripcion: Optional[str]
         return descripcion.split(",")[0].strip()
     u = (uso or "").lower()
     if u == "vacante":
+        # El catastro AFIRMA que está vacío: se le cree aunque el satélite vea un edificio.
+        # Esa discrepancia es un hallazgo con dueño propio (`uf_sin_declarar`, AlturaFetcher),
+        # no algo que la etiqueta deba resolver por su cuenta.
         return "LOTE VAZIO"
-    # "Hay algo construido" se decide por área construida O por UF: el área es la señal
-    # del BCI brasilero, pero NO todas las fuentes la publican —ARBA (PBA) no la trae—, y
-    # con `not area → LOTE VAZIO` un relevamiento argentino entero salía como baldío
-    # aunque tuviera cientos de UF declaradas (Hurlingham: 441 parcelas, 570 UF).
-    if not area and not (uf_v or 0):
+    # "Hay algo construido" se decide por CUATRO señales, porque ninguna sola cubre los dos
+    # países. Basta que una diga que sí:
+    #   · `area` (construida) — la señal del BCI brasilero. ARBA (PBA) NO la publica: es NULL
+    #     en las 2.059 parcelas de Malvinas.
+    #   · `uf_v` — con `not area → LOTE VAZIO` a secas, un relevamiento argentino entero salía
+    #     baldío aunque tuviera cientos de UF declaradas (Hurlingham: 441 parcelas, 570 UF).
+    #   · `uf_c` — el mismo agujero para la parcela PURAMENTE comercial, que tiene
+    #     `uf_vivienda=0`. Sin esto el popup se contradecía solo: «🏢 LOTE BALDÍO» arriba y
+    #     «Com: ≈ 1» abajo (29 casos en Malvinas).
+    #   · `huella` — m² construidos que ve el satélite (mig. 058). Es la única que alcanza a
+    #     la parcela sin área, sin UF y sin uso clasificado, que en PBA es lo normal.
+    # Medido el 13-ago-2026: 59 parcelas AR salían LOTE BALDÍO, 52 con edificios adentro.
+    # `huella` es NULL cuando el relevamiento no bajó footprints: `> 0` es falso y se cae a
+    # las otras señales, que es el comportamiento viejo. NO tratar el NULL como "vacío".
+    if not area and not (uf_v or 0) and not (uf_c or 0) and not (huella or 0):
         return "LOTE VAZIO"
     if u == "residencial":
         return "APARTAMENTO" if (uf_v or 0) > 1 else "RESIDÊNCIA"
@@ -951,7 +967,10 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
                    ptm.tipo_edificacion AS tipo_manual,
                    -- Número de puerta ESTIMADO (NumeroEstimator, mig. 050): sólo lo tienen las
                    -- parcelas que el catastro dejó sin altura. Se muestra marcado como estimado.
-                   p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza
+                   p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza,
+                   -- m² construidos vistos por satélite (mig. 058): en PBA es la única señal
+                   -- de "hay algo acá", porque ARBA no publica área construida.
+                   p.huella_m2
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
@@ -1007,9 +1026,11 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
             # etiqueta canónica sigue siendo la portuguesa.
             "categoria_uso": r[27] or None,
             "descripcion_uso": _descripcion_localizada(r[28], pais, lang) or None,
-            # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override manual.
+            # Tipo de edificación unificado (1 label de la lista del cliente). r[32]=override
+            # manual, r[36]=huella satelital (m²).
             "tipo_edificacion": _tipo_localizado(
-                _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32]), pais, lang) or None,
+                _tipo_edificacion(r[2], uf_viv, r[11], r[28], r[29], r[32],
+                                  uf_c=uf_com, huella=r[36]), pais, lang) or None,
             # Ítems críticos a los que pertenece la parcela (capas toggleables del mapa). Una
             # parcela puede estar en varias (un edificio de deptos es Edificio Y PH).
             "items": _items_criticos(hotel_tipo=r[29], uf_viv=uf_viv,
@@ -1219,7 +1240,8 @@ async def get_footprints(survey_id: str) -> dict:
                    COALESCE((SELECT h.tipo FROM hoteles h
                        WHERE h.parcela_id = p.parcela_id AND NOT h.cerrado_def
                        ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
-                   ptm.tipo_edificacion AS tipo_manual
+                   ptm.tipo_edificacion AS tipo_manual,
+                   p.uf_comercio, p.huella_m2
             FROM footprints_revision f
             JOIN parcelas p ON p.parcela_id = f.parcela_id
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
@@ -1227,7 +1249,8 @@ async def get_footprints(survey_id: str) -> dict:
         """), {"sid": survey_id}).fetchall()
 
     features = []
-    for geom_gj, source, confidence, area_m2, parcela_id, uso, uf_viv, area_c, descripcion, hotel_tipo, tipo_manual in rows:
+    for (geom_gj, source, confidence, area_m2, parcela_id, uso, uf_viv, area_c, descripcion,
+         hotel_tipo, tipo_manual, uf_com, huella) in rows:
         if not geom_gj:
             continue
         props = {
@@ -1238,7 +1261,8 @@ async def get_footprints(survey_id: str) -> dict:
         }
         if parcela_id:
             props["catastro_tipo_edificacion"] = _tipo_edificacion(
-                uso, uf_viv, area_c, descripcion, hotel_tipo, tipo_manual)
+                uso, uf_viv, area_c, descripcion, hotel_tipo, tipo_manual,
+                uf_c=uf_com, huella=huella)
             props["catastro_uf_vivienda"] = int(uf_viv or 0)
         features.append({
             "type": "Feature",
@@ -1932,7 +1956,8 @@ async def get_parcela_editable(parcela_id: str, lang: Optional[str] = None) -> J
                    p.descripcion_uso,
                    -- al final a propósito: el resto se lee por índice posicional
                    p.centroid_lat, p.centroid_lng, p.ubicacion_source, p.uso_fuente,
-                   COALESCE(reg.country_code, '') AS country_code
+                   COALESCE(reg.country_code, '') AS country_code,
+                   p.huella_m2
             FROM parcelas p
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
             LEFT JOIN regions reg ON reg.region_id = p.region_id
@@ -1951,7 +1976,8 @@ async def get_parcela_editable(parcela_id: str, lang: Optional[str] = None) -> J
         # el tipo que efectivamente muestra la web (override manual > hotel > CNPJ > catastro),
         # traducido al idioma del relevamiento (r[23]=país) igual que en el mapa y el CSV
         "tipo_edificacion": _tipo_localizado(
-            _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16]), r[23], lang) or "",
+            _tipo_edificacion(r[7], uf_v, r[15], r[18], r[17], r[16],
+                              uf_c=uf_c, huella=r[24]), r[23], lang) or "",
         "tipo_manual": _tipo_localizado(r[16], r[23], lang) or "",
         "lat": float(r[19]) if r[19] is not None else None,
         "lng": float(r[20]) if r[20] is not None else None,
@@ -2082,8 +2108,10 @@ async def get_baseline_direccion(direccion_id: str) -> JSONResponse:
     return JSONResponse({
         "ok": True, "direccion_raw": r[0] or "", "calle": r[1] or "", "numero": r[2] or "",
         "uso": r[3] or "", "uf_vivienda": r[4], "uf_comercio": r[5],
-        # sin etiqueta cargada a mano se ofrece la que se deduce del uso, para no arrancar vacío
-        "tipo_edificacion": r[6] or _tipo_edificacion(r[3], r[4], 1, None, None),
+        # sin etiqueta cargada a mano se ofrece la que se deduce del uso, para no arrancar vacío.
+        # Una dirección del baseline no tiene parcela ni geometría, así que no hay huella que
+        # mirar: el `area=1` fijo es lo que evita que caiga en LOTE VAZIO por falta de datos.
+        "tipo_edificacion": r[6] or _tipo_edificacion(r[3], r[4], 1, None, None, uf_c=r[5]),
         "tipo_manual": r[6] or "",
         "lat": float(r[7]) if r[7] is not None else None,
         "lng": float(r[8]) if r[8] is not None else None,
@@ -2911,7 +2939,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                     ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
                 (SELECT ptm.tipo_edificacion FROM parcela_tipo_manual ptm
                     WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual,
-                numero_estimado, numero_estimado_metodo, numero_estimado_confianza
+                numero_estimado, numero_estimado_metodo, numero_estimado_confianza,
+                huella_m2                                       -- mig. 058, ver r[43] abajo
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -2992,9 +3021,11 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 # DSC_LOGRADOURO_NO = número de la dirección
                 r[3] or "",
                 # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
-                # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38], override manual=r[39]
+                # área=r[13], descripción CNPJ=r[36], hotel_tipo=r[38], override manual=r[39],
+                # uf_com=r[10], huella satelital=r[43]
                 _tipo_localizado(
-                    _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39]), pais),
+                    _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39],
+                                      uf_c=r[10], huella=r[43]), pais),
                 r[40] or "", r[41] or "",
                 f"{r[42]:.2f}" if r[42] is not None else "",
             ]

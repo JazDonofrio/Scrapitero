@@ -62,6 +62,7 @@ class FootprintOutput(BaseModel):
     fuente_usada: Optional[str] = None      # google_open_buildings | osm
     footprints_insertados: int = 0
     vinculados_a_parcela: int = 0
+    parcelas_con_huella: int = 0            # con construcción detectada (mig. 058)
     bbox_usado: Optional[str] = None
     pais: Optional[str] = None
     error: Optional[str] = None
@@ -191,6 +192,56 @@ def _link_a_parcelas(region_id: str, survey_id: str) -> int:
         return result.rowcount or 0
 
 
+# Solape mínimo (m²) para que una huella cuente como construcción DE esta parcela. Mismo
+# umbral que las guardas de `OverturePlacesFetcher` y que `IncidenciasReporter`: por debajo
+# es el roce de digitalización del edificio del vecino, no un edificio propio.
+HUELLA_MIN_M2 = 25.0
+
+
+def _calcular_huella_m2(survey_id: str) -> int:
+    """Materializa en `parcelas.huella_m2` los m² construidos que ve el satélite (mig. 058).
+
+    Es la única señal de "acá hay algo construido" que funciona en Argentina: ARBA no publica
+    área construida y una parcela puramente comercial tiene `uf_vivienda=0`, así que sin esto
+    `_tipo_edificacion` la rotula LOTE VAZIO (medido en Malvinas + Hurlingham el 13-ago-2026:
+    59 rotuladas baldío, 52 con edificios adentro).
+
+    Se calcula acá —y no al vuelo en cada consulta— porque el cálculo espacial cuesta ~700 ms
+    por relevamiento y la etiqueta se pide desde el mapa, el panel, el DXF y el CSV.
+
+    **Escribe 0, no NULL, cuando la parcela no tiene ninguna huella.** El NULL queda reservado
+    para "este relevamiento no tiene footprints cargados", que es una afirmación distinta: es
+    la misma distinción que `_link_to_parcelas` hace para decidir si aplicar sus guardas.
+
+    Devuelve cuántas parcelas quedaron con construcción detectada.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE parcelas p SET huella_m2 = COALESCE(s.m2, 0)
+            FROM parcelas base
+            LEFT JOIN LATERAL (
+                -- ST_Union antes de medir: dos huellas de la misma fuente pueden pisarse
+                -- (un galpón digitalizado en dos piezas) y sumar los solapes por separado
+                -- inflaría el área construida.
+                SELECT ST_Area(ST_Union(ST_Intersection(base.geometry,
+                                                        f.footprint))::geography) AS m2
+                FROM footprints_revision f
+                WHERE f.survey_id = base.survey_id
+                  AND ST_Intersects(base.geometry, f.footprint)
+                  AND ST_Area(ST_Intersection(base.geometry,
+                                              f.footprint)::geography) >= :amin
+            ) s ON TRUE
+            WHERE base.survey_id = CAST(:sid AS uuid)
+              AND base.geometry IS NOT NULL
+              AND p.parcela_id = base.parcela_id
+        """), {"sid": survey_id, "amin": HUELLA_MIN_M2})
+        return conn.execute(text(
+            "SELECT count(*) FROM parcelas "
+            "WHERE survey_id = CAST(:sid AS uuid) AND COALESCE(huella_m2, 0) > 0"
+        ), {"sid": survey_id}).scalar() or 0
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────────────
 
 @agent_run
@@ -240,15 +291,18 @@ def run(input: FootprintInput) -> FootprintOutput:
 
     insertados = _guardar(rows, fuente, input.region_id, input.survey_id)
     vinculados = _link_a_parcelas(input.region_id, input.survey_id)
+    con_huella = _calcular_huella_m2(input.survey_id)
 
     logger.info(f"FootprintFetcher {input.region_id}: fuente={fuente} "
-                f"insertados={insertados} vinculados={vinculados}")
+                f"insertados={insertados} vinculados={vinculados} "
+                f"parcelas_con_huella={con_huella}")
 
     return FootprintOutput(
         ok=True,
         fuente_usada=fuente,
         footprints_insertados=insertados,
         vinculados_a_parcela=vinculados,
+        parcelas_con_huella=con_huella,
         bbox_usado=bbox_str,
         pais=iso3,
     )

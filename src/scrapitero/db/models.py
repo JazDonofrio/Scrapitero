@@ -131,6 +131,11 @@ class Parcela(Base):
     uso_principal: Mapped[Optional[str]] = mapped_column(String(30))
     # "residencial" | "comercial" | "mixto" | "industrial" | "vacante"
     footprints_count: Mapped[int] = mapped_column(Integer, default=0)
+    # m² construidos que ve el satélite dentro de la parcela (migración 058). NULL = el
+    # relevamiento no tiene footprints cargados; 0 = los tiene y la parcela está vacía.
+    # No confundir con `footprints_count`, que lo escribe UnidadesEstimator para su propio
+    # cálculo de UF y queda en 0 donde el estimador no corrió.
+    huella_m2: Mapped[Optional[float]] = mapped_column(Float)
     pisos_estimados_max: Mapped[Optional[int]] = mapped_column(Integer)
     unidades_funcionales_estimadas: Mapped[Optional[int]] = mapped_column(Integer)
     uf_vivienda: Mapped[Optional[int]] = mapped_column(Integer)   # migración 004

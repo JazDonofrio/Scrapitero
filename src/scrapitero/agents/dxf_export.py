@@ -136,7 +136,8 @@ def _consultar(survey_id: str, solo_con_uf: bool,
                    WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual,
                 COALESCE((SELECT h.tipo FROM hoteles h
                    WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
-                   ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo
+                   ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
+                huella_m2                       -- m² construidos por satélite (mig. 058)
             FROM parcelas
             WHERE survey_id = :sid AND geometry IS NOT NULL {filtro_uf}
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -153,16 +154,22 @@ def _consultar(survey_id: str, solo_con_uf: bool,
     return list(rows), meta[0], (int(est[0] or 0), int(est[1] or 0))
 
 
-def _tipo_label(uso, uf_v, area, descripcion, hotel_tipo, manual) -> str:
+def _tipo_label(uso, uf_v, area, descripcion, hotel_tipo, manual, uf_c=0, huella=None) -> str:
     """Etiqueta de la taxonomía del cliente.
 
     Se reusa el `_tipo_edificacion` de la web para no mantener dos taxonomías que se
     van a separar sola; si el import falla (la web arrastra FastAPI), cae a una
     derivación mínima equivalente para los casos del catastro.
+
+    `uf_c` y `huella` (m² construidos por satélite, mig. 058) son las señales que evitan
+    rotular LOTE VAZIO una parcela argentina construida: ARBA no publica `area` y una
+    parcela puramente comercial tiene `uf_v=0`. El fallback no las necesita porque nunca
+    dedujo baldío por falta de área: rotula por `uso` y, si no lo conoce, no rotula.
     """
     try:
         from scrapitero.web.app import _tipo_edificacion
-        return _tipo_edificacion(uso, uf_v, area, descripcion, hotel_tipo, manual)
+        return _tipo_edificacion(uso, uf_v, area, descripcion, hotel_tipo, manual,
+                                 uf_c=uf_c, huella=huella)
     except Exception:
         if manual:
             return manual
@@ -240,7 +247,7 @@ def run(input: DXFInput) -> DXFOutput:
     for row, geom in zip(rows, geoms):
         (_, calle, numero, complemento, barrio, cep, uf_v, uf_c, uf_fuente, uso,
          cca, area_t, area_c, pisos, num_est, num_est_conf, _categoria, descripcion,
-         establecimiento_id, est_tipo, est_nombre, tipo_manual, hotel_tipo) = row
+         establecimiento_id, est_tipo, est_nombre, tipo_manual, hotel_tipo, huella) = row
 
         anillos = _anillos(geom)
         if not anillos:
@@ -263,7 +270,8 @@ def run(input: DXFInput) -> DXFOutput:
         if not num and num_est and (num_est_conf or 0) >= 0.4:
             num = f"({num_est})"
         direccion = " ".join(x for x in [calle or "", num] if x).strip()
-        tipo = _tipo_label(uso, uf_v, area_c, descripcion, hotel_tipo or None, tipo_manual)
+        tipo = _tipo_label(uso, uf_v, area_c, descripcion, hotel_tipo or None, tipo_manual,
+                           uf_c=uf_c, huella=huella)
 
         # Rótulos apilados sobre el centro de la parcela, cada uno en su capa.
         # **Sólo el número**, no la calle: el nombre se repite en toda la cuadra (es
