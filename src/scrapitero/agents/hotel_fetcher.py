@@ -239,6 +239,96 @@ def _cargar_descartados(engine, region_id: str) -> list[dict]:
              "lat": f[2], "lng": f[3]} for f in filas]
 
 
+def _parear_overrides_sin_cnpj(conn, tabla: str, columnas: str, region_id: str,
+                               hotel_ids: list, filtro_hotel: str = "",
+                               max_dist_m: float = 200.0) -> list[tuple[str, object]]:
+    """Aparea overrides manuales SIN CNPJ con los hoteles recién reinsertados.
+
+    **Por qué existe.** Las tablas de override están indexadas por CNPJ, que en Brasil sale
+    del padrón de la Receita y **en Argentina no existe** (no hay padrón hotelero descargable
+    y ni Google ni OSM publican identificador fiscal). El re-apply era `h.cnpj = m.cnpj`, y
+    con los dos lados en NULL eso **no matchea nunca** (`NULL = NULL` es NULL, no TRUE). Como
+    `run` BORRA y reinserta las filas de `hoteles` en cada corrida, toda corrección manual se
+    perdía en silencio fuera de Brasil. Medido el 14-ago-2026 en Malvinas: 7 hoteles, los 7
+    sin CNPJ, 0 overrides recuperables.
+
+    **El criterio es el de `_esta_descartado`**: nombre normalizado idéntico + ≤`max_dist_m`.
+    No se inventa uno nuevo — `hotel_descartado` ya tenía esta clave alternativa justamente
+    porque los hoteles de Google no traen CNPJ. La distancia hace falta además del nombre:
+    dos hoteles homónimos en una región son plausibles y el override de uno no puede irse al
+    otro.
+
+    Se aparea **en Python y no en SQL** a propósito: así el nombre pasa por `_norm`, la única
+    implementación, en vez de una traducción de acentos escrita a mano en SQL que se
+    desincronizaría y rompería el match sin avisar.
+
+    Devuelve `[(hotel_id, fila_override), …]`; cada llamador aplica lo suyo.
+    """
+    if not hotel_ids:
+        return []
+    overrides = conn.execute(text(f"""
+        SELECT nombre_norm, lat, lng, {columnas} FROM {tabla}
+        WHERE region_id = :r AND cnpj IS NULL AND nombre_norm IS NOT NULL
+    """), {"r": region_id}).fetchall()
+    if not overrides:
+        return []
+    candidatos = conn.execute(text(f"""
+        SELECT hotel_id::text, nombre, ST_Y(location::geometry), ST_X(location::geometry)
+        FROM hoteles
+        WHERE hotel_id::text = ANY(:ids) AND cnpj IS NULL {filtro_hotel}
+    """), {"ids": hotel_ids}).fetchall()
+
+    pares = []
+    for hid, nombre, lat, lng in candidatos:
+        hn = _norm(nombre)
+        if not hn:
+            continue
+        for o in overrides:
+            if o.nombre_norm != hn:
+                continue
+            # Sin coordenada de un lado no se puede exigir cercanía: manda el nombre, que ya
+            # es único por región en la tabla (índices parciales de las mig. 059 y 060).
+            if (o.lat is not None and lat is not None
+                    and _dist_m(lat, lng, o.lat, o.lng) > max_dist_m):
+                continue
+            pares.append((hid, o))
+            break
+    return pares
+
+
+def _reaplicar_habitaciones_sin_cnpj(conn, region_id: str, hotel_ids: list) -> int:
+    """Habitaciones cargadas a mano, para los hoteles sin CNPJ. Ver `_parear_overrides_sin_cnpj`."""
+    pares = _parear_overrides_sin_cnpj(
+        conn, "hotel_habitaciones_manual", "habitaciones", region_id, hotel_ids,
+        filtro_hotel="AND habitaciones IS NULL")
+    for hid, o in pares:
+        conn.execute(text("UPDATE hoteles SET habitaciones = :n, habitaciones_fuente = 'manual' "
+                          "WHERE hotel_id::text = :h"), {"n": o.habitaciones, "h": hid})
+    if pares:
+        logger.info(f"HotelFetcher: {len(pares)} hotel(es) sin CNPJ recuperaron sus "
+                    f"habitaciones cargadas a mano (apareo por nombre + proximidad)")
+    return len(pares)
+
+
+def _reaplicar_cerrado_sin_cnpj(conn, region_id: str, hotel_ids: list) -> int:
+    """Abierto/cerrado forzado a mano, para los hoteles sin CNPJ.
+
+    Perderlo es peor que perder las habitaciones: un hotel que el operador cerró y que la
+    fuente sigue dando abierto **revive en cada corrida y vuelve a aportar `uf_comercio` a su
+    parcela**, o sea que se mete solo en el entregable. Ver `_parear_overrides_sin_cnpj`.
+    """
+    pares = _parear_overrides_sin_cnpj(
+        conn, "hotel_cerrado_manual", "cerrado, nota", region_id, hotel_ids)
+    for hid, o in pares:
+        conn.execute(text("UPDATE hoteles SET cerrado_def = :c, nota = :n "
+                          "WHERE hotel_id::text = :h"),
+                     {"c": o.cerrado, "n": o.nota, "h": hid})
+    if pares:
+        logger.info(f"HotelFetcher: {len(pares)} hotel(es) sin CNPJ recuperaron su "
+                    f"abierto/cerrado forzado a mano")
+    return len(pares)
+
+
 def _esta_descartado(h: dict, descartados: list[dict]) -> bool:
     """¿`h` está en la lista de descartes? Por CNPJ (si ambos lo tienen); si no, por
     nombre normalizado idéntico + proximidad ≤200 m (para los sin-CNPJ de Google/OSM)."""
@@ -1110,19 +1200,42 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             SET cerrado_def = m.cerrado, nota = m.nota
             FROM hotel_cerrado_manual m
             WHERE h.hotel_id::text = ANY(:ids)
-              AND m.region_id = :rid AND h.cnpj = m.cnpj
+              AND m.region_id = :rid AND m.cnpj IS NOT NULL AND h.cnpj = m.cnpj
         """), {"rid": input.region_id, "ids": insertados})
+        # Y los sin CNPJ, que hasta la mig. 060 revivían en cada corrida (ver el helper).
+        _reaplicar_cerrado_sin_cnpj(conn, input.region_id, insertados)
 
         # Habitaciones cargadas a MANO (asistencia humana): rellenan donde no hay dato
-        # exacto (Cadastur UHs / OSM rooms). Sobreviven a re-cortes (tabla por CNPJ).
-        # Prioridad: Cadastur/OSM (exacto) > manual > estimación BCI.
+        # exacto (Cadastur UHs / OSM rooms). Prioridad: Cadastur/OSM (exacto) > manual >
+        # estimación BCI.
+        #
+        # ⚠ **Dos formas de aparear, y la segunda es la que hace que esto sirva fuera de
+        # Brasil** (mig. 059). El apareo era sólo `h.cnpj = m.cnpj`, que en Argentina no
+        # matchea NUNCA: no hay identificador fiscal del hotel (ni padrón descargable, ni
+        # Google, ni OSM lo publican), así que los dos lados son NULL y `NULL = NULL` no es
+        # TRUE. Como este UPDATE corre justo después de que el agente BORRA y reinserta las
+        # filas de `hoteles`, el número que el operador había cargado se perdía en cada
+        # corrida, en silencio. Medido el 14-ago-2026 en Malvinas: 7 hoteles, los 7 sin CNPJ.
+        #
+        # Sin CNPJ se aparea por **nombre normalizado + ≤200 m**, exactamente el mismo
+        # criterio que `_esta_descartado` usa para reconocer un descarte de Google/OSM entre
+        # corridas. La distancia hace falta además del nombre: dos hoteles homónimos en una
+        # misma región son plausibles y el override de uno no puede irse al otro.
+        # Los CON CNPJ siguen resolviéndose en SQL, igual que siempre.
         conn.execute(text("""
             UPDATE hoteles h
             SET habitaciones = m.habitaciones, habitaciones_fuente = 'manual'
             FROM hotel_habitaciones_manual m
             WHERE h.hotel_id::text = ANY(:ids)
-              AND m.region_id = :rid AND h.cnpj = m.cnpj AND h.habitaciones IS NULL
+              AND m.region_id = :rid AND h.habitaciones IS NULL
+              AND m.cnpj IS NOT NULL AND h.cnpj = m.cnpj
         """), {"rid": input.region_id, "ids": insertados})
+
+        # Los SIN CNPJ se aparean en Python y no en SQL, a propósito: así el nombre se
+        # normaliza con `_norm` —la única implementación— en vez de una traducción de
+        # acentos escrita a mano en SQL, que es justamente el tipo de copia que se
+        # desincroniza y rompe el match sin avisar.
+        _reaplicar_habitaciones_sin_cnpj(conn, input.region_id, insertados)
 
         # ESTIMACIÓN de habitaciones por área del BCI cuando no hay dato exacto
         # (Cadastur UHs / OSM rooms). Proxy: area_construida / m2_por_habitacion.

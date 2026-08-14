@@ -1497,10 +1497,72 @@ async def hoteles_asistencia(survey_id: str) -> JSONResponse:
                          "hoteles": hoteles, "total": len(hoteles)})
 
 
+def _norm_hotel(s) -> str:
+    """Nombre de hotel normalizado para aparear entre corridas (sin acentos, lower).
+
+    Importa `hotel_fetcher._norm` en vez de re-implementarlo: es la misma normalización que
+    aplica el agente al leer `hotel_descartado` y `hotel_habitaciones_manual`, y si las dos
+    se separan los overrides dejan de matchear en silencio. El import es perezoso como el
+    resto de los de agentes en este módulo.
+    """
+    from scrapitero.agents.hotel_fetcher import _norm
+    return _norm(s)
+
+
+def _guardar_habitaciones_manual(conn, hotel_id: str, n: int,
+                                 autor: str = "operador") -> tuple[bool, str]:
+    """Carga a mano las habitaciones de un hotel y las respalda para que sobrevivan al 🏨.
+
+    ÚNICO lugar donde se escribe `hotel_habitaciones_manual`: lo comparten el endpoint de la
+    asistencia, la resolución de la incidencia y el formulario de ubicación. Antes eran tres
+    copias del mismo INSERT y las tres tenían el mismo bug.
+
+    **El respaldo se guarda por CNPJ o, si no hay, por nombre normalizado + coordenada**
+    (mig. 059). El `if cnpj:` de antes era silenciosamente fatal fuera de Brasil: en
+    Argentina **no existe** identificador fiscal del hotel —no hay padrón descargable y ni
+    Google ni OSM lo publican—, así que la rama no corría nunca, no se guardaba nada, y el
+    número cargado desaparecía en el siguiente re-corte sin dejar rastro. La clave
+    alternativa es la MISMA que ya usa `hotel_descartado` para los hoteles de Google/OSM.
+    """
+    row = conn.execute(text(
+        "SELECT region_id, cnpj, nombre, ST_Y(location::geometry), ST_X(location::geometry) "
+        "FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id}).fetchone()
+    if not row:
+        return False, "Hotel no encontrado"
+    region_id, cnpj, nombre, lat, lng = row
+    conn.execute(text("UPDATE hoteles SET habitaciones = :n, habitaciones_fuente = 'manual' "
+                      "WHERE hotel_id::text = :h"), {"n": n, "h": hotel_id})
+    if cnpj:
+        conn.execute(text("""
+            INSERT INTO hotel_habitaciones_manual
+                (region_id, cnpj, nombre_norm, lat, lng, habitaciones, autor)
+            VALUES (:r, :c, :nn, :lat, :lng, :n, :a)
+            ON CONFLICT (region_id, cnpj) WHERE cnpj IS NOT NULL
+            DO UPDATE SET habitaciones = :n, nombre_norm = :nn, lat = :lat, lng = :lng,
+                          autor = :a, actualizado_at = now()
+        """), {"r": region_id, "c": cnpj, "nn": _norm_hotel(nombre) or None,
+               "lat": lat, "lng": lng, "n": n, "a": autor})
+        return True, "cnpj"
+    nn = _norm_hotel(nombre)
+    if not nn:
+        # Sin CNPJ y sin nombre no hay con qué re-aparearlo después: se avisa en vez de
+        # guardar una fila que nunca va a servir (y que el CHECK de la 059 rechaza).
+        return True, "sin_clave"
+    conn.execute(text("""
+        INSERT INTO hotel_habitaciones_manual
+            (region_id, cnpj, nombre_norm, lat, lng, habitaciones, autor)
+        VALUES (:r, NULL, :nn, :lat, :lng, :n, :a)
+        ON CONFLICT (region_id, nombre_norm) WHERE cnpj IS NULL
+        DO UPDATE SET habitaciones = :n, lat = :lat, lng = :lng,
+                      autor = :a, actualizado_at = now()
+    """), {"r": region_id, "nn": nn, "lat": lat, "lng": lng, "n": n, "a": autor})
+    return True, "nombre"
+
+
 @app.post("/api/hoteles/{hotel_id}/habitaciones")
 async def set_habitaciones_manual(hotel_id: str, request: Request) -> JSONResponse:
-    """Carga manual de habitaciones (asistencia humana). Las marca `manual` y las persiste
-    por CNPJ en `hotel_habitaciones_manual` para que sobrevivan a un re-corte del botón 🏨."""
+    """Carga manual de habitaciones (asistencia humana). Las marca `manual` y las respalda
+    en `hotel_habitaciones_manual` para que sobrevivan a un re-corte del botón 🏨."""
     try:
         body = await request.json()
         n = int(body.get("habitaciones"))
@@ -1510,53 +1572,58 @@ async def set_habitaciones_manual(hotel_id: str, request: Request) -> JSONRespon
         return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"}, status_code=400)
     engine = get_engine()
     with engine.begin() as conn:
-        row = conn.execute(text(
-            "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
-            {"h": hotel_id}).fetchone()
-        if not row:
-            return JSONResponse({"ok": False, "error": "Hotel no encontrado"}, status_code=404)
-        region_id, cnpj = row
-        conn.execute(text(
-            "UPDATE hoteles SET habitaciones = :n, habitaciones_fuente = 'manual' "
-            "WHERE hotel_id::text = :h"), {"n": n, "h": hotel_id})
-        if cnpj:
-            conn.execute(text("""
-                INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
-                VALUES (:r, :c, :n, 'operador')
-                ON CONFLICT (region_id, cnpj)
-                DO UPDATE SET habitaciones = :n, actualizado_at = now()
-            """), {"r": region_id, "c": cnpj, "n": n})
-    return JSONResponse({"ok": True, "habitaciones": n})
+        ok, detalle = _guardar_habitaciones_manual(conn, hotel_id, n)
+        if not ok:
+            return JSONResponse({"ok": False, "error": detalle}, status_code=404)
+    return JSONResponse({"ok": True, "habitaciones": n, "respaldo": detalle})
 
 
 def _marcar_cerrado(conn, hotel_id: str, cerrado: bool, nota: str | None) -> tuple[bool, object]:
     """Fuerza a mano el abierto/cerrado de un hotel y le deja una nota (mig. 048).
 
     Extraído para que lo compartan el endpoint del mapa y el del reporte de incidencias
-    (misma transacción del caller). El override se guarda por `(region_id, cnpj)` en
-    `hotel_cerrado_manual`, que `HotelFetcher` re-aplica al final de cada corrida — si no,
-    el próximo botón 🏨 lo reabriría porque Receita lo sigue dando ATIVA.
+    (misma transacción del caller). El override se guarda en `hotel_cerrado_manual`, que
+    `HotelFetcher` re-aplica al final de cada corrida — si no, el próximo botón 🏨 lo
+    reabriría porque Receita lo sigue dando ATIVA.
+
+    **El respaldo va por CNPJ o, si no hay, por nombre normalizado + coordenada** (mig. 060,
+    misma clave alternativa que `hotel_descartado` y que las habitaciones de la 059). El
+    `if cnpj:` de antes no corría nunca fuera de Brasil, donde el hotel no tiene identificador
+    fiscal, y ahí perder el override era **peor que perder un dato**: el hotel que el operador
+    cerró revivía en la corrida siguiente y volvía a aportar `uf_comercio` a su parcela, o sea
+    se metía solo en el entregable.
 
     Devuelve (ok, region_id | mensaje_error)."""
     row = conn.execute(text(
-        "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
-        {"h": hotel_id}).fetchone()
+        "SELECT region_id, cnpj, nombre, ST_Y(location::geometry), ST_X(location::geometry) "
+        "FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id}).fetchone()
     if not row:
         return False, "Hotel no encontrado"
-    region_id, cnpj = row
+    region_id, cnpj, nombre, lat, lng = row
     conn.execute(text(
         "UPDATE hoteles SET cerrado_def = :cerr, nota = :nota WHERE hotel_id::text = :h"),
         {"cerr": cerrado, "nota": nota, "h": hotel_id})
-    # Sin CNPJ (típico de Google) el override no tiene clave natural durable: el cambio vale
-    # para el estado actual pero un re-corte del botón 🏨 lo pierde. Mismo límite que las
-    # habitaciones manuales.
+    nn = _norm_hotel(nombre) or None
     if cnpj:
         conn.execute(text("""
-            INSERT INTO hotel_cerrado_manual (region_id, cnpj, cerrado, nota, autor)
-            VALUES (:r, :c, :cerr, :nota, 'operador')
-            ON CONFLICT (region_id, cnpj)
-            DO UPDATE SET cerrado = :cerr, nota = :nota, actualizado_at = now()
-        """), {"r": region_id, "c": cnpj, "cerr": cerrado, "nota": nota})
+            INSERT INTO hotel_cerrado_manual
+                (region_id, cnpj, nombre_norm, lat, lng, cerrado, nota, autor)
+            VALUES (:r, :c, :nn, :lat, :lng, :cerr, :nota, 'operador')
+            ON CONFLICT (region_id, cnpj) WHERE cnpj IS NOT NULL
+            DO UPDATE SET cerrado = :cerr, nota = :nota, nombre_norm = :nn,
+                          lat = :lat, lng = :lng, actualizado_at = now()
+        """), {"r": region_id, "c": cnpj, "nn": nn, "lat": lat, "lng": lng,
+               "cerr": cerrado, "nota": nota})
+    elif nn:
+        conn.execute(text("""
+            INSERT INTO hotel_cerrado_manual
+                (region_id, cnpj, nombre_norm, lat, lng, cerrado, nota, autor)
+            VALUES (:r, NULL, :nn, :lat, :lng, :cerr, :nota, 'operador')
+            ON CONFLICT (region_id, nombre_norm) WHERE cnpj IS NULL
+            DO UPDATE SET cerrado = :cerr, nota = :nota, lat = :lat, lng = :lng,
+                          actualizado_at = now()
+        """), {"r": region_id, "nn": nn, "lat": lat, "lng": lng,
+               "cerr": cerrado, "nota": nota})
     return True, region_id
 
 
@@ -1727,12 +1794,10 @@ def _descartar_hotel(conn, hotel_id: str, tipo: str) -> tuple[bool, object]:
     if not row:
         return False, "Hotel no encontrado"
     region_id, survey_id, cnpj, nombre, parcela_id, lat, lng = row
-    import unicodedata
-    # misma normalización que hotel_fetcher._norm (sin acentos, lower) para que el
-    # filtro de descarte matchee en la próxima corrida.
-    nombre_norm = " ".join("".join(
-        c for c in unicodedata.normalize("NFKD", str(nombre or ""))
-        if not unicodedata.combining(c)).lower().split())
+    # La normalización tiene que ser LA MISMA que aplica el agente al releer el descarte,
+    # o el filtro no matchea en la próxima corrida: por eso sale del helper y no de una
+    # copia local (acá había una re-implementación de `hotel_fetcher._norm`).
+    nombre_norm = _norm_hotel(nombre)
     # Descarte = memoria de "no es hotel" + punto de comercio a dibujar en su coordenada.
     # HotelFetcher lo lee y filtra en la próxima corrida (por CNPJ si lo hay; si no
     # —Google—, por nombre normalizado + proximidad). El mapa lo dibuja como comercio.
@@ -2254,22 +2319,10 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
             if n < 0:
                 return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"},
                                     status_code=400)
-            h = conn.execute(text(
-                "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
-                {"h": hotel_id}).fetchone()
-            if not h:
+            ok, detalle = _guardar_habitaciones_manual(conn, hotel_id, n)
+            if not ok:
                 return JSONResponse({"ok": False, "error": "El hotel ya no existe (re-corré 🏨)"},
                                     status_code=409)
-            conn.execute(text("UPDATE hoteles SET habitaciones = :n, "
-                              "habitaciones_fuente = 'manual' WHERE hotel_id::text = :h"),
-                         {"n": n, "h": hotel_id})
-            if h[1]:
-                conn.execute(text("""
-                    INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
-                    VALUES (:r, :c, :n, 'operador')
-                    ON CONFLICT (region_id, cnpj)
-                    DO UPDATE SET habitaciones = :n, actualizado_at = now()
-                """), {"r": h[0], "c": h[1], "n": n})
 
         elif accion == "cerrado":
             # El hotel SÍ es un hotel, pero ya no opera. A diferencia de `no_es_hotel` la fila
@@ -2381,22 +2434,10 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                 if n_hab < 0:
                     return JSONResponse({"ok": False, "error": "habitaciones debe ser ≥ 0"},
                                         status_code=400)
-                h = conn.execute(text(
-                    "SELECT region_id, cnpj FROM hoteles WHERE hotel_id::text = :h"),
-                    {"h": hotel_id}).fetchone()
-                if not h:
+                ok_h, _ = _guardar_habitaciones_manual(conn, hotel_id, n_hab)
+                if not ok_h:
                     return JSONResponse({"ok": False, "error": "El hotel ya no existe (re-corré 🏨)"},
                                         status_code=409)
-                conn.execute(text("UPDATE hoteles SET habitaciones = :n, "
-                                  "habitaciones_fuente = 'manual' WHERE hotel_id::text = :h"),
-                             {"n": n_hab, "h": hotel_id})
-                if h[1]:
-                    conn.execute(text("""
-                        INSERT INTO hotel_habitaciones_manual (region_id, cnpj, habitaciones, autor)
-                        VALUES (:r, :c, :n, 'operador')
-                        ON CONFLICT (region_id, cnpj)
-                        DO UPDATE SET habitaciones = :n, actualizado_at = now()
-                    """), {"r": h[0], "c": h[1], "n": n_hab})
                 aplicados += 1
 
             # ── La coordenada, al objeto que corresponda ─────────────────────────────────
