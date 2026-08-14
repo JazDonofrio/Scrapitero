@@ -761,9 +761,25 @@ TIPOS_EDIFICACION: dict[str, list[str]] = {
           "MOTEL", "ÓRGÃO PÚBLICO", "POSTO DE GASOLINA", "SERVICOS", "SHOPPING",
           "SUPERMERCADO", "UNIVERSIDADE/FACULDADE", "LOTE VAZIO"],
 }
-# categoría (R/C/E) de cada etiqueta, para guardar junto al override manual.
+
+# Etiquetas que NO están en la lista del cliente brasilero y que sólo se ofrecen FUERA de
+# Brasil. La lista de arriba es contrato: agregarle un ítem se lo mete en el desplegable y en
+# el CSV de Várzea Grande, donde el cliente no lo pidió y no sabría qué hacer con él. Pero un
+# relevamiento argentino tiene usos que esa lista no cubre y forzarlos a la etiqueta más
+# parecida miente: una plaza pública no es un LOTE VAZIO (nadie la va a construir ni tiene
+# dueño privado) ni un ESTACIONAMENTO. Caso que lo motivó: la parcela de 8.022 m² de Malvinas
+# que Google bautizó «Calle Juan» —la misma en la que caía el Burger King del shopping— es la
+# plaza del complejo. Se guardan en portugués igual que el resto, para que la DB siga
+# comparable entre países.
+TIPOS_EDIFICACION_EXTRA: dict[str, list[str]] = {
+    "E": ["PRAÇA"],
+}
+# categoría (R/C/E) de cada etiqueta, para guardar junto al override manual. Incluye las
+# extra: si no, `_tipo_canonico` las acepta pero la validación de los endpoints las rebota.
 _TIPO_CATEGORIA: dict[str, str] = {
-    t: cat for cat, ts in TIPOS_EDIFICACION.items() for t in ts}
+    t: cat
+    for tabla in (TIPOS_EDIFICACION, TIPOS_EDIFICACION_EXTRA)
+    for cat, ts in tabla.items() for t in ts}
 
 # ── Localización de la taxonomía (relevamientos fuera de Brasil) ───────────────
 # La lista de arriba es el contrato del cliente BRASILERO y por eso se guarda SIEMPRE
@@ -785,7 +801,14 @@ _TIPO_ES: dict[str, str] = {
     "ESCRITÓRIO DE SERVICOS": "OFICINA DE SERVICIOS",
     "IMOBILIÁRIA": "INMOBILIARIA",
     "INSTITUIÇÃO FINANCEIRA": "ENTIDAD FINANCIERA",
-    "LANCHONETE": "ROTISERÍA",
+    # Una *lanchonete* brasilera NO es una rotisería: no vende comida hecha para llevar, es
+    # el mostrador donde se come un sándwich o se toma un café. Lo confirma quién cae en la
+    # etiqueta — los rubros que la alimentan son `fast_food_restaurant`, `cafe`,
+    # `coffee_shop`, `casual_eatery`, `food_service`, `amenity=ice_cream` — y en Malvinas eso
+    # dio Burger King, KFC, Starbucks, Havanna, Guapaletas y el patio de comidas del
+    # shopping: ni una sola rotisería. El operador leía «ROTISERÍA» en la vereda de un
+    # McDonald's y marcaba el relevamiento como equivocado, con razón.
+    "LANCHONETE": "CAFETERÍA / COMIDAS RÁPIDAS",
     "OFICINA": "TALLER",
     "PADARIA": "PANADERÍA",
     "RESTAURANTE": "RESTAURANTE",
@@ -814,6 +837,9 @@ _TIPO_ES: dict[str, str] = {
     "SHOPPING": "SHOPPING",
     "SUPERMERCADO": "SUPERMERCADO",
     "UNIVERSIDADE/FACULDADE": "UNIVERSIDAD / FACULTAD",
+    # Sólo fuera de Brasil (ver TIPOS_EDIFICACION_EXTRA). «PLAZA» cubre también la plazoleta:
+    # es la misma cosa a otra escala y no hace falta una etiqueta por tamaño.
+    "PRAÇA": "PLAZA",
 }
 # ES → PT, para volver a la etiqueta canónica cuando el operador etiqueta a mano
 # en un relevamiento argentino (lo que se guarda es siempre el portugués).
@@ -863,8 +889,9 @@ def _descripcion_localizada(desc: Optional[str], country_code: Optional[str],
     `ParcelaCategoria` junta en un solo campo las etiquetas de TODOS los establecimientos
     que caen en la parcela, así que no alcanza con pasarla por `_tipo_localizado`: hay que
     traducir cada ítem. Sin esto la tarjeta del mapa mostraba el tipo ya traducido
-    ("🏢 ROTISERÍA") y justo debajo el mismo concepto en portugués ("🏷️ Comercial
-    LANCHONETE"), que en un relevamiento argentino no le dice nada al operador.
+    ("🏢 CAFETERÍA / COMIDAS RÁPIDAS") y justo debajo el mismo concepto en portugués
+    ("🏷️ Comercial LANCHONETE"), que en un relevamiento argentino no le dice nada al
+    operador.
     """
     if not desc or _vocabulario(country_code, lang) == "pt":
         return desc
@@ -1641,15 +1668,23 @@ async def tipos_edificacion(survey_id: Optional[str] = None,
     Con `survey_id` de un relevamiento fuera de Brasil las etiquetas salen en español
     (`_tipo_localizado`); lo que el operador elija vuelve a la etiqueta canónica en
     portugués al guardarse (`_tipo_canonico`), así la DB queda igual en todos los países.
+
+    **Fuera de Brasil se suman `TIPOS_EDIFICACION_EXTRA`** (hoy: PRAÇA). El país lo decide
+    `survey_id`, NO el `?lang=`: mirar Várzea Grande en español no habilita etiquetas que el
+    cliente brasilero no pidió — el idioma es preferencia de pantalla y el país es contrato.
     """
     pais = ""
     if survey_id:
         with get_engine().connect() as conn:
             pais = _country_de_survey(conn, survey_id)
+    extra = {} if (pais or "").upper() == "BRA" else TIPOS_EDIFICACION_EXTRA
     etiquetas = {"R": "Residencial", "C": "Comercial", "E": "Especial"}
     return JSONResponse({"ok": True, "grupos": [
         {"categoria": cat, "titulo": etiquetas[cat],
-         "tipos": [_tipo_localizado(t, pais, lang) for t in TIPOS_EDIFICACION[cat]]}
+         # Sin re-ordenar: la lista del cliente tiene su orden (LOTE VAZIO va último, no
+         # alfabético) y las extra se agregan al final para no mover nada de lugar.
+         "tipos": [_tipo_localizado(t, pais, lang)
+                   for t in TIPOS_EDIFICACION[cat] + extra.get(cat, [])]}
         for cat in ("C", "R", "E")]})     # Comercial primero (lo más común al corregir un falso hotel)
 
 
@@ -2530,6 +2565,150 @@ async def comercios_marcados(survey_id: str) -> JSONResponse:
     puntos = [{"nombre": r[0], "tipo_edificacion": r[1], "categoria": r[2],
                "lat": float(r[3]), "lng": float(r[4]), "cnpj": r[5]} for r in rows]
     return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos)})
+
+
+# POIs que CONTIENEN a los demás: en su lote, el resto son inquilinos y no puntos propios.
+# El orden importa — si un lote tiene varios candidatos gana el primero, y hace falta: en el
+# lote de Terrazas de Mayo hay un SHOPPING y también dos INSTITUICAO ESPORTIVA (Flow Sports,
+# LifeCenter Fitness) que son locales adentro del shopping, no el continente.
+_POI_CONTENEDOR = ("SHOPPING", "UNIVERSIDADE/FACULDADE", "HOSPITAL PÚBLICO",
+                   "HOSPITAL PARTICULAR", "INSTITUICAO ESPORTIVA")
+
+# Excepción al colapso: un edificio APARTE sobre el mismo lote, que se ve desde la calle y no
+# es inquilino de nadie. La estación de servicio del playón de un shopping es el caso testigo
+# — es lo que el operador va a buscar al mapa y lo que reportó como faltante.
+_POI_NO_COLAPSA = ("POSTO DE GASOLINA",)
+
+
+@app.get("/api/surveys/{survey_id}/pois")
+async def survey_pois(survey_id: str, lang: Optional[str] = None) -> JSONResponse:
+    """POIs con etiqueta de la taxonomía (`establecimientos_poi`) en SU coordenada real.
+
+    Existe porque **el recorte catastral esconde cosas que se ven desde la vereda**: la
+    estación de servicio Puma de Malvinas cae adentro del lote de 131.620 m² de Terrazas de
+    Mayo, así que el mapa dibujaba un solo círculo —el del shopping— y la estación, que está
+    pegada al McDonald's, no aparecía por ningún lado. Lo mismo pasa con la cancha dentro del
+    predio de un club o la escuela dentro de un campus: son POIs reales, contados y ubicados,
+    sin lote propio.
+
+    ⚠ **Un lote con un POI CONTENEDOR devuelve UN punto, no N** (`_POI_CONTENEDOR`). Sin
+    esto el shopping quedaba con 19 puntos apilados y el campus de la UNGS con 21, que es
+    ruido: sus locales/dependencias no son cosas separadas, están adentro. El contenedor
+    viaja con `contiene` (los nombres que absorbió) para que el popup los liste. Los de
+    `_POI_NO_COLAPSA` **igual salen con punto propio** y no entran en `contiene`.
+
+    **El colapso es por LOTE, no por edificio.** Probado con footprints y no sirve: el punto
+    de Overture apunta al playón y no al local, así que Burger King, Starbucks, KFC y Questa
+    Pizza dan "fuera del edificio" igual que la Puma. Ese test mide la precisión de la
+    coordenada, no si algo está adentro del shopping.
+
+    Se excluye el POI que una guarda **desvinculó a propósito** (`vinculo_resuelto` con
+    `parcela_id` NULL): ésos están mal ubicados a sabiendas y dibujarlos sería volver a
+    afirmar la coordenada que la guarda descartó. `parcela_id` viaja para que el click en el
+    pin pueda resaltar de qué lote cuelga la UF.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT s.region_id, COALESCE(r.country_code,'') FROM surveys s "
+            "JOIN regions r ON r.region_id = s.region_id WHERE s.survey_id = :s"),
+            {"s": survey_id}).first()
+        if row is None:
+            return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
+        region, pais = row[0], row[1]
+        rows = conn.execute(text("""
+            SELECT e.nombre, e.descripcion, e.categoria, e.lat, e.lng, e.fuente,
+                   e.parcela_id::text,
+                   COALESCE(p.calle, '') AS calle, COALESCE(p.numero, '') AS numero,
+                   p.centroid_lat, p.centroid_lng
+            FROM establecimientos_poi e
+            LEFT JOIN parcelas p ON p.parcela_id = e.parcela_id
+            WHERE e.region_id = :r AND e.lat IS NOT NULL AND e.lng IS NOT NULL
+              AND NOT (e.vinculo_resuelto AND e.parcela_id IS NULL)
+            ORDER BY e.nombre
+        """), {"r": region}).fetchall()
+
+    def _punto(r, contiene: Optional[list] = None) -> dict:
+        return {"nombre": r[0],
+                "descripcion": _tipo_localizado(r[1], pais, lang),
+                "categoria": r[2], "lat": float(r[3]), "lng": float(r[4]),
+                "fuente": r[5], "parcela_id": r[6],
+                "parcela_dir": (f"{r[7]} {r[8]}".strip() or None),
+                "contiene": contiene or []}
+
+    por_lote: dict = {}
+    for r in rows:
+        por_lote.setdefault(r[6], []).append(r)
+
+    def _elegir(cands: list):
+        """Cuál de los candidatos ES el continente. `None` = no se puede saber.
+
+        Con varios candidatos de la misma etiqueta gana el de **OSM**, y no es un desempate
+        arbitrario: OSM mapea el shopping y el campus como POLÍGONO y su punto es el centro
+        de todo el predio, mientras que Overture pone un punto por local o por dependencia
+        (lo mismo que ya documenta `OsmPoiFetcher` sobre por qué *Terrazas de Mayo* aparece
+        a 175 m entre las dos fuentes). Si hay varios de OSM, desempata el más centrado en el
+        lote. En grados al cuadrado: sólo ordena puntos del MISMO lote, donde el coseno de la
+        latitud es igual para todos y no cambia el orden.
+
+        Devuelve `None` cuando todos los candidatos son de Overture, porque ahí no hay forma
+        de distinguir al continente de sus inquilinos: en el campus de la UNGS los 13
+        `college_university` son dependencias sueltas —«Frente NODOCENTE UNGS», «Maestría en
+        Historia Contemporánea», «Ediciones UNGS»— y «Universidad Nacional de General
+        Sarmiento» está entre ellas sin ninguna marca que la distinga, ni por nombre ni por
+        posición (60 a 142 m del centroide, sin orden). Elegir una a dedo pondría un nombre
+        equivocado sobre el predio entero; el que llama arma un punto sintético del lote.
+        """
+        if len(cands) == 1:
+            return cands[0]
+        osm = [g for g in cands if (g[5] or "").startswith("osm")]
+        if not osm:
+            return None
+        cy, cx = cands[0][9], cands[0][10]
+        if cy is None or cx is None:
+            return sorted(osm, key=lambda g: g[0] or "")[0]
+        return sorted(osm, key=lambda g: (float(g[3]) - float(cy)) ** 2
+                                         + (float(g[4]) - float(cx)) ** 2)[0]
+
+    puntos, colapsados = [], 0
+    for pid, grupo in por_lote.items():
+        # Sin lote no hay a qué colapsar: cada uno es su propio punto.
+        cands, etiqueta = [], None
+        if pid and len(grupo) > 1:
+            for et in _POI_CONTENEDOR:
+                cands = [g for g in grupo if g[1] == et]
+                if cands:
+                    etiqueta = et
+                    break
+        if not cands:
+            puntos.extend(_punto(r) for r in grupo)
+            continue
+        contenedor = _elegir(cands)
+        aparte = [r for r in grupo if r is not contenedor and r[1] in _POI_NO_COLAPSA]
+        adentro = [r for r in grupo if r is not contenedor and r not in aparte]
+        if contenedor is not None:
+            puntos.append(_punto(contenedor, [r[0] for r in adentro if r[0]]))
+        else:
+            # Punto SINTÉTICO del lote: se sabe que hay un continente y no cuál de los POIs
+            # es. Se lo nombra por la dirección del lote y se lo pone en su centroide, que es
+            # lo único que sí se sabe. Todos los candidatos quedan listados adentro.
+            ref = grupo[0]
+            lat = float(ref[9]) if ref[9] is not None else float(ref[3])
+            lng = float(ref[10]) if ref[10] is not None else float(ref[4])
+            dir_lote = f"{ref[7]} {ref[8]}".strip()
+            puntos.append({
+                "nombre": dir_lote or (_tipo_localizado(etiqueta, pais, lang) or ""),
+                "descripcion": _tipo_localizado(etiqueta, pais, lang),
+                "categoria": cands[0][2], "lat": lat, "lng": lng,
+                "fuente": "lote", "parcela_id": pid, "parcela_dir": dir_lote or None,
+                "contiene": [r[0] for r in adentro if r[0]],
+            })
+        puntos.extend(_punto(r) for r in aparte)
+        colapsados += len(adentro)
+
+    puntos.sort(key=lambda p: (p["nombre"] or ""))
+    return JSONResponse({"ok": True, "puntos": puntos, "total": len(puntos),
+                         "colapsados": colapsados})
 
 
 @app.get("/api/surveys/{survey_id}/manzanas")

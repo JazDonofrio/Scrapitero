@@ -66,6 +66,19 @@
 - UNIVERSIDADE/FACULDADE
 - LOTE VAZIO
 
+### Fuera de Brasil — `TIPOS_EDIFICACION_EXTRA` (NO son del cliente)
+
+Etiquetas que **no** están en la lista de arriba y que `GET /api/tipos-edificacion` ofrece
+**sólo si el survey no es de Brasil**. La lista del cliente es contrato: meterle un ítem se lo
+mete también en el desplegable y en el CSV de Várzea Grande, donde nadie lo pidió. Pero un
+relevamiento argentino tiene usos que esa lista no cubre, y forzarlos a la etiqueta más
+parecida miente. El país lo decide el `survey_id`, **no el `?lang=`**: mirar VG en español no
+habilita etiquetas nuevas.
+
+| Etiqueta (canónica, PT) | Cat. | ES | Por qué |
+|---|---|---|---|
+| PRAÇA | E | PLAZA | Una plaza pública no es `LOTE VAZIO` (nadie la va a construir, no tiene dueño privado) ni `ESTACIONAMENTO`. Caso: la parcela de 8.022 m² de Malvinas que Google bautizó «Calle Juan» —la misma donde caía el Burger King del shopping— es la plaza del complejo. «PLAZA» cubre también la plazoleta: es la misma cosa a otra escala. |
+
 ## Prioridad de asignación
 
 `_tipo_edificacion` resuelve el label por este orden (gana el primero que aplica):

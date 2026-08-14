@@ -718,6 +718,13 @@ var I18N_PT = {
   'Relev. anterior': 'Lev. anterior',
   'nuevo': 'novo',
   '{a} dir → {b} parcelas · en esta zona': '{a} end. → {b} lotes · nesta zona',
+  'Referencias': 'Referências',
+  'Mostrar las referencias': 'Mostrar as referências',
+  'Cerrar las referencias (tapan el selector de mapa)':
+    'Fechar as referências (tapam o seletor de mapa)',
+  'Su UF se cuenta en el lote': 'Sua UF é contada no lote',
+  'sin lote asignado': 'sem lote atribuído',
+  '{n} adentro': '{n} dentro',
 
   /* ── Listado, actividad y sub-zona ──────────────────────────────────────── */
   'Sin actividad registrada todavía.': 'Ainda sem atividade registrada.',

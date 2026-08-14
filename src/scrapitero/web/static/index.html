@@ -215,6 +215,32 @@
       padding: 6px 10px; font-size: .7rem; color: var(--overlay-fg); line-height: 1.8;
       max-height: 55%; overflow-y: auto; pointer-events: auto;
     }
+    /* Cabecera con el cierre. La leyenda va en bottomleft y crece hacia ARRIBA: fuera de
+       fullscreen el mapa mide 60vh (340px en mobile) y con muchos tipos de edificación
+       llega a tapar el control de capas (🛰 Satélite / 🗺 Mapa), que está en topleft y no
+       se puede clickear. Por eso se cierra, y el estado se recuerda en localStorage. */
+    .map-legend-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      line-height: 1.4; margin: -1px 0 4px;
+      border-bottom: 1px solid rgba(148,163,184,.25); padding-bottom: 3px;
+    }
+    .map-legend-title {
+      font-size: .64rem; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; opacity: .75;
+    }
+    .map-legend-x, .map-legend-chip {
+      background: none; border: none; cursor: pointer; padding: 0;
+      color: var(--overlay-fg); font: inherit; line-height: 1;
+    }
+    .map-legend-x { font-size: .85rem; opacity: .65; padding: 0 2px; }
+    .map-legend-x:hover { opacity: 1; }
+    /* Cerrada: queda un chip chico, que no llega a tapar nada, para poder reabrirla. */
+    .map-legend.is-closed { padding: 0; line-height: 1; overflow: visible; max-height: none; }
+    .map-legend-chip {
+      display: block; padding: 5px 9px; font-size: .68rem; font-weight: 600;
+      white-space: nowrap; opacity: .9;
+    }
+    .map-legend-chip:hover { opacity: 1; }
     .map-legend-dot {
       display: inline-block; width: 9px; height: 9px;
       border-radius: 50%; margin-right: 5px; vertical-align: middle;
@@ -2253,6 +2279,67 @@ function initMap(sid) {
   loadComentarios(sid);   // comentarios del cliente (sugerencias/correcciones)
   loadHoteles(sid);       // hoteles (Cadastur + Google) para el popup de la parcela
   loadComerciosMarcados(sid);  // falsos hoteles reclasificados a comercio (punto en su coordenada)
+  loadPois(sid);          // capa 📍 de POIs en su coordenada (apagada por defecto)
+}
+
+/* ── POIs con etiqueta de la taxonomía, en su coordenada ───────────────────────
+   Existen porque el recorte del catastro esconde cosas que se ven desde la vereda: la
+   estación de servicio Puma cae DENTRO del lote de 131.620 m² de Terrazas de Mayo, así que
+   el mapa dibujaba un círculo —el del shopping— y la estación, que está pegada al
+   McDonald's, no aparecía en ninguna parte. La UF estaba contada y el punto era invisible.
+   Mismo caso: la cancha adentro del predio de un club, la escuela adentro de un campus.
+
+   ⚠ **Se dibujan EXACTAMENTE igual que una parcela** (mismo `circleMarker`, mismo radio,
+   mismo anillo) y **en el mapa, no en una capa aparte** — decisión de producto (Jazmín,
+   13-ago-2026): un punto es un punto, y lo único que cambia entre uno y otro es el color
+   (categoría), el nombre y la taxonomía. La primera versión los hacía chicos, con borde
+   blanco y en un overlay apagado, y se leían como si fueran otra clase de cosa.
+
+   Lo único que NO llevan es el número de UF pegado al costado: la UF del POI está contada
+   en la UF del lote que lo contiene (`parcela_dir` en el popup dice cuál), así que ponerle
+   un número propio la contaría dos veces a ojo. Un lote con UF 0 tampoco lleva número, así
+   que el punto sin número ya es un caso que el mapa tiene. */
+const poiLayers = {};   // sid → L.layerGroup
+async function loadPois(sid) {
+  try {
+    const d = await fetch(`/api/surveys/${sid}/pois?lang=${encodeURIComponent(LANG)}`)
+                    .then(r => r.json());
+    if (!d || !d.ok) return;
+    const map = maps[sid];
+    if (!map) return;
+    if (poiLayers[sid]) { try { map.removeLayer(poiLayers[sid]); } catch(_) {} }
+    const grp = L.layerGroup();
+    (d.puntos || []).forEach(p => {
+      if (p.lat == null || p.lng == null) return;
+      const cat = CATEGORIA_CAT_MAPA[p.categoria] || 'comercio';
+      const col = CAT_COLOR[cat] || CAT_DEFAULT;
+      const emoji = CAT_EMOJI[cat] || '🏪';
+      // Mismos parámetros que el marcador de parcela de `loadParcelasMap` (radio 7, anillo
+      // #0f172a 1.5, fillOpacity .9). Si allá cambian, cambiarlos acá también.
+      const mk = L.circleMarker([p.lat, p.lng], {
+        radius: 7, fillColor: col, color: '#0f172a', weight: 1.5, fillOpacity: 0.9,
+      });
+      mk.bindPopup(`<div style="font-size:.83rem;line-height:1.8;min-width:165px">`
+        + `<b>${escHtml(p.nombre || '')}</b>`
+        + `<br><span style="color:${col};font-weight:700;text-transform:capitalize">${escHtml(CAT_LABEL[cat] || '')}</span>`
+        + (p.descripcion ? `<br><span style="color:var(--a-sky);font-weight:700;font-size:.8rem" title="${tAttr('Tipo de edificación (taxonomía del cliente)')}">${emoji} ${escHtml(p.descripcion)}</span>` : '')
+        + (p.parcela_dir
+            ? `<br><span style="color:hsl(var(--muted-fg));font-size:.72rem">${t('Su UF se cuenta en el lote')}: ${escHtml(p.parcela_dir)}</span>`
+            : `<br><span style="color:hsl(var(--muted-fg));font-size:.72rem">${t('sin lote asignado')}</span>`)
+        // Lo que este punto absorbió: son los locales/dependencias de adentro, que NO tienen
+        // punto propio. Va completo por lo mismo que la lista 🏪 de la parcela — cortarla
+        // esconde justo lo que el operador vino a buscar.
+        + (p.contiene && p.contiene.length
+            ? `<br><span style="color:var(--a-orange);font-weight:700;font-size:.72rem">🏪 ${t('{n} adentro', {n: p.contiene.length})}</span>`
+              + `<br><span style="color:hsl(var(--muted-fg));font-size:.7rem">${escHtml(p.contiene.join(', '))}</span>`
+            : '')
+        + `<br><span style="color:hsl(var(--muted-fg));font-size:.7rem">${escHtml(p.fuente || '')}</span></div>`,
+        { maxWidth: 260, maxHeight: 360 });
+      mk.addTo(grp);
+    });
+    poiLayers[sid] = grp;
+    grp.addTo(map);
+  } catch(_) {}
 }
 
 /* ── Comercios marcados a mano (ex-falsos-hoteles) ─────────────────────────────
@@ -2380,6 +2467,18 @@ async function loadHoteles(sid) {
       else setHotelLegend(map);            // 0 hoteles: igual reflejarlo en las referencias
     }
   } catch(_) {}
+}
+
+// Estado abierto/cerrado de las referencias del mapa. Vive en localStorage y no en el DOM
+// porque `loadParcelasMap` destruye y recrea el control en cada repintado: si el estado
+// estuviera en el elemento, la leyenda se reabriría sola en el próximo "🔄 Actualizar".
+// Sin argumento lee; con argumento escribe.
+function leyendaCerrada(v){
+  try{
+    if (v === undefined) return localStorage.getItem('aim-leyenda-cerrada') === '1';
+    localStorage.setItem('aim-leyenda-cerrada', v ? '1' : '0');
+    return !!v;
+  }catch(e){ return false; }   // navegador con storage bloqueado: siempre abierta
 }
 
 // Línea de hoteles en la leyenda del mapa (referencias). Muestra el total, los cerrados
@@ -3192,7 +3291,12 @@ async function loadParcelasMap(sid) {
       (p.descripcion_uso ? '<br><span style="color:var(--a-sky);font-weight:700;font-size:.72rem" title="' + tAttr('Categoría/descripción derivada de los establecimientos (CNPJ Receita) que caen en la parcela') + '">🏷️ ' + escHtml({R:t('Residencial'),C:t('Comercial'),E:t('Especial')}[p.categoria_uso] || p.categoria_uso || '') + '</span> <span style="color:hsl(var(--muted-fg));font-size:.7rem">' + escHtml(p.descripcion_uso) + '</span>' : '') +
       ((p.comercios && p.comercios.length)
           ? '<br><span style="color:var(--a-orange);font-weight:700;font-size:.72rem">🏪 ' + t('{n} comercio(s) (Google)', {n: p.comercios.length}) + '</span>'
-            + '<br><span style="color:hsl(var(--muted-fg));font-size:.7rem">' + escHtml(p.comercios.slice(0, 8).join(', ')) + (p.comercios.length > 8 ? '…' : '') + '</span>'
+            // Se listan TODOS. Con el corte en 8 + «…» un lote grande escondía justo lo que
+            // el operador iba a buscar: la Puma de Terrazas de Mayo es la 26ª de 35 en orden
+            // alfabético, así que la estación que se ve desde la ruta parecía no estar
+            // relevada cuando estaba cargada y contada. El `maxHeight` del popup (abajo) es
+            // lo que impide que una lista larga estire el globo.
+            + '<br><span style="color:hsl(var(--muted-fg));font-size:.7rem">' + escHtml(p.comercios.join(', ')) + '</span>'
           : '') +
       // El 'pt-BR' de acá va FIJO a propósito: es un valor monetario brasileño (R$ del
       // valor venal y alíquota del IPTU) y tiene que leerse en formato brasileño aunque
@@ -3208,7 +3312,11 @@ async function loadParcelasMap(sid) {
     m.bindPopup(() => baseHtml + hotelLineHtml(sid, p.parcela_id)
                     + comentariosSectionHtml(sid, p.parcela_id)
                     + marcarSectionHtml(sid, p.parcela_id, p.lat, p.lng) + '</div>',
-                {maxWidth: 260});
+                // `maxHeight` hace que Leaflet meta el contenido en un contenedor con scroll
+                // en vez de estirar el globo. Hace falta desde que la lista de comercios va
+                // completa: el lote del shopping tiene 35 y sin tope el popup tapaba el mapa
+                // y dejaba los botones de abajo (comentar, 📌 marcar) fuera de la pantalla.
+                {maxWidth: 260, maxHeight: 360});
     if (p.parcela_id) byPid[p.parcela_id] = m;
     // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
     if (p.uf_total > 0) {
@@ -3281,7 +3389,26 @@ async function loadParcelasMap(sid) {
         + '<br><span style="color:hsl(var(--muted-fg));font-size:.9em;padding-left:14px">'
         + t('{a} dir → {b} parcelas · en esta zona', {a: nA, b: nNuevo}) + '</span></div>';
     }
-    d.innerHTML = html;
+    // Abierta o cerrada según lo último que eligió el operador (`leyendaCerrada`). El
+    // repintado la vuelve a crear de cero en cada `loadParcelasMap`, así que el estado NO
+    // puede vivir en el DOM: se lee de localStorage cada vez que se arma.
+    const pintar = () => {
+      const cerrada = leyendaCerrada();
+      d.classList.toggle('is-closed', cerrada);
+      if (cerrada) {
+        d.innerHTML = '<button type="button" class="map-legend-chip" title="'
+          + tAttr('Mostrar las referencias') + '">▢ ' + escHtml(t('Referencias')) + '</button>';
+      } else {
+        d.innerHTML = '<div class="map-legend-head"><span class="map-legend-title">'
+          + escHtml(t('Referencias')) + '</span>'
+          + '<button type="button" class="map-legend-x" title="'
+          + tAttr('Cerrar las referencias (tapan el selector de mapa)') + '">✕</button></div>'
+          + html;
+      }
+      const btn = d.querySelector('.map-legend-x, .map-legend-chip');
+      if (btn) btn.onclick = () => { leyendaCerrada(!cerrada); pintar(); };
+    };
+    pintar();
     L.DomEvent.disableScrollPropagation(d);
     L.DomEvent.disableClickPropagation(d);
     return d;
