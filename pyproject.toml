@@ -21,7 +21,7 @@ dependencies = [
     "duckdb>=0.10",
 
     # HTTP + caché en disco
-    "httpx>=0.27",
+    "httpx[socks]>=0.27",   # socks: fallback por Tor de Overpass
     "hishel>=0.0.30",
 
     # Modelos de datos

@@ -131,7 +131,12 @@ def _try_mirrors(query: str, mirrors: list, proxy: str = None, timeout: float = 
     errores: list[str] = []     # fallos DUROS (HTTP != 200, timeout, red): el mirror no contestó
     empty_fallback = None       # un 200 vacío (sin datos ni remark): mirror que probablemente punteó
     vacios = 0                  # cuántos mirrors coincidieron en ese vacío
-    kwargs = {"proxies": proxy} if proxy else {}
+    # `proxy=`, NO `proxies=`: httpx lo renombró en 0.28 y el nombre viejo ahora es TypeError.
+    # El fallback por Tor estaba muerto sin que se notara — sólo corre cuando TODOS los
+    # mirrors directos fallan, así que en vez de rescatar la corrida la reventaba con
+    # «Client.__init__() got an unexpected keyword argument 'proxies'» justo cuando era la
+    # última chance. Visto el 13-ago-2026 con los 4 mirrors caídos a la vez.
+    kwargs = {"proxy": proxy} if proxy else {}
     cli_timeout = (timeout if timeout is not None else OVERPASS_TIMEOUT) + 10
     for mirror in mirrors:
         try:
@@ -193,7 +198,19 @@ def _fetch_overpass(query: str, timeout: float = None) -> dict:
     # Intento 2: via Tor (si está disponible)
     if _tor_available():
         logger.info("Mirrors directos fallaron — reintentando via Tor...")
-        result = _try_mirrors(query, OVERPASS_MIRRORS_TOR, proxy=TOR_SOCKS5, timeout=timeout)
+        try:
+            result = _try_mirrors(query, OVERPASS_MIRRORS_TOR, proxy=TOR_SOCKS5, timeout=timeout)
+        except Exception as e:      # noqa: BLE001
+            # Un ÚLTIMO RECURSO que no está disponible tiene que degradar, no reventar: si
+            # esto se propaga, "Overpass no contestó" —que el llamador sabe manejar con
+            # `ok:false`— se convierte en una excepción con un mensaje que no habla de
+            # Overpass. Pasó dos veces seguidas el 13-ago-2026: primero `proxies=` (renombrado
+            # en httpx 0.28) y, apenas arreglado eso, `socksio` sin instalar. Las dos veces el
+            # error visible fue el del fallback y no el problema real, que era que los cuatro
+            # mirrors directos estaban caídos.
+            logger.warning(f"El fallback por Tor no está operativo ({e}) — se reporta el "
+                           f"fallo de los mirrors directos")
+            result = (None, f"mirrors caídos; Tor no disponible ({e})")
         if result and not isinstance(result, tuple):
             return result
         _, last_error = result
