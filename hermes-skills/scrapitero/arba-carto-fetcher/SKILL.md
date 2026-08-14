@@ -101,8 +101,18 @@ python3 -m scrapitero.rpc.arba_carto_fetcher <<< '{"region_id":"ituzaingo-ba-ar"
 - Si la sesión expiró, el agente borra el archivo y vuelve a pedir cookies
 - `total_uf` = unidades funcionales (subparcelas ≥ 25 m²)
 - `total_cocheras` = subparcelas < 25 m²
-- La UF de cada parcela se guarda en `uf_vivienda` (total del lote, `uf_fuente='arba_carto'`)
-  y en `unidades_funcionales_estimadas`. **ARBA no dice el destino** de cada subparcela (el
-  campo `sp` es su número, no el uso), así que el reparto vivienda/comercio lo hace después
-  `uso-classifier` con Google Places — correrlo siempre, es el último paso de UF en PBA
+- La UF de cada parcela se guarda en `uf_vivienda` (total del lote, `uf_fuente='arba_carto'`),
+  en `unidades_funcionales_estimadas` y en **`uf_catastro`** (mig. 056). **ARBA no dice el
+  destino** de cada subparcela (el campo `sp` es su número, no el uso), así que el reparto
+  vivienda/comercio lo hacen después las fuentes de POI (`overture-places-fetcher` +
+  `osm-poi-fetcher`, gratis) **descontando** de ese total; `uso-classifier` con Google Places
+  hace lo mismo pero pago, y quedó como opcional
+- ⚠ **`uf_vivienda` vs `uf_catastro`**: el primero es una **interpretación** ("asumimos que
+  las unidades son viviendas") que las fuentes de comercio corrigen restando; el segundo es
+  el **crudo** y no lo toca nadie más. Están separados para que el descuento se recalcule en
+  cada corrida sin acumular. Si algún agente nuevo escribe el conteo del catastro, tiene que
+  escribir **los dos**
+- ⚠ Ojo con lo que esto NO resuelve: donde ninguna fuente ve un comercio, la unidad sin
+  destino se sigue contando como vivienda. En Malvinas son **1.875 de 1.974 parcelas con
+  exactamente "1 vivienda"** puesta por default — decisión pendiente con el cliente
 - No pisa lo corregido a mano: respeta `uf_fuente='manual'` y `direccion_source='manual'`
