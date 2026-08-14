@@ -114,13 +114,22 @@ def _dist_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * 6371000.0 * asin(sqrt(a))
 
 
-# Palabras genéricas/de ruido que NO distinguen un hotel de otro (PT/ES): se ignoran al
+# Palabras genéricas/de ruido que NO distinguen un negocio de otro (PT/ES): se ignoran al
 # comparar nombres para que el núcleo distintivo matchee (ej. "HOTEL SLAVIERO SLIM" vs
 # "Slaviero Slim Aeroporto" → ambos núcleo {slaviero, slim}).
-_GENERICOS_HOTEL = {
+#
+# Nació para hoteles y hoy la usa también el dedupe de POIs de `OsmPoiFetcher` (vía
+# `_tokens_sig`), de ahí las formas societarias argentinas y `shopping`. Medido en Malvinas:
+# sin `srl` y `shopping`, «Maderera Burger» ≠ «Maderera Burger SRL» y «Terrazas de Mayo» ≠
+# «Terrazas de Mayo Shopping», y el mismo negocio entraba dos veces inflando `uf_comercio`.
+# ⚠ `sa` a propósito NO está: se come el apellido brasilero «Sá» (los acentos ya se sacaron
+# al normalizar). La forma con puntos, `S.A.`, ya cae sola — la puntuación se convierte en
+# espacios y quedan tokens de una letra, que `_tokens_sig` descarta por longitud.
+_GENERICOS_NOMBRE = {
     "hotel", "hoteis", "hotels", "motel", "pousada", "pousadas", "flat", "apart", "aparthotel",
     "pensao", "resort", "hostel", "albergue", "inn", "suites", "suite", "hospedagem",
     "ltda", "me", "epp", "eireli", "da", "de", "do", "dos", "das", "e",
+    "srl", "sas", "sac", "scs", "shopping",
 }
 
 
@@ -145,7 +154,7 @@ def _norm_nombre(s: Optional[str]) -> str:
 def _tokens_sig(n: str) -> set:
     """Tokens distintivos del nombre (sin palabras genéricas ni de 1 letra)."""
     return {t for t in _PUNTUACION_NOMBRE.sub(" ", n).split()
-            if t not in _GENERICOS_HOTEL and len(t) > 1}
+            if t not in _GENERICOS_NOMBRE and len(t) > 1}
 
 
 def _nombre_similar(a: Optional[str], b: Optional[str]) -> bool:
@@ -177,6 +186,27 @@ def _nombre_fuerte(a: Optional[str], b: Optional[str]) -> bool:
         return True
     sa, sb = _tokens_sig(na), _tokens_sig(nb)
     return bool(sa) and sa == sb
+
+
+def _nombre_contenido(a: Optional[str], b: Optional[str]) -> bool:
+    """El núcleo de uno está **contenido** en el del otro, con tokens distintivos de más.
+
+    Señal DÉBIL, más floja que `_nombre_fuerte`: quien la use tiene que exigir además que los
+    dos puntos estén casi encima y que el match sea **el único** (ver `_descartar_duplicados`).
+    Sola no alcanza, y eso salió de medirla en Malvinas: con sólo pedir contención, un POI de
+    OSM llamado literalmente **«San Miguel»** —el partido vecino, no un negocio— se comía
+    *Carrefour Hipermercado San Miguel*, *Kiosko San Miguel*, *Frávega san miguel 2*, *Diesel
+    San Miguel* y 4 más.
+
+    Se pide **≥ 2 tokens distintivos del lado corto** para que un nombre de una sola palabra
+    no absorba a nadie: es el mismo motivo por el que el radio de dedupe ya es escalonado
+    («Elizabeth», dos peluquerías distintas a 675 m).
+    """
+    sa, sb = _tokens_sig(_norm(a)), _tokens_sig(_norm(b))
+    if not sa or not sb or sa == sb:
+        return False
+    chico, grande = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+    return len(chico) >= 2 and chico < grande
 
 
 def _clave_dir(h: dict) -> Optional[str]:

@@ -42,10 +42,19 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
+from scrapitero.agents.direccion_norm import (
+    normalizar_calle, normalizar_numero, separar_numero)
 from scrapitero.agents.google_places_fetcher import _load_zone
 from scrapitero.agents.osm_building_fetcher import _bbox_from_db
-from scrapitero.agents.precedencia import UF_FUENTES_PROTEGIDAS
+from scrapitero.agents.precedencia import UF_FUENTES_POI, UF_FUENTES_PROTEGIDAS
 from scrapitero.db.engine import get_engine
+
+# Fuentes de `comercios` que son POIs de negocios y por lo tanto suman `uf_comercio`.
+# Overture es la base y OSM completa lo que Overture no publica (medido en Malvinas: 32
+# negocios que sólo estaban en OSM). La deduplicación entre las dos la hace
+# `OsmPoiFetcher._descartar_duplicados` ANTES de insertar, así contar filas es contar
+# negocios. Vive acá —y no en cada agente— por la lección de `precedencia.py`.
+FUENTES_POI = "('overture','osm')"
 
 _OVERTURE_BUCKET = "s3://overturemaps-us-west-2/release"
 _RELEASE_DEFAULT = "2026-07-22.0"
@@ -155,6 +164,14 @@ class OvertureInput(BaseModel):
     # se deja sin parcela. `exigir_huella=False` vuelve al comportamiento anterior.
     exigir_huella: bool = True
     reasignar_max_m: float = 40.0
+    # Guarda de número (ver `candidatos_numero_ajeno`): el POI declara en su ficha un número
+    # de puerta que es de otra parcela construida a menos de `numero_max_m`. Sólo se mueve
+    # solo cuando la calle coincide y el salto es de `salto_min`+ números — una cuadra
+    # argentina son 100, así que 300 es un salto que un punto corrido no puede explicar.
+    # Los casos ambiguos van al panel como `poi_numero_ajeno`, no se tocan acá.
+    exigir_numero: bool = True
+    numero_max_m: float = 60.0
+    salto_min: int = 300
 
 
 class OvertureOutput(BaseModel):
@@ -168,6 +185,7 @@ class OvertureOutput(BaseModel):
     parcelas_uso_actualizado: int = 0
     pois_reasignados_por_huella: int = 0   # el punto caía en un lote vacío; se movió al vecino
     pois_sin_edificio: int = 0             # ni el lote ni un vecino tienen construcción
+    pois_reasignados_por_numero: int = 0   # su ficha declara el número de otra parcela
     parcelas_uf_limpiada: int = 0          # perdieron la UF de un comercio que ya no está
     release: Optional[str] = None
     bbox_usado: Optional[str] = None
@@ -290,14 +308,171 @@ def _upsert_comercios(region_id: str, survey_id: str, pois: list[dict]) -> int:
     return len(pois)
 
 
+def _misma_calle(a: Optional[str], b: Optional[str]) -> bool:
+    """¿Dos rótulos nombran la misma calle? Comparación deliberadamente ESTRICTA.
+
+    Base: `normalizar_calle`, que ya colapsa "Av. Pres. Arturo Umberto Illia" y "Avenida
+    Presidente Arturo Umberto Illia" (tipo de vía y título a su forma corta).
+
+    Se agrega **una sola** tolerancia: que los tokens de un nombre sean subconjunto de los
+    del otro, para el patrón "al catastro le falta el nombre de pila" — `José Darragueira`
+    ⊃ `Darragueira`, `F. Senillosa` ⊃ `Senillosa`. Con dos condiciones:
+
+      · lo que se descarta tiene que ser **alfabético**. Un número en el nombre es parte de
+        la identidad de la calle, no un prefijo omitible: sin esto `9 de Julio` ⊃ `Julio`,
+        que son dos calles distintas.
+      · el nombre corto tiene que aportar un token de **4+ letras**, o un apellido de tres
+        haría match con media ciudad (`Av. Gral. Paz` ⊅ `Paz`).
+
+    NO se usa `nucleo_calle`: ese borra los títulos honoríficos de las DOS puntas y fusiona
+    vías distintas. Acá igual queda un residuo —`Gral. Roca` ⊃ `Roca` matchea— pero la calle
+    es sólo uno de tres filtros: el número de puerta tiene que coincidir exacto y la parcela
+    candidata estar a ≤60 m, así que un homónimo lejano no llega.
+    """
+    na, nb = normalizar_calle(a), normalizar_calle(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = set(na.split()), set(nb.split())
+    chico, grande = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    if not chico < grande:
+        return False
+    return (all(t.isalpha() for t in grande - chico)
+            and any(len(t) >= 4 and t.isalpha() for t in chico))
+
+
+def candidatos_numero_ajeno(conn, region_id: str, survey_id: str,
+                            max_m: float = 60.0, salto_min: int = 300,
+                            source: Optional[str] = None) -> list[dict]:
+    """POIs cuya ficha declara un número de puerta que es de OTRA parcela cercana.
+
+    El punto de Overture viene corrido unos metros; la guarda de huella
+    (`_link_to_parcelas`) sólo rescata al que cayó en un lote sin construir. Cuando el lote
+    equivocado **sí** tiene edificios, el único testigo que queda es la dirección que el
+    propio POI declara. Caso que lo destapó (Malvinas, ago-2026): «Questa Pizza» dice *Av.
+    Pres. Arturo Umberto Illia 3770* y estaba parada en la parcela «Illia 30» —la del
+    McDonald's—, a 7 m del lote 3770 de 131.620 m², que es el shopping.
+
+    Devuelve un dict por caso con `accion`:
+
+      · **`mover`** — la calle declarada es la misma donde el POI está parado, pero el
+        número salta `salto_min`+ (Illia 30 vs Illia 3770). Un punto corrido unos metros no
+        puede explicar ese salto: una cuadra argentina son 100 números. Es el único caso que
+        se corrige solo.
+      · **`revisar`** — hay candidata, pero la evidencia no alcanza. Dos sabores, y los dos
+        van al panel como `poi_numero_ajeno` en vez de tocar el dato:
+          - `esquina`: la calle declarada NO es la de la parcela donde está. Parece el
+            señalón más fuerte y es el más traicionero: en Malvinas, 3 de los 4 casos tenían
+            una parcela de la calle declarada pegada (≤5 m). Es un lote de esquina, que el
+            catastro rotula por una calle y el comercio publicita por la otra — moverlo
+            rompería una asignación correcta. Mismo modo de falla que las etiquetas del BCI.
+          - `vecino`: misma calle y número contiguo (Artigas 171 declarando Artigas 161, con
+            la 161 a 4 m). Ahí no hay forma de saber si el punto está corrido o si el número
+            del catastro está mal: moverlo es tirar una moneda y hace bailar filas del CSV
+            del cliente sin ganancia verificable.
+
+    Medido en Malvinas: de 137 POIs con dirección, 65 declaran un número distinto al de su
+    parcela, 14 tienen una parcela cercana con ese número, y sólo **1** llega a `mover`.
+    Los saltos de los casos `vecino` van de 7 a 57; el de Questa Pizza es 3.740 — el umbral
+    cae en una banda vacía enorme, no está calibrado contra un caso único.
+
+    Se ignoran los rubros de `_NO_COMERCIO` (plazas, estaciones): no aportan `uf_comercio`,
+    así que reasignarlos no cambia el entregable y sólo ensuciaría el panel.
+
+    `source=None` mira todas las fuentes de POI —es lo que quiere el panel de incidencias—;
+    el fetcher pasa la suya para no reasignar (ni loguear) los POIs de otro agente.
+    """
+    filas = conn.execute(text("""
+        SELECT c.comercio_id::text, c.place_id, c.nombre, c.tipos, c.rubro, c.source,
+               ST_Y(c.location) AS lat, ST_X(c.location) AS lng,
+               p.parcela_id::text, p.calle, p.numero
+        FROM comercios c JOIN parcelas p ON p.parcela_id = c.parcela_id
+        WHERE c.region_id = :rid AND p.survey_id = CAST(:sid AS uuid)
+          AND c.tipos IS NOT NULL AND c.tipos <> ''
+          AND c.location IS NOT NULL AND p.geometry IS NOT NULL
+          AND COALESCE(c.rubro, '') <> ALL(:excluidas)
+          -- el CAST no es decorativo: con :src=None, Postgres no puede inferir el tipo del
+          -- parámetro y falla con AmbiguousParameter
+          AND (CAST(:src AS varchar) IS NULL OR c.source = CAST(:src AS varchar))
+    """), {"rid": region_id, "sid": survey_id, "src": source,
+           "excluidas": list(_NO_COMERCIO)}).fetchall()
+
+    # Parseo en Python: `separar_numero` ya sabe distinguir la altura del número que es parte
+    # del nombre ("Ruta 8 Y 202" → no se lo come como puerta) y descartar el complemento.
+    pend: list[dict] = []
+    for f in filas:
+        calle_dec, num_dec = separar_numero(f.tipos)
+        num_dec = normalizar_numero(num_dec)
+        if not num_dec or num_dec == normalizar_numero(f.numero):
+            continue
+        pend.append({"comercio_id": f.comercio_id, "place_id": f.place_id,
+                     "nombre": f.nombre, "source": f.source,
+                     "direccion_declarada": f.tipos, "calle_declarada": calle_dec,
+                     "numero_declarado": num_dec, "lat": f.lat, "lng": f.lng,
+                     "parcela_id": f.parcela_id, "calle_actual": f.calle,
+                     "numero_actual": f.numero})
+    if not pend:
+        return []
+
+    # Las 5 parcelas CONSTRUIDAS más cercanas que llevan ese número. Se traen varias y el
+    # filtro de calle elige entre ellas: quedarse con la más cercana y recién después mirar
+    # la calle descartaría un acierto que estaba segundo.
+    casos: list[dict] = []
+    for c in pend:
+        cands = conn.execute(text("""
+            SELECT q.parcela_id::text, q.calle, q.numero,
+                   ST_Distance(q.geometry::geography,
+                               ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography) AS d
+            FROM parcelas q
+            WHERE q.survey_id = CAST(:sid AS uuid) AND q.geometry IS NOT NULL
+              AND q.parcela_id <> CAST(:pid AS uuid)
+              AND ltrim(regexp_replace(COALESCE(q.numero, ''), '\\D', '', 'g'), '0') = :num
+              AND ST_DWithin(q.geometry::geography,
+                             ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, :maxm)
+              AND EXISTS (
+                  SELECT 1 FROM footprints_revision f
+                  WHERE f.survey_id = CAST(:sid AS uuid)
+                    AND ST_Intersects(q.geometry, f.footprint)
+                    AND ST_Area(ST_Intersection(q.geometry, f.footprint)::geography) >= :amin)
+            ORDER BY d LIMIT 5
+        """), {"sid": survey_id, "pid": c["parcela_id"], "num": c["numero_declarado"],
+               "lat": c["lat"], "lng": c["lng"], "maxm": max_m,
+               "amin": _HUELLA_MIN_M2}).fetchall()
+
+        q = next((x for x in cands if _misma_calle(c["calle_declarada"], x.calle)), None)
+        if q is None:
+            # El número coincide pero la calle no: casualidad, no evidencia. En Malvinas cae
+            # acá «Virginia Urcelay», que declara Senillosa 2515 y tiene una 2515 a 50 m
+            # sobre Dante Alighieri.
+            continue
+
+        misma = _misma_calle(c["calle_declarada"], c["calle_actual"])
+        salto = None
+        num_act = normalizar_numero(c["numero_actual"])
+        if misma and num_act:
+            salto = abs(int(c["numero_declarado"]) - int(num_act))
+        if misma and salto is not None and salto >= salto_min:
+            accion, motivo = "mover", "salto"
+        else:
+            accion, motivo = "revisar", ("vecino" if misma else "esquina")
+
+        casos.append({**c, "accion": accion, "motivo": motivo, "salto": salto,
+                      "destino_id": q.parcela_id, "destino_calle": q.calle,
+                      "destino_numero": q.numero, "destino_dist_m": round(float(q.d), 1)})
+    return casos
+
+
 def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True,
                       reasignar_max_m: float = 40.0,
-                      source: str = "overture") -> tuple[int, int, int]:
+                      source: str = "overture", exigir_numero: bool = True,
+                      numero_max_m: float = 60.0,
+                      salto_min: int = 300) -> tuple[int, int, int, int]:
     """Vincula cada comercio de `source` a la parcela que contiene su punto.
 
     `source` existe para que otros fetchers de POIs (p.ej. `OsmPoiFetcher`, que trae las
-    estaciones de servicio que Overture no publica en Argentina) reusen esta guarda en vez
-    de copiarla — la lección de `precedencia.py`: una copia se actualiza y la otra no.
+    estaciones de servicio que Overture no publica en Argentina) reusen estas guardas en vez
+    de copiarlas — la lección de `precedencia.py`: una copia se actualiza y la otra no.
 
     **Guarda de huella.** El punto de Overture viene corrido unos metros, así que el
     `ST_Contains` puede meter el comercio en el terreno vacío de al lado. Un lote SIN una
@@ -311,11 +486,17 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
     edificio**, a 27 m del lote del shopping. La plaza salió al CSV del cliente como una
     dirección con comercio, con una UF que no existe.
 
-    La evidencia son los footprints de `FootprintFetcher`. **Si el relevamiento no los tiene
-    cargados, la guarda NO se aplica**: "no hay edificio" y "no se bajaron los edificios" no
-    son lo mismo, y castigar el segundo caso desvincularía comercios legítimos.
+    **Guarda de número** (`exigir_numero`). La de huella sólo rescata al POI que cayó en un
+    lote vacío; cuando el lote equivocado también tiene edificios, el testigo es la
+    dirección que el POI declara. Ver `candidatos_numero_ajeno`: acá se aplican **sólo** los
+    casos `mover` (misma calle, salto de `salto_min`+ números). Los ambiguos —esquinas y
+    número contiguo— no se tocan: los levanta `IncidenciasReporter` como `poi_numero_ajeno`.
 
-    Devuelve `(vinculados, reasignados, sin_edificio)`.
+    Las dos guardas se apoyan en los footprints de `FootprintFetcher`. **Si el relevamiento
+    no los tiene cargados, NO se aplican**: "no hay edificio" y "no se bajaron los edificios"
+    no son lo mismo, y castigar el segundo caso desvincularía comercios legítimos.
+
+    Devuelve `(vinculados, reasignados, sin_edificio, movidos_por_numero)`.
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -329,20 +510,21 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
               AND (c.parcela_id IS NULL OR c.parcela_id <> p.parcela_id)
         """), {"rid": region_id, "src": source})
         vinculados = res.rowcount or 0
+        reasignados = huerfanos = por_numero = 0
 
-        if not exigir_huella:
-            return vinculados, 0, 0
+        if not (exigir_huella or exigir_numero):
+            return vinculados, 0, 0, 0
 
         hay_footprints = conn.execute(text("""
             SELECT EXISTS (SELECT 1 FROM footprints_revision
                             WHERE survey_id = CAST(:sid AS uuid))
         """), {"sid": survey_id}).scalar()
         if not hay_footprints:
-            logger.warning("Overture: sin footprints cargados ⇒ no se aplica la guarda de "
-                           "huella (correr FootprintFetcher antes para activarla)")
-            return vinculados, 0, 0
+            logger.warning("Overture: sin footprints cargados ⇒ no se aplican las guardas "
+                           "de huella ni de número (correr FootprintFetcher antes)")
+            return vinculados, 0, 0, 0
 
-        sin_construccion = conn.execute(text("""
+        sin_construccion = [] if not exigir_huella else conn.execute(text("""
             SELECT c.comercio_id::text
             FROM comercios c JOIN parcelas p ON p.parcela_id = c.parcela_id
             WHERE c.region_id = :rid AND c.source = :src
@@ -355,7 +537,6 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
         """), {"rid": region_id, "sid": survey_id, "amin": _HUELLA_MIN_M2,
               "src": source}).fetchall()
 
-        reasignados = huerfanos = 0
         for (cid,) in sin_construccion:
             nuevo = conn.execute(text("""
                 UPDATE comercios c SET parcela_id = (
@@ -382,12 +563,47 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
         if reasignados or huerfanos:
             logger.info(f"Overture guarda de huella: {reasignados} POIs movidos al lote "
                         f"construido vecino, {huerfanos} sin edificio a la vista")
-        return vinculados, reasignados, huerfanos
+
+        # Segunda guarda: el número que el POI declara es de otra parcela. Corre DESPUÉS de
+        # la de huella para que trabaje sobre la asignación ya rescatada, y sólo aplica los
+        # casos `mover` — el resto los levanta `IncidenciasReporter` como `poi_numero_ajeno`.
+        if exigir_numero:
+            for caso in candidatos_numero_ajeno(conn, region_id, survey_id,
+                                                numero_max_m, salto_min, source=source):
+                if caso["accion"] != "mover":
+                    continue
+                conn.execute(text(
+                    "UPDATE comercios SET parcela_id = CAST(:dst AS uuid) "
+                    "WHERE comercio_id = CAST(:cid AS uuid)"),
+                    {"dst": caso["destino_id"], "cid": caso["comercio_id"]})
+                por_numero += 1
+                logger.info(
+                    f"Overture guarda de número: «{caso['nombre']}» declara "
+                    f"{caso['direccion_declarada']!r} y estaba en "
+                    f"{caso['calle_actual']} {caso['numero_actual']} ⇒ movido a la parcela "
+                    f"{caso['destino_calle']} {caso['destino_numero']} "
+                    f"(a {caso['destino_dist_m']} m, salto de {caso['salto']} números)")
+
+        return vinculados, reasignados, huerfanos, por_numero
 
 
 def _sellar_pois(region_id: str, pois: list[dict]) -> int:
     """Carga en `establecimientos_poi` los POIs con etiqueta de la taxonomía del cliente,
-    para que `ParcelaCategoria` los aterrice sobre la parcela. Idempotente por fuente."""
+    para que `ParcelaCategoria` los aterrice sobre la parcela. Idempotente por fuente.
+
+    Guarda **el vínculo a parcela que ya resolvió `_link_to_parcelas`** (mig. 057), no la
+    coordenada sola. Corre siempre DESPUÉS del vínculo, así que a esta altura `comercios`
+    tiene la parcela buena — la que las guardas de huella y de número corrigieron.
+
+    Sin esto, `ParcelaCategoria` re-aterrizaba la etiqueta por geometría cruda y **deshacía
+    las guardas por la puerta de atrás**: en Malvinas quedaron 38 parcelas con etiqueta de
+    comercio y `uf_comercio=0`, entre ellas la de «Calle Juan» rotulada LANCHONETE por el
+    Burger King que ya vivía en el lote del shopping.
+
+    `vinculo_resuelto=True` incluso cuando `parcela_id` queda en NULL: significa "ya se
+    decidió, y la decisión fue que no va en ninguna parcela" (la guarda de huella lo sacó de
+    un lote sin construcción). Es distinto del NULL de un POI que nunca pasó por el vínculo.
+    """
     engine = get_engine()
     n = 0
     with engine.begin() as conn:
@@ -401,16 +617,25 @@ def _sellar_pois(region_id: str, pois: list[dict]) -> int:
             cat, desc = par
             conn.execute(text("""
                 INSERT INTO establecimientos_poi
-                    (poi_id, region_id, fuente, categoria, descripcion, nombre, lat, lng)
-                VALUES (:id, :rid, 'overture', :cat, :desc, :nombre, :lat, :lng)
+                    (poi_id, region_id, fuente, categoria, descripcion, nombre, lat, lng,
+                     parcela_id, vinculo_resuelto)
+                VALUES (:id, :rid, 'overture', :cat, :desc, :nombre, :lat, :lng,
+                        (SELECT c.parcela_id FROM comercios c
+                          WHERE c.region_id = :rid AND c.place_id = :pid), true)
             """), {"id": str(uuid.uuid4()), "rid": region_id, "cat": cat, "desc": desc,
-                   "nombre": p.get("nombre"), "lat": p["lat"], "lng": p["lng"]})
+                   "nombre": p.get("nombre"), "lat": p["lat"], "lng": p["lng"],
+                   "pid": p["id"]})
             n += 1
     return n
 
 
 def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int, int, int]:
-    """uf_comercio = cantidad de comercios de Overture en la parcela.
+    """uf_comercio = cantidad de comercios de las fuentes de POI en la parcela.
+
+    Cuenta **todas** las fuentes de `FUENTES_POI` (Overture + OSM), no sólo la propia: una
+    parcela con un supermercado que Overture no publica y OSM sí tiene que salir igual con su
+    comercio. La deduplicación entre fuentes la hace `OsmPoiFetcher._descartar_duplicados`
+    **antes** de insertar, así que acá contar filas es contar negocios.
 
     Respeta la precedencia de fuentes (ver CLAUDE.md): no pisa `manual` ni las fuentes más
     específicas que ya escribieron ese campo. A diferencia de GooglePlacesFetcher —que
@@ -419,12 +644,12 @@ def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int
     """
     engine = get_engine()
     with engine.begin() as conn:
-        counts = conn.execute(text("""
+        counts = conn.execute(text(f"""
             SELECT c.parcela_id::text, COUNT(*)
             FROM comercios c
             JOIN parcelas p ON p.parcela_id = c.parcela_id
             WHERE c.region_id = :rid AND c.parcela_id IS NOT NULL
-              AND c.source = 'overture'
+              AND c.source IN {FUENTES_POI}
               AND p.survey_id = :sid
               AND COALESCE(c.rubro, '') <> ALL(:excluidas)
             GROUP BY c.parcela_id
@@ -434,17 +659,33 @@ def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int
         parcelas_con = total_uf = uso_upd = 0
         for pid, n in counts:
             n = int(n)
-            # La guarda es contra OTRAS fuentes, no contra la propia: sin el `<> 'overture'`
+            # La guarda es contra OTRAS fuentes, no contra la propia: sin `UF_FUENTES_POI`
             # el agente se auto-bloqueaba con el sello que él mismo dejó y no podía
             # actualizar su conteo cuando Overture publica un release nuevo.
             res = conn.execute(text(f"""
                 UPDATE parcelas SET
                     uf_comercio = :n,
-                    unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0) + :n,
-                    uf_fuente = 'overture'
+                    -- DESCUENTO, no suma. Donde el catastro dio un conteo SIN destino
+                    -- (`uf_catastro`, mig. 056 — ARBA no publica el uso de la subparcela),
+                    -- los comercios confirmados no son unidades nuevas: son parte de ese
+                    -- mismo total que estaba mal rotulado como vivienda. Es lo que
+                    -- `UsoClassifier` documenta desde el principio ("lo que confirma se
+                    -- DESCUENTA del total de ARBA, no se suma encima") y esta ruta hacía
+                    -- al revés. Sin esto el shopping Terrazas de Mayo salía con
+                    -- «1 vivienda + 32 comercios» y el lote del McDonald's con
+                    -- «1 vivienda + 2 comercios».
+                    uf_vivienda = CASE WHEN uf_catastro IS NULL THEN uf_vivienda
+                                       ELSE GREATEST(uf_catastro - :n, 0) END,
+                    -- Cuando hay más comercios que unidades declaradas, el que se queda
+                    -- corto es el catastro (el shopping es UNA partida con 32 locales):
+                    -- el total pasa a ser el conteo real, no el declarado.
+                    unidades_funcionales_estimadas =
+                        CASE WHEN uf_catastro IS NULL THEN COALESCE(uf_vivienda, 0) + :n
+                             ELSE GREATEST(uf_catastro, :n) END,
+                    uf_fuente = 'poi'
                 WHERE parcela_id = :pid
                   AND (COALESCE(uf_fuente, '') NOT IN {UF_FUENTES_PROTEGIDAS}
-                       OR COALESCE(uf_fuente, '') = 'overture')
+                       OR COALESCE(uf_fuente, '') IN {UF_FUENTES_POI})
             """), {"n": n, "pid": pid})
             if res.rowcount:
                 parcelas_con += 1
@@ -469,38 +710,43 @@ def _agregar_uf(region_id: str, survey_id: str, set_uso: bool) -> tuple[int, int
                             WHEN COALESCE(uf_comercio, 0) > 0 THEN 'comercial'
                             ELSE uso_principal
                         END,
-                        uso_fuente = 'overture'
+                        uso_fuente = 'poi'
                     WHERE parcela_id = :pid AND COALESCE(uso_fuente, '') <> 'manual'
                 """), {"pid": pid})
                 uso_upd += r2.rowcount or 0
 
-        # Barrido de las que DEJARON de tener comercios de Overture: un release nuevo que ya
-        # no publica el POI, o la guarda de huella que lo desvinculó de un lote vacío. Sin
-        # esto el conteo viejo queda pegado y `uf_fuente='overture'` sigue firmando una UF
-        # que ya no tiene ni un comercio detrás — el mismo modo de falla que el sello que
-        # miente de `precedencia.py`, pero por omisión.
-        limpiadas = conn.execute(text("""
+        # Barrido de las que DEJARON de tener comercios: un release nuevo que ya no publica
+        # el POI, o una guarda que lo desvinculó del lote. Sin esto el conteo viejo queda
+        # pegado y el sello sigue firmando una UF que ya no tiene nada detrás — el mismo modo
+        # de falla que el sello que miente de `precedencia.py`, pero por omisión.
+        limpiadas = conn.execute(text(f"""
             UPDATE parcelas p SET
                 uf_comercio = 0,
-                unidades_funcionales_estimadas = COALESCE(p.uf_vivienda, 0)
-            WHERE p.survey_id = :sid AND COALESCE(p.uf_fuente, '') = 'overture'
+                -- Sin comercios el descuento se DESHACE: la vivienda vuelve al conteo crudo
+                -- del catastro. Es la otra mitad de que el descuento sea idempotente — si
+                -- acá quedara el valor ya restado, un POI que aparece y desaparece entre dos
+                -- releases iría comiéndose una unidad por vuelta.
+                uf_vivienda = COALESCE(p.uf_catastro, p.uf_vivienda),
+                unidades_funcionales_estimadas =
+                    COALESCE(p.uf_catastro, p.uf_vivienda, 0)
+            WHERE p.survey_id = :sid AND COALESCE(p.uf_fuente, '') IN {UF_FUENTES_POI}
               AND COALESCE(p.uf_comercio, 0) > 0
               AND NOT EXISTS (
                   SELECT 1 FROM comercios c
-                  WHERE c.parcela_id = p.parcela_id AND c.source = 'overture'
+                  WHERE c.parcela_id = p.parcela_id AND c.source IN {FUENTES_POI}
                     AND COALESCE(c.rubro, '') <> ALL(:excluidas))
         """), {"sid": survey_id, "excluidas": list(_NO_COMERCIO)}).rowcount or 0
 
         if set_uso:
             # El uso vuelve a seguir al dato: sin comercios, una parcela con viviendas es
             # residencial y una sin nada queda sin clasificar (NULL), no 'comercial'.
-            conn.execute(text("""
+            conn.execute(text(f"""
                 UPDATE parcelas p SET
                     uso_principal = CASE WHEN COALESCE(p.uf_vivienda, 0) > 0
                                          THEN 'residencial' ELSE NULL END,
                     uso_fuente = CASE WHEN COALESCE(p.uf_vivienda, 0) > 0
-                                      THEN 'overture' ELSE NULL END
-                WHERE p.survey_id = :sid AND COALESCE(p.uso_fuente, '') = 'overture'
+                                      THEN 'poi' ELSE NULL END
+                WHERE p.survey_id = :sid AND COALESCE(p.uso_fuente, '') IN {UF_FUENTES_POI}
                   AND COALESCE(p.uf_comercio, 0) = 0
             """), {"sid": survey_id})
 
@@ -536,8 +782,10 @@ def run(input: OvertureInput) -> OvertureOutput:
                               error=None)
 
     guardados = _upsert_comercios(input.region_id, input.survey_id, pois)
-    vinculados, reasignados, sin_edificio = _link_to_parcelas(
-        input.region_id, input.survey_id, input.exigir_huella, input.reasignar_max_m)
+    vinculados, reasignados, sin_edificio, por_numero = _link_to_parcelas(
+        input.region_id, input.survey_id, input.exigir_huella, input.reasignar_max_m,
+        exigir_numero=input.exigir_numero, numero_max_m=input.numero_max_m,
+        salto_min=input.salto_min)
     con_taxonomia = _sellar_pois(input.region_id, pois)
 
     parcelas_con = total_uf = uso_upd = limpiadas = 0
@@ -549,7 +797,8 @@ def run(input: OvertureInput) -> OvertureOutput:
         f"Overture {input.region_id}: {len(pois)} POIs · {vinculados} vinculados · "
         f"{con_taxonomia} con etiqueta del cliente · uf_comercio={total_uf} "
         f"en {parcelas_con} parcelas · guarda de huella: {reasignados} reasignados, "
-        f"{sin_edificio} sin edificio · {limpiadas} parcelas con UF limpiada")
+        f"{sin_edificio} sin edificio · guarda de número: {por_numero} reasignados · "
+        f"{limpiadas} parcelas con UF limpiada")
 
     return OvertureOutput(
         ok=True,
@@ -562,6 +811,7 @@ def run(input: OvertureInput) -> OvertureOutput:
         parcelas_uso_actualizado=uso_upd,
         pois_reasignados_por_huella=reasignados,
         pois_sin_edificio=sin_edificio,
+        pois_reasignados_por_numero=por_numero,
         parcelas_uf_limpiada=limpiadas,
         release=input.release,
         bbox_usado=",".join(f"{c}" for c in bbox),

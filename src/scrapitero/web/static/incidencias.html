@@ -220,6 +220,12 @@ const TIPOS = {
   // punto está mal, la zona sale mal). El editor le deja arrastrar el punto al lugar correcto
   // (antes este tipo no ofrecía NINGUNA acción: se veía el problema y no se podía arreglar).
   geocoding_dudoso:       {label:'📍 Ubicación dudosa', color:'#06b6d4', acciones:['editar']},
+  // El POI declara el número de otra parcela cercana. NO es un veredicto: los casos con
+  // evidencia dura ya los movió el fetcher solo, así que lo que llega acá es lo ambiguo
+  // (lotes de esquina y números contiguos) y la mayoría está bien donde está. Por eso
+  // `descartar` es una salida de primera clase y no el último recurso.
+  poi_numero_ajeno:       {label:'🧭 POI en otro lote', color:'#8b5cf6',
+                           acciones:['editar','descartar']},
   // La abrió el operador a mano desde el mapa del relevamiento (vio algo por satélite que el
   // dato no refleja). Es el único tipo que no produce ningún agente: no tiene diagnóstico
   // automático, así que la nota de quien la marcó es todo el contexto que hay.

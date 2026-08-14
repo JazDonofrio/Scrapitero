@@ -23,6 +23,9 @@ Tipos que genera hoy:
     catastro donde la publican (BCI: la contradicción está dentro del propio dato, sin
     satélite), y la **huella de los footprints** donde no la publican (ARBA la deja en NULL, así
     que fuera de Brasil el caso era invisible).
+  - `poi_numero_ajeno`: el comercio está parado en una parcela cuyo número no es el que él mismo
+    declara, y a pocos metros hay otra que sí lo lleva. Los casos con evidencia dura los mueve
+    solo `OverturePlacesFetcher`; acá quedan los ambiguos (esquinas y número contiguo).
 
 **Idempotente preservando el trabajo humano**: upsert por `(survey_id, tipo, clave)`, donde
 `clave` es natural y estable entre corridas — `<tipo>:<parcela_id>` para parcelas y
@@ -46,6 +49,7 @@ from sqlalchemy import text
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.direccion_norm import nucleo_calle
 from scrapitero.agents.hotel_fetcher import _nombre_fuerte, _norm
+from scrapitero.agents.overture_places_fetcher import candidatos_numero_ajeno
 from scrapitero.db.engine import get_engine
 
 # Incidencias que el operador abre A MANO desde el mapa (no las produce este agente). Se
@@ -74,6 +78,10 @@ _PRIORIDAD = {
     # operadora, pero se resuelve mirando el frente: importante, no urgente.
     "numero_faltante": 2,
     "altura_mas_alta": 3,
+    # El POI declara el número de otra parcela. Va último a propósito: son los casos que la
+    # guarda automática NO se anima a mover, y la lectura de los 11 primeros (Malvinas,
+    # ago-2026) es que la mayoría está bien donde está. Mueve como mucho 1 UF por caso.
+    "poi_numero_ajeno": 3,
 }
 
 # Fuentes de `habitaciones` que cuentan como DATO EXACTO del establecimiento. Son las que
@@ -111,6 +119,11 @@ class IncidenciasInput(BaseModel):
     # cuadra, sin llegar al hotel vecino: en VG, Express y Diplomata —ambos reales— están a 72 m,
     # pero los dos tienen UHs de Cadastur, así que la asimetría de evidencia igual los excluye.
     dup_dist_m: float = 80.0
+    # Los dos umbrales de `poi_numero_ajeno`. Tienen que ser LOS MISMOS que usa la guarda de
+    # `OverturePlacesFetcher`: si el reporter fuera más ancho levantaría como incidencia algo
+    # que el fetcher ya movió solo, y si fuera más angosto habría casos que no ve nadie.
+    poi_numero_max_m: float = 60.0
+    poi_salto_min: int = 300
 
 
 class IncidenciasOutput(BaseModel):
@@ -441,6 +454,68 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
     return casos
 
 
+def _casos_poi_numero_ajeno(conn, region_id: str, survey_id: str,
+                            max_m: float, salto_min: int) -> list[dict]:
+    """POIs parados en una parcela cuyo número NO es el que ellos mismos declaran.
+
+    La detección vive en `OverturePlacesFetcher.candidatos_numero_ajeno` —una sola
+    implementación, la lección de `precedencia.py`— y devuelve los casos ya clasificados.
+    El fetcher aplica solo los `mover`; acá se levantan los `revisar`, que son los que la
+    evidencia no alcanza para resolver sin ojo humano:
+
+      · **esquina** — la calle declarada no es la del catastro. Parece el señalón más fuerte
+        y es el más traicionero: el lote de esquina tiene dos frentes, el catastro lo rotula
+        por uno y el comercio se publicita por el otro. En Malvinas, 3 de 4 tenían una
+        parcela de la calle declarada pegada (≤5 m). Lo más probable es que estén BIEN.
+      · **vecino** — misma calle, número contiguo, la otra parcela a pocos metros. No se
+        puede saber si el punto está corrido o si el número del catastro está mal.
+
+    Se resuelven mirando el frente por satélite. Mientras estén pendientes **el dato no se
+    toca**: el POI sigue donde está y sigue aportando su `uf_comercio`.
+    """
+    casos = []
+    for c in candidatos_numero_ajeno(conn, region_id, survey_id, max_m, salto_min):
+        if c["accion"] != "revisar":
+            continue
+        aqui = _direccion(c["calle_actual"], c["numero_actual"])
+        alla = _direccion(c["destino_calle"], c["destino_numero"])
+        if c["motivo"] == "esquina":
+            porque = (f"El catastro rotula esta parcela sobre {c['calle_actual']}, pero el "
+                      f"comercio se publicita sobre {c['calle_declarada']}. Suele ser un "
+                      f"lote de esquina con dos frentes —en ese caso está BIEN donde está— "
+                      f"y no un POI mal ubicado. ")
+        else:
+            porque = (f"Misma calle, pero el número que declara salta "
+                      f"{c['salto']} respecto del de la parcela, con la {alla} a "
+                      f"{c['destino_dist_m']} m. Un salto chico no distingue un punto "
+                      f"corrido de un número mal cargado por el catastro. ")
+        casos.append({
+            "tipo": "poi_numero_ajeno",
+            "clave": f"poi_numero_ajeno:{c['place_id']}",
+            "titulo": f"🧭 «{c['nombre']}» declara {alla} y está en {aqui}",
+            "detalle": (
+                f"«{c['nombre']}» ({c['source']}) figura en la parcela {aqui}, pero su ficha "
+                f"dice «{c['direccion_declarada']}». A {c['destino_dist_m']} m hay una "
+                f"parcela construida que sí lleva ese número: {alla}. " + porque
+                + "Mirá el frente por satélite: si el comercio es de la otra parcela, movelo "
+                  "con 📌; si está bien acá, descartá el caso. Hasta entonces el dato queda "
+                  "como está y su UF se sigue contando en esta parcela."),
+            "lat": float(c["lat"]) if c["lat"] is not None else None,
+            "lng": float(c["lng"]) if c["lng"] is not None else None,
+            "parcela_id": c["parcela_id"],
+            "hotel_cnpj": None,
+            "datos": {
+                "poi": c["nombre"], "source": c["source"], "place_id": c["place_id"],
+                "direccion_declarada": c["direccion_declarada"],
+                "motivo": c["motivo"], "salto": c["salto"],
+                "parcela_actual": aqui, "parcela_candidata": alla,
+                "parcela_candidata_id": c["destino_id"],
+                "distancia_m": c["destino_dist_m"],
+            },
+        })
+    return casos
+
+
 def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
     """UF declarada que no cabe en el volumen visible (altura × huella)."""
     rows = conn.execute(text("""
@@ -757,7 +832,9 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
                  + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min)
                  + _casos_uf_sin_declarar(conn, input.survey_id, input.area_construida_min)
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
-                                    input.lejos_calle_m))
+                                    input.lejos_calle_m)
+                 + _casos_poi_numero_ajeno(conn, input.region_id, input.survey_id,
+                                           input.poi_numero_max_m, input.poi_salto_min))
 
     por_tipo: dict[str, int] = {}
     for c in casos:

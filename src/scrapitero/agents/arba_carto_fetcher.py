@@ -440,6 +440,11 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
     # después para pasar a comercio la parte que Google Places confirme.
     # Sin esto la UF quedaba sólo en `unidades_funcionales_estimadas` y la web,
     # el CSV y el propio UsoClassifier (que lee uf_vivienda/uf_comercio) veían 0.
+    #
+    # El MISMO número va aparte a `uf_catastro` (mig. 056): el conteo CRUDO, sin destino.
+    # `uf_vivienda` es una interpretación de ese crudo, y las fuentes de comercio la corrigen
+    # restando; `uf_catastro` no lo toca nadie más. Por eso el descuento se recalcula en cada
+    # corrida sin acumular — ver `overture_places_fetcher._agregar_uf`.
     conn.execute(text(f"""
         UPDATE parcelas SET
             calle                          = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
@@ -456,6 +461,8 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
             -- sellado quedaba congelada y nunca más se le actualizaba la vivienda.
             uf_vivienda                    = CASE WHEN COALESCE(uf_fuente,'') = 'manual'
                                                   THEN uf_vivienda ELSE :n_uf END,
+            uf_catastro                    = CASE WHEN COALESCE(uf_fuente,'') = 'manual'
+                                                  THEN uf_catastro ELSE :n_uf END,
             -- el comercio sí lo conservan las fuentes que lo cuentan de verdad
             uf_comercio                    = CASE WHEN COALESCE(uf_fuente,'') IN {_UF_FUENTES_PROTEGIDAS}
                                                   THEN uf_comercio ELSE 0 END,

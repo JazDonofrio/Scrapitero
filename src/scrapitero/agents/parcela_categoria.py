@@ -9,6 +9,14 @@ establecimientos lista todas sus descripciones; la categoría es la de mayor "pe
 Idempotente: resetea los sellos previos de fuente `receita_cnae` en la región antes de
 re-aplicar. La capa de detalle (qué establecimientos caen en cada parcela) queda en
 `receita_estabelecimentos` (con sus lat/lng), no se duplica.
+
+⚠ **Cómo se aterriza depende de la fuente.** Los POIs que vienen de un fetcher con guardas
+(`OverturePlacesFetcher`, `OsmPoiFetcher`) traen en `establecimientos_poi.parcela_id` el
+vínculo **ya resuelto** (mig. 057) y se usa ése, no la geometría. Antes se aterrizaba todo
+por `ST_Contains` sobre la coordenada cruda, lo que **deshacía las guardas de huella y de
+número en silencio**: en Malvinas (ago-2026) quedaron 38 parcelas con etiqueta de comercio y
+`uf_comercio=0` —el popup decía «🏢 RESTAURANTE» y abajo «Com: 0»—, entre ellas la de «Calle
+Juan» rotulada por el Burger King que ya estaba correctamente en el lote del shopping.
 """
 
 from __future__ import annotations
@@ -58,28 +66,45 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
             ),
             e AS (
                 SELECT re.categoria, re.descripcion,
-                       ST_SetSRID(ST_MakePoint(re.lng, re.lat), 4326) AS geom
+                       ST_SetSRID(ST_MakePoint(re.lng, re.lat), 4326) AS geom,
+                       NULL::uuid AS parcela_id, false AS resuelto
                 FROM receita_estabelecimentos re, bb
                 WHERE re.lat IS NOT NULL AND re.categoria IS NOT NULL
                   AND ST_SetSRID(ST_MakePoint(re.lng, re.lat), 4326) && bb.box
                 UNION ALL
-                -- POIs no-CNPJ (shoppings de OSM/Google), por región
+                -- POIs no-CNPJ (fetchers de POI, y shoppings de OSM/Google), por región
                 SELECT poi.categoria, poi.descripcion,
-                       ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326) AS geom
+                       ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326) AS geom,
+                       poi.parcela_id, poi.vinculo_resuelto
                 FROM establecimientos_poi poi
                 WHERE poi.region_id = :rid AND poi.categoria IS NOT NULL
+                  -- `vinculo_resuelto` con parcela NULL = una guarda lo desvinculó A
+                  -- PROPÓSITO (cayó en un lote sin ninguna construcción). Ese no aterriza
+                  -- en ningún lado: si se lo deja pasar, el fallback geométrico de abajo lo
+                  -- vuelve a poner justo donde la guarda lo sacó.
+                  AND NOT (poi.vinculo_resuelto AND poi.parcela_id IS NULL)
             ),
             hit AS (
                 SELECT p.parcela_id,
                        string_agg(DISTINCT e.descripcion, ', ' ORDER BY e.descripcion) AS descripciones,
                        MAX(CASE e.categoria WHEN 'E' THEN 3 WHEN 'C' THEN 2 WHEN 'R' THEN 1 ELSE 0 END) AS catrank
                 FROM parcelas p JOIN e
-                    -- tolerancia de borde (5 m): un punto de geocoding/tag puede caer
-                    -- unos metros afuera del polígono real y ST_Contains (contención
-                    -- estricta) nunca lo cuenta, aunque el establecimiento esté
-                    -- claramente pegado a esa parcela
-                    ON (ST_Contains(p.geometry, e.geom)
-                        OR ST_DWithin(p.geometry::geography, e.geom::geography, 5))
+                    ON (CASE WHEN e.resuelto
+                        -- Vínculo YA RESUELTO por `_link_to_parcelas` (mig. 057): manda ése
+                        -- y NO la geometría. Las guardas de huella y de número corrigen
+                        -- `comercios.parcela_id`, y volver a aterrizar por `ST_Contains`
+                        -- sobre la coordenada cruda las deshacía en silencio — 38 parcelas
+                        -- en Malvinas con etiqueta de comercio y `uf_comercio=0`, entre
+                        -- ellas «Calle Juan» rotulada LANCHONETE por el Burger King que ya
+                        -- vivía en el lote del shopping.
+                        THEN e.parcela_id = p.parcela_id
+                        -- Sin vínculo resuelto (Receita, shoppings de `ShoppingFetcher`) se
+                        -- aterriza por geometría, con tolerancia de borde de 5 m: un punto
+                        -- de geocoding puede caer unos metros afuera del polígono real y
+                        -- `ST_Contains` (contención estricta) nunca lo contaría.
+                        ELSE ST_Contains(p.geometry, e.geom)
+                             OR ST_DWithin(p.geometry::geography, e.geom::geography, 5)
+                        END)
                 WHERE p.region_id=:rid AND p.geometry IS NOT NULL
                 GROUP BY p.parcela_id
             )
@@ -88,6 +113,13 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
                 descripcion_uso = hit.descripciones,
                 categoria_uso_fuente = 'receita_cnae'
             FROM hit WHERE p.parcela_id = hit.parcela_id
+              -- El reset de arriba respeta el sello `manual` (sólo borra `receita_cnae`) pero
+              -- este UPDATE no lo miraba, así que igual lo pisaba: el agregado no filtra por
+              -- fuente. Medido el 13-ago-2026 en Malvinas — la parcela del Círculo de
+              -- Suboficiales (…3700C), corregida a mano a INSTITUICAO ESPORTIVA después de
+              -- verla en campo, volvió a salir LANCHONETE por el buffet del club. Es el
+              -- mismo POI que había motivado la corrección.
+              AND COALESCE(p.categoria_uso_fuente, '') <> 'manual'
             RETURNING p.categoria_uso, p.descripcion_uso
         """), {"rid": input.region_id}).fetchall()
 
