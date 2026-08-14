@@ -28,8 +28,19 @@ from scrapitero.db.engine import get_engine
 class CountryFetcherInput(BaseModel):
     region_id: str
     survey_id: Optional[str] = None
-    # nombre que delata un condomínio/loteamento fechado (además del tag autoritativo residential=gated)
-    name_regex: str = "condom|loteamento fechado|residencial.*fechad"
+    # Nombre que delata una urbanización cerrada, además del tag autoritativo
+    # `residential=gated`. ⚠ **Las dos mitades son necesarias.** El default era sólo la
+    # brasilera (`condom|loteamento fechado|…`) y en Argentina eso no encuentra NADA: acá lo
+    # mismo se llama *country*, *barrio cerrado*, *barrio privado* o *complejo cerrado*.
+    # Medido en Malvinas el 13-ago-2026: 0 áreas con `residential=gated` y 0 nombres
+    # brasileros en todo el polígono, y sin embargo el **Complejo Las Horquetas** —cerrado,
+    # con seguridad 24 h, 3 piletas y dos torres— estaba ahí, mal cargado como *hotel*
+    # porque Google lo publica con `primaryType=lodging`.
+    # ⚠ Y ni con el regex arreglado sale solo: OSM **no tiene mapeado** el complejo como
+    # área, así que sus dos parcelas se marcaron a mano. El regex evita el próximo caso, no
+    # rescata éste — cuando el país no es Brasil, el `es_country` hay que mirarlo a ojo.
+    name_regex: str = ("condom|loteamento fechado|residencial.*fechad"
+                       r"|country|barrio\s+(cerrado|privado)|complejo\s+cerrado|urbanizacion\s+cerrada")
 
 
 class CountryFetcherOutput(BaseModel):
