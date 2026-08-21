@@ -620,8 +620,14 @@ def _sellar_pois(region_id: str, pois: list[dict]) -> int:
                     (poi_id, region_id, fuente, categoria, descripcion, nombre, lat, lng,
                      parcela_id, vinculo_resuelto)
                 VALUES (:id, :rid, 'overture', :cat, :desc, :nombre, :lat, :lng,
+                        -- El CAST no es decorativo: `establecimientos_poi.region_id` es
+                        -- `varchar` sin límite (Postgres deduce `text`) y el de `comercios`
+                        -- es `varchar(50)`. Con el MISMO parámetro en los dos lugares el
+                        -- servidor no puede deducir un tipo único y aborta el INSERT entero
+                        -- con «inconsistent types deduced for parameter $2».
                         (SELECT c.parcela_id FROM comercios c
-                          WHERE c.region_id = :rid AND c.place_id = :pid), true)
+                          WHERE c.region_id = CAST(:rid AS varchar(50))
+                            AND c.place_id = :pid), true)
             """), {"id": str(uuid.uuid4()), "rid": region_id, "cat": cat, "desc": desc,
                    "nombre": p.get("nombre"), "lat": p["lat"], "lng": p["lng"],
                    "pid": p["id"]})
