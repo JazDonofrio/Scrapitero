@@ -70,6 +70,18 @@ def run(input: ParcelaCategoriaInput) -> ParcelaCategoriaOutput:
                        NULL::uuid AS parcela_id, false AS resuelto
                 FROM receita_estabelecimentos re, bb
                 WHERE re.lat IS NOT NULL AND re.categoria IS NOT NULL
+                  -- Sólo empresas que siguen en pie. BAIXADA (dio baja) y NULA son cierre
+                  -- DEFINITIVO; INAPTA y SUSPENSA no lo son (la empresa sigue abierta, con
+                  -- la situação a la vista) — mismo corte que usa `HotelFetcher`. Sin este
+                  -- filtro una lanchonete cerrada en 2018 sella el lote igual que una
+                  -- farmacia abierta hoy: el sello nació para CLASIFICAR uso de suelo, donde
+                  -- eso daba lo mismo, pero hoy es la etiqueta que se ve en el mapa y viaja
+                  -- en el plano de entrega. Medido el 20-ago-2026 en VG: 74 de 239 parcelas
+                  -- selladas lo estaban sólo por empresas de baja definitiva, y en Av. Couto
+                  -- Magalhães 352 se verificó en la calle (el archivo decía LANCHONETE por un
+                  -- bar dado de baja; lo que hay es una verdulería que no figura en ninguna
+                  -- fuente). BAIXADA es el 49% del dump de MT: el filtro NO es cosmético.
+                  AND re.situacao NOT IN ('BAIXADA', 'NULA')
                   AND ST_SetSRID(ST_MakePoint(re.lng, re.lat), 4326) && bb.box
                 UNION ALL
                 -- POIs no-CNPJ (fetchers de POI, y shoppings de OSM/Google), por región
