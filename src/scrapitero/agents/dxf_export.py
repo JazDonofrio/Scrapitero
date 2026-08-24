@@ -49,6 +49,7 @@ from sqlalchemy import text
 
 from scrapitero.agents import geo
 from scrapitero.agents._run import agent_run
+from scrapitero.agents.pisos import texto as pisos_texto
 from scrapitero.db.engine import get_engine
 
 # Colores ACI (índice de color de AutoCAD). Se usa el índice y no RGB porque es lo que
@@ -137,7 +138,14 @@ def _consultar(survey_id: str, solo_con_uf: bool,
                 COALESCE((SELECT h.tipo FROM hoteles h
                    WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
                    ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1), '') AS hotel_tipo,
-                huella_m2                       -- m² construidos por satélite (mig. 058)
+                huella_m2,                      -- m² construidos por satélite (mig. 058)
+                -- Pisos vistos por satélite (`AlturaFetcher`, capa de revisión). Es el
+                -- ÚNICO dato de altura que existe en Brasil: el BCI no publica pavimentos
+                -- y `pisos_estimados_max` está vacío en las 567 parcelas de VG. Lo usa
+                -- `DXFEntrega` para `QTD_ANDARES`, que es un campo VISIBLE de la ficha MDU
+                -- y que el cliente llena en sus 12 fichas de ejemplo (valores de 2 a 9).
+                (SELECT a.pisos_satelital FROM parcela_altura a
+                   WHERE a.parcela_id = parcelas.parcela_id LIMIT 1) AS pisos_satelital
             FROM parcelas
             WHERE survey_id = :sid AND geometry IS NOT NULL {filtro_uf}
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -247,7 +255,8 @@ def run(input: DXFInput) -> DXFOutput:
     for row, geom in zip(rows, geoms):
         (_, calle, numero, complemento, barrio, cep, uf_v, uf_c, uf_fuente, uso,
          cca, area_t, area_c, pisos, num_est, num_est_conf, _categoria, descripcion,
-         establecimiento_id, est_tipo, est_nombre, tipo_manual, hotel_tipo, huella) = row
+         establecimiento_id, est_tipo, est_nombre, tipo_manual, hotel_tipo, huella,
+         _pisos_sat) = row
 
         anillos = _anillos(geom)
         if not anillos:
@@ -324,7 +333,9 @@ def run(input: DXFInput) -> DXFOutput:
             "INSCRIPCION": cca or "",
             "AREA_TERRENO_M2": f"{area_t:.1f}" if area_t else "",
             "AREA_CONSTRUIDA_M2": f"{area_c:.1f}" if area_c else "",
-            "PISOS": str(pisos or ""),
+            # Pisos SOBRE PLANTA BAJA (PB = 0), igual que el DXF de entrega. La base
+            # guarda niveles (PB = 1); la conversión y el porqué están en `pisos.py`.
+            "PISOS": pisos_texto(pisos),
             "ESTABLECIMIENTO": " - ".join(x for x in [est_tipo or "", est_nombre or ""] if x),
         })
 

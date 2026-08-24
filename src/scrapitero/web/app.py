@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 
 from scrapitero.agents.logradouro_br import (clasificar_complemento, descomponer_logradouro,
                                              partes_unidad)
+from scrapitero.agents.pisos import sobre_planta_baja
 from scrapitero.db.engine import get_engine
 
 app = FastAPI(title="AI Mapping")
@@ -1031,10 +1032,13 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
             "uf_fuente": r[12] or "",
             "uf_estimado": (bool(r[12]) and r[12] != "bci") or estimado_fallback,
             "comercios": list(r[13] or []),
-            "pisos": _pisos_estimados(
+            # Se MUESTRA en pisos sobre planta baja (PB = 0). `_pisos_estimados`
+            # devuelve niveles (PB = 1) porque es el mismo número que compara
+            # `altura_fetcher` y el que multiplica en el proxy de UF. Ver `pisos.py`.
+            "pisos": sobre_planta_baja(_pisos_estimados(
                 float(r[10]) if r[10] else None,
                 float(r[11]) if r[11] else None,
-            ),
+            )),
             "vv_terreno": round(float(r[14]), 2) if r[14] else None,
             "vv_construccion": round(float(r[15]), 2) if r[15] else None,
             "vv_total": round(float(r[16]), 2) if r[16] else None,
@@ -1348,8 +1352,11 @@ async def get_altura(survey_id: str) -> dict:
         "cca": r[2] or "", "calle": r[3] or "", "numero": r[4] or "",
         "uso": r[5] or "", "area_c": round(float(r[6]), 1) if r[6] else None,
         "altura_m": round(float(r[7]), 1) if r[7] is not None else None,
-        "pisos_sat": int(r[8]) if r[8] is not None else None,
-        "pisos_bci": int(r[9]) if r[9] is not None else None,
+        # Los dos van en pisos sobre planta baja (PB = 0) para que la capa de altura
+        # diga lo mismo que el entregable. La DIFERENCIA entre ambos —que es lo que
+        # marca la discrepancia— no cambia: los dos se corren en uno. Ver `pisos.py`.
+        "pisos_sat": sobre_planta_baja(int(r[8])) if r[8] is not None else None,
+        "pisos_bci": sobre_planta_baja(int(r[9])) if r[9] is not None else None,
         "discrepancia": bool(r[10]),
         "motivo": r[11] or None,
         "imagery_year": int(r[12]) if r[12] else None,

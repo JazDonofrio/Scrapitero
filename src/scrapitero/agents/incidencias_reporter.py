@@ -338,13 +338,13 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
         if motivo == "sin_declarar":
             titulo = f"🏗 {dir_txt} — construcción no declarada"
             detalle = (f"El catastro no declara área construida (uso «{uso or 's/d'}»), pero el "
-                       f"satélite ve un edificio de {altura:.1f} m (~{pisos_sat} piso/s) sobre "
+                       f"satélite ve un edificio de {altura:.1f} m (~{pisos_sat} planta/s) sobre "
                        f"{huella:.0f} m² de huella.")
         else:
             titulo = f"🏢 {dir_txt} — más alto de lo declarado"
-            detalle = (f"El satélite ve {pisos_sat} piso/s ({altura:.1f} m) y el catastro sugiere "
+            detalle = (f"El satélite ve {pisos_sat} planta/s ({altura:.1f} m) y el catastro sugiere "
                        f"{pisos_bci} ({area_c:.0f} m² construidos)." if area_c else
-                       f"El satélite ve {pisos_sat} piso/s ({altura:.1f} m) vs {pisos_bci} del catastro.")
+                       f"El satélite ve {pisos_sat} planta/s ({altura:.1f} m) vs {pisos_bci} del catastro.")
         casos.append({
             "tipo": tipo,
             "clave": f"{tipo}:{pid}",
@@ -360,7 +360,7 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
                 # para que la tarjeta pueda aclarar que el ≈ del título es una estimación.
                 "numero_estimado": r[15] or None,
                 "altura_m": round(float(altura), 1) if altura is not None else None,
-                "pisos_satelital": pisos_sat, "pisos_bci_proxy": pisos_bci,
+                "plantas_satelital": pisos_sat, "plantas_bci_proxy": pisos_bci,
                 "ground_area_m2": round(float(huella), 0) if huella else None,
                 "area_m2_construida": round(float(area_c), 1) if area_c else None,
                 # Obligatorio mostrarlo: en VG el 89% de la imagen es de 2014, así que el
@@ -544,7 +544,7 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
             "clave": f"uf_imposible:{pid}",
             "titulo": f"⚠ {dir_txt} — {uf_v} UF no caben en lo construido",
             "detalle": (f"Declara {uf_v} unidades de vivienda (fuente «{uf_fuente or 's/d'}») pero el "
-                        f"volumen visible es {huella:.0f} m² × {pisos} piso/s ⇒ "
+                        f"volumen visible es {huella:.0f} m² × {pisos} planta/s ⇒ "
                         f"{m2_uf:.1f} m² por unidad. Verificá el dato y corregí la UF."),
             "lat": float(lat) if lat is not None else None,
             "lng": float(lng) if lng is not None else None,
@@ -555,7 +555,7 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
                 "uf_vivienda": uf_v, "uf_comercio": uf_c, "uf_fuente": uf_fuente,
                 "m2_por_uf": round(m2_uf, 1),
                 "altura_m": round(float(altura), 1) if altura is not None else None,
-                "pisos_satelital": pisos,
+                "plantas_satelital": pisos,
                 "ground_area_m2": round(float(huella), 0) if huella else None,
                 "area_m2_construida": round(float(area_c), 1) if area_c else None,
                 "imagery_year": img_year,
@@ -650,7 +650,7 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
         extra = (f" El construido supera al terreno (ratio {ratio:.2f}), así que hay más de una "
                  f"planta." if ratio and ratio > 1 else "")
         if pisos:
-            extra += f" El satélite ve {pisos} piso/s sobre {float(huella or 0):.0f} m² de huella."
+            extra += f" El satélite ve {pisos} planta/s sobre {float(huella or 0):.0f} m² de huella."
         if por_catastro:
             titulo = f"🧮 {dir_txt} — {area_c:.0f} m² construidos y 0 UF"
             detalle = (f"El catastro la da como «{uso or 's/d'}» con **{area_c:.0f} m² "
@@ -689,7 +689,7 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
                 "footprints_dentro": n_edif or None,
                 "footprints_huella_m2": round(huella_fp, 0) if huella_fp else None,
                 "altura_m": round(float(altura), 1) if altura is not None else None,
-                "pisos_satelital": pisos,
+                "plantas_satelital": pisos,
                 "ground_area_m2": round(float(huella), 0) if huella else None,
                 "imagery_year": img_year,
             },

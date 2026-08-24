@@ -328,8 +328,11 @@ function datosHtml(t, d){
   if(d.cnpj) p.push(`CNPJ ${esc(d.cnpj)}`);
   if(d.situacion) p.push(`estado ${esc(d.situacion)}`);
   if(d.altura_m!=null) p.push(`altura <b>${d.altura_m} m</b>`);
-  if(d.pisos_satelital!=null) p.push(`satélite <b>${d.pisos_satelital} piso/s</b>`);
-  if(d.pisos_bci_proxy!=null) p.push(`catastro ${d.pisos_bci_proxy} piso/s`);
+  // PLANTAS, no pisos: acá el número es el conteo de niveles construidos (planta baja
+  // incluida) que sostiene la cuenta de volumen `huella × plantas`. El entregable usa
+  // la otra convención, pisos sobre planta baja. Ver agents/pisos.py.
+  if(d.plantas_satelital!=null) p.push(`satélite <b>${d.plantas_satelital} planta/s</b>`);
+  if(d.plantas_bci_proxy!=null) p.push(`catastro ${d.plantas_bci_proxy} planta/s`);
   if(d.ground_area_m2!=null) p.push(`huella ${d.ground_area_m2} m²`);
   if(d.area_m2_construida!=null) p.push(`constr. ${d.area_m2_construida} m²`);
   if(d.uf_vivienda!=null) p.push(`UF viv <b>${d.uf_vivienda}</b>`);
