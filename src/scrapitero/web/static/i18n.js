@@ -567,6 +567,10 @@ var I18N_PT = {
   'Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.':
     'Baixar o levantamento em DXF para AutoCAD: lotes, unidades de moradia e comércio, endereço e tipo de edificação, cada coisa em sua camada. O AutoCAD abre nativamente e permite salvar como DWG.',
   '⬇ DXF (AutoCAD)': '⬇ DXF (AutoCAD)',
+  'Descargar el DXF con el estándar de planos del cliente: un bloque SDU/MDU por inmueble con sus atributos, sobre el mapa base municipal (manzanas y cordón). Es el formato en que se entrega el relevamiento.':
+    'Baixar o DXF com o padrão de plantas do cliente: um bloco SDU/MDU por imóvel com seus atributos, sobre o mapa base municipal (quadras e meio-fio). É o formato em que o levantamento é entregue.',
+  'ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:':
+    'ID da célula do cliente (ex.: VAZ049). Deixe vazio se ainda não foi atribuído:',
   'Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.':
     'Trazer pegadas de edifícios (Google Open Buildings, alternativa OSM) para conferir visualmente contra o que diz o cadastro — camada à parte, não altera o levantamento.',
   '🏗️ Footprints (revisión)': '🏗️ Pegadas (revisão)',

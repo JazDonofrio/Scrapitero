@@ -1990,9 +1990,12 @@ function renderCard(s) {
             ${s.export_cliente ? `<a class="btn btn-sm btn-green" href="/api/surveys/${sid}/export/csv-operadora" download
                style="text-decoration:none"
                title="${tAttr('Descargar el CSV con el formato de entrega propio del cliente')}: ${escHtml(s.export_cliente.descripcion || '')}">⬇ ${escHtml(s.export_cliente.etiqueta)}</a>` : ''}
-            <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
+            ${s.export_plano
+              ? `<button class="btn btn-sm btn-green" onclick="descargarEntrega('${sid}')"
+               title="${tAttr('Descargar el DXF con el estándar de planos del cliente: un bloque SDU/MDU por inmueble con sus atributos, sobre el mapa base municipal (manzanas y cordón). Es el formato en que se entrega el relevamiento.')}">⬇ ${escHtml(s.export_plano.etiqueta)}</button>`
+              : `<a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
                style="text-decoration:none"
-               title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>
+               title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>`}
             ${OPERADOR ? `<button class="btn btn-sm btn-outline"
                onclick="runFootprints('${sid}', this)"
                title="${tAttr('Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.')}">${t('🏗️ Footprints (revisión)')}</button>
@@ -2550,6 +2553,16 @@ async function runNumeros(sid, btn) {
     }
   } catch(err) { if (msg) { msg.style.color = 'var(--danger-fg)'; msg.textContent = t('Error de red: {msg}', {msg: err.message}); } }
   btn.disabled = false; btn.textContent = t0;
+}
+
+// El DXF sale en el estándar de planos del cliente cuando su país tiene uno definido
+// (`export_plano` del survey), y entonces lleva el ID de célula (p.ej. VAZ049) en el
+// atributo `ID` de cada bloque. No lo sabemos nosotros: lo asigna el cliente por zona,
+// así que se pide acá en vez de inventar uno. Cancelar aborta; vacío genera sin ID.
+function descargarEntrega(sid) {
+  const celula = prompt(t('ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:'), '');
+  if (celula === null) return;
+  window.location = `/api/surveys/${sid}/export/dxf?celula_id=${encodeURIComponent(celula.trim())}`;
 }
 
 async function runFootprints(sid, btn) {

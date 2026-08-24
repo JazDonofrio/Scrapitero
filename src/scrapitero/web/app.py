@@ -618,6 +618,9 @@ async def list_surveys(request: Request) -> list[dict]:
             # (`_EXPORT_PERFILES_CLIENTE`). El front muestra el botón según esto, en vez
             # de preguntar `country_code === 'BRA'` en cada página.
             "export_cliente": _perfil_cliente_ui((r[6] or "").upper()),
+            # Estándar de planos del cliente, si su país tiene uno: con esto el botón DXF
+            # baja el entregable (y pide el ID de célula); sin esto, el dibujo interno.
+            "export_plano": _perfil_plano_ui((r[6] or "").upper()),
             "total_edificios": int(r[8] or 0),
             "total_parcelas": int(r[9] or 0),
             "total_uf_vivienda": int(r[10] or 0),
@@ -3362,6 +3365,16 @@ _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
         "layout": "operadora_br",
         "tipos_uso": ("RESIDENCIAL", "COMERCIO EM GERAL"),
         "cod_operadora": CSV_OPERADORA_COD,
+        # Estándar de planos del cliente (BL). Con esto definido, el DXF del relevamiento
+        # SALE en su formato: bloque SDU/MDU por inmueble sobre su mapa base municipal,
+        # no nuestro polígono de parcela con textos al lado. Sin `plano` (Argentina hoy)
+        # el DXF sigue siendo el dibujo interno de `DXFExport`.
+        "plano": {
+            "etiqueta": "DXF Entrega (cliente)",
+            "descripcion": "Estándar de planos de la operadora: un bloque SDU/MDU por "
+                           "inmueble sobre el mapa base municipal (Brasil)",
+            "pide_celula": True,
+        },
     },
     # Argentina: mismas columnas que el contrato de import `ARG` de `_BASELINE_PERFILES`
     # (DIRECCION/LOCALIDAD/PROVINCIA/CODIGO_POSTAL/TIPO_INMUEBLE), así el entregable se
@@ -3424,6 +3437,17 @@ def _perfil_cliente_ui(pais: str) -> dict | None:
     return {k: perfil[k] for k in _EXPORT_PERFIL_UI} if perfil else None
 
 
+def _perfil_plano_ui(pais: str) -> dict | None:
+    """El estándar de planos del país, si su cliente tiene uno, recortado para el front.
+
+    Es lo que decide si el botón DXF baja el entregable del cliente o el dibujo interno,
+    y si antes hay que pedir el ID de célula. Mismo criterio que `_perfil_cliente_ui`:
+    la decisión vive acá y no en un `country_code === 'BRA'` repartido por las páginas.
+    """
+    perfil = _EXPORT_PERFILES_CLIENTE.get((pais or "").upper()) or {}
+    return perfil.get("plano")
+
+
 @app.get("/api/surveys/{survey_id}/export/perfiles")
 async def export_perfiles(survey_id: str) -> JSONResponse:
     """Qué formatos de entrega aplican a este relevamiento, para que la UI muestre los
@@ -3432,11 +3456,17 @@ async def export_perfiles(survey_id: str) -> JSONResponse:
     with get_engine().connect() as conn:
         pais = _country_de_survey(conn, survey_id).upper()
     perfil = _EXPORT_PERFILES_CLIENTE.get(pais)
+    plano = _perfil_plano_ui(pais)
     return JSONResponse({
         "ok": True, "pais": pais,
-        # siempre disponibles: no dependen del país
+        # El estándar de planos del cliente, si su país tiene uno. El DXF sale en ese
+        # formato y el front pide el ID de célula antes de bajarlo.
+        "plano": plano,
+        # siempre disponibles: no dependen del país. El DXF cambia de formato según
+        # `plano`, pero el botón es siempre uno solo.
         "genericos": [{"clave": "csv", "etiqueta": "CSV"},
-                      {"clave": "dxf", "etiqueta": "DXF (AutoCAD)"}],
+                      {"clave": "dxf",
+                       "etiqueta": plano["etiqueta"] if plano else "DXF (AutoCAD)"}],
         "cliente": ({"clave": "csv-operadora",
                      **{k: perfil[k] for k in _EXPORT_PERFIL_UI}} if perfil else None),
     })
@@ -3838,8 +3868,20 @@ async def crear_parcial(survey_id: str,
 
 
 @app.get("/api/surveys/{survey_id}/export/dxf")
-async def export_dxf(survey_id: str):
-    """DXF (AutoCAD) del relevamiento, con las UF de vivienda rotuladas por parcela.
+async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
+                     dxfversion: str = ""):
+    """DXF (AutoCAD) del relevamiento, **en el formato que espera el cliente del país**.
+
+    Si su perfil define un estándar de planos (`plano` en `_EXPORT_PERFILES_CLIENTE`, hoy
+    Brasil → BL) sale el entregable de `DXFEntrega`: un bloque `SDU`/`MDU` por inmueble
+    con una sola etiqueta visible, sobre el mapa base municipal del propio cliente. Si no
+    lo define (Argentina hoy), sale el dibujo de `DXFExport`: el polígono de cada parcela
+    con las UF rotuladas al lado. **Es un solo botón**: el formato lo decide el perfil,
+    no el que descarga — antes convivían dos DXF y había que saber cuál pedir.
+
+    `celula_id` (el `ID` de bloque que asigna el cliente por zona, p.ej. `VAZ049`) y
+    `codlog_csv` (mapeo calle→CODLOG de su sistema) sólo aplican al entregable; en el
+    dibujo interno se ignoran.
 
     DXF y no DWG: el `.dwg` es formato cerrado de Autodesk y ninguna librería libre lo
     escribe; el DXF es el formato de intercambio del propio AutoCAD, que lo abre nativo.
@@ -3855,20 +3897,30 @@ async def export_dxf(survey_id: str):
             FROM surveys s JOIN regions r ON s.region_id = r.region_id
             WHERE s.survey_id = :sid
         """), {"sid": survey_id}).fetchone()
-    if not meta:
-        return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+        if not meta:
+            return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+        plano = _perfil_plano_ui(_country_de_survey(conn, survey_id))
 
-    from scrapitero.agents.dxf_export import DXFInput
-    from scrapitero.agents.dxf_export import run as run_dxf_agent
-
-    tmpdir = tempfile.mkdtemp(prefix="dxf_")
     fecha = meta[1].strftime("%Y-%m-%d") if meta[1] else ""
-    nombre = f"relevamiento_{meta[0]}_{fecha}.dxf".replace(" ", "_").replace("/", "-")
+    tmpdir = tempfile.mkdtemp(prefix="dxf_")
+    nombre = (f"entrega_{celula_id or meta[0]}_{fecha}.dxf" if plano
+              else f"relevamiento_{meta[0]}_{fecha}.dxf").replace(" ", "_").replace("/", "-")
     destino = os.path.join(tmpdir, nombre)
+
+    if plano:
+        from scrapitero.agents.dxf_entrega import EntregaInput
+        from scrapitero.agents.dxf_entrega import run as run_agent
+        entrada = EntregaInput(survey_id=survey_id, celula_id=celula_id,
+                               codlog_csv=codlog_csv or None, output_path=destino,
+                               dxfversion=dxfversion or None)
+    else:
+        from scrapitero.agents.dxf_export import DXFInput
+        from scrapitero.agents.dxf_export import run as run_agent
+        entrada = DXFInput(survey_id=survey_id, output_path=destino)
 
     def _job() -> dict:
         _thread_job_id.value = survey_id
-        return run_dxf_agent(DXFInput(survey_id=survey_id, output_path=destino)).model_dump()
+        return run_agent(entrada).model_dump()
 
     data = await asyncio.to_thread(_job)
     if not data.get("ok"):
