@@ -2844,7 +2844,19 @@ function marcarSectionHtml(sid, pid, lat, lng) {
   if (!OPERADOR) return '';
   const uid = pid || ('pt' + String(lat).replace(/[.-]/g, '') + String(lng).replace(/[.-]/g, ''));
   const args = `'${sid}',${pid ? `'${pid}'` : 'null'},${lat},${lng},'${uid}'`;
+  // Dos entradas al MISMO editor, separadas por intención:
+  //   ✏️ Modificar datos — el operador ya sabe qué corregir (encontró la numeración, cambió
+  //     la cantidad de UF). Va derecho al editor sin pedir una nota: obligar a escribir "qué
+  //     está mal" para cargar un número que ya tenés a la vista es fricción pura.
+  //   📌 Marcar para revisar — vio algo raro y NO lo va a resolver ahora: ahí la nota es el
+  //     dato que hace útil el caso cuando alguien lo retome.
+  // Las dos abren un caso `revision_manual`, que al guardar la edición queda resuelto: el
+  // panel no se llena de casos por editar una parcela.
+  const editable = pid ? `<button class="btn btn-sm btn-outline" style="padding:.2rem .55rem;font-size:.7rem;margin-right:.3rem"
+        title="${tAttr('Corregir la numeración, el uso o la cantidad de unidades de esta parcela')}"
+        onclick="modificarParcela(${args}, this)">${t('✏️ Modificar datos')}</button>` : '';
   return `<div class="cmt-section">
+      ${editable}
       <button class="btn btn-sm btn-outline" style="padding:.2rem .55rem;font-size:.7rem"
         title="${tAttr('Abrir un caso en el panel de incidencias para corregir esto a mano')}"
         onclick="document.getElementById('mform-${uid}').style.display='block';this.style.display='none';document.getElementById('mtext-${uid}').focus()">${t('📌 Marcar para revisar')}</button>
@@ -2857,6 +2869,30 @@ function marcarSectionHtml(sid, pid, lat, lng) {
         </div>
       </div>
     </div>`;
+}
+
+// Edición directa de una parcela desde el mapa: abre el editor de incidencias para ESA
+// parcela sin pedir nota. Reusa el mismo endpoint y el mismo editor que el 📌 — no hay una
+// segunda vía de escritura que pueda desincronizarse (cada concepto sigue yendo a su tabla
+// de override: dirección → parcela_direccion_manual, UF → parcela_uf_manual, etc.).
+async function modificarParcela(sid, pid, lat, lng, uid, btn) {
+  const prev = btn.textContent;
+  btn.disabled = true; btn.textContent = t('Abriendo…');
+  try {
+    const res = await fetch(`/api/surveys/${sid}/incidencias/manual`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({parcela_id: pid, lat, lng,
+                            nota: t('Edición directa desde el mapa')}),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(t('Error: {msg}', {msg: t(data.error) || t('desconocido')})); return; }
+    window.open(data.url, '_blank');
+    await loadIncidencias(sid); refreshParcelaPopup(sid, pid);
+  } catch (err) {
+    alert(t('Error de red: {msg}', {msg: err.message}));
+  } finally {
+    btn.disabled = false; btn.textContent = prev;
+  }
 }
 
 async function marcarParaRevisar(sid, pid, lat, lng, uid, btn) {
@@ -3301,6 +3337,11 @@ async function loadParcelasMap(sid) {
       (p.area_c ? '<br><span style="color:hsl(var(--muted-fg))">' + p.area_c + ' ' + t('m² construida') + '</span>' : '') +
       (p.pisos ? '<br><span style="color:var(--c-warn);font-weight:700">' + t('≈ {n} piso(s)', {n: p.pisos}) + '</span> <span style="color:hsl(var(--muted-fg));font-size:.7rem">(FOS 0,6)</span>' : '') +
       (p.cca ? '<br><span style="color:hsl(var(--muted-fg));font-size:.72rem">' + t('Insc:') + ' ' + escHtml(p.cca) + '</span>' : '') +
+      // Quadra/lote: en los barrios loteados es COMO se identifica el inmueble en la calle.
+      // Va en la descripción de abajo, junto a la inscrição, y NO en el renglón de la
+      // dirección: no es un reemplazo del número, es otro dato. Si la parcela no tiene
+      // número, arriba sigue diciendo sólo la calle — que es la verdad.
+      (p.unidad ? '<br><span style="color:hsl(var(--muted-fg));font-size:.72rem" title="' + tAttr('Identificación catastral del inmueble (complemento del BCI). No es el número de puerta.') + '">📐 ' + escHtml(p.unidad) + '</span>' : '') +
       (p.descripcion_uso ? '<br><span style="color:var(--a-sky);font-weight:700;font-size:.72rem" title="' + tAttr('Categoría/descripción derivada de los establecimientos (CNPJ Receita) que caen en la parcela') + '">🏷️ ' + escHtml({R:t('Residencial'),C:t('Comercial'),E:t('Especial')}[p.categoria_uso] || p.categoria_uso || '') + '</span> <span style="color:hsl(var(--muted-fg));font-size:.7rem">' + escHtml(p.descripcion_uso) + '</span>' : '') +
       ((p.comercios && p.comercios.length)
           ? '<br><span style="color:var(--a-orange);font-weight:700;font-size:.72rem">🏪 ' + t('{n} comercio(s) (Google)', {n: p.comercios.length}) + '</span>'

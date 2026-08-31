@@ -49,6 +49,10 @@ from sqlalchemy import text
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.direccion_norm import nucleo_calle
 from scrapitero.agents.hotel_fetcher import _nombre_fuerte, _norm
+# La MISMA función que usa el CSV Operadora para decidir qué parte del complemento es
+# dirección. Se importa en vez de re-implementar el criterio: si el panel y el entregable
+# no coinciden en qué cuenta como identificación, el operador ve casos ya resueltos.
+from scrapitero.agents.logradouro_br import clasificar_complemento
 from scrapitero.agents.overture_places_fetcher import candidatos_numero_ajeno
 from scrapitero.db.engine import get_engine
 
@@ -405,7 +409,7 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
                           AND q.numero IS NOT NULL AND q.numero <> '' AND q.numero <> '0'
                         ORDER BY d LIMIT 4) v) AS vecinos,
                p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza,
-               p.codigo_postal
+               p.codigo_postal, p.complemento
         FROM parcelas p
         WHERE p.survey_id = :sid
           AND p.calle IS NOT NULL AND p.calle <> ''
@@ -418,7 +422,20 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
     for r in rows:
         pid, calle, _numero, cca, barrio = r[0], r[1], r[2], r[3], r[4]
         lat, lng, uso, area_t, vecinos = r[5], r[6], r[7], r[8], r[9]
-        est, metodo, conf, cep = r[10], r[11], r[12], r[13]
+        est, metodo, conf, cep, compl = r[10], r[11], r[12], r[13], r[14]
+        # NO es un caso si el inmueble ya está identificado por otra vía. En barrios
+        # loteados de Várzea Grande la dirección NO es la altura de calle sino la
+        # quadra + lote ("Q68 L20 A"), y el BCI la publica en COMPLEMENTO: pedirle al
+        # operador que "cargue la altura" es pedirle un dato que no existe para ese
+        # inmueble. Medido en la zona piloto: de 382 casos, 360 tenían quadra/lote y
+        # quedaban 22 reales. El corte usa `clasificar_complemento`, la MISMA
+        # implementación que arma la dirección del CSV Operadora, para que el panel y el
+        # entregable no puedan discrepar sobre qué cuenta como identificación; y es
+        # deliberadamente conservadora — las notas registrales ("DESMEMBRADO E CARREGA
+        # O COMPLEMENTO...", "AREA DESMEMBRADA") no cuentan y siguen siendo caso.
+        unidad, _nombre = clasificar_complemento(compl)
+        if unidad:
+            continue
         # La ubicación está resuelta; lo que falta es sólo el rótulo. Decirlo evita que el
         # operador salga a verificar algo que ya es dato del municipio.
         ubicacion = (f"Ubicación confirmada por catastro (inscrição {cca}"

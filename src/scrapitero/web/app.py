@@ -1001,7 +1001,14 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
                    p.numero_estimado, p.numero_estimado_metodo, p.numero_estimado_confianza,
                    -- m² construidos vistos por satélite (mig. 058): en PBA es la única señal
                    -- de "hay algo acá", porque ARBA no publica área construida.
-                   p.huella_m2
+                   p.huella_m2,
+                   -- Identificación por quadra/lote. En los barrios loteados de Várzea Grande
+                   -- el inmueble se identifica así ("Q68 L20 A") y no por altura de calle; el
+                   -- BCI la publica en COMPLEMENTO. Va como dato ADICIONAL en el popup, NUNCA
+                   -- en lugar del número: son dos cosas distintas y el entregable las trata
+                   -- por separado. La clasificación sale de `clasificar_complemento`, la misma
+                   -- que usan el CSV Operadora y el panel de incidencias.
+                   p.complemento
             FROM parcelas p
             LEFT JOIN establecimientos e ON e.establecimiento_id = p.establecimiento_id
             LEFT JOIN parcela_tipo_manual ptm ON ptm.parcela_id = p.parcela_id
@@ -1055,6 +1062,9 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
             "est_nombre": r[24] or None,
             "est_n_parcelas": int(r[25]) if r[25] else None,
             "parcela_id": r[26],
+            # Sólo la parte del complemento que ES identificación (quadra/lote, unidad):
+            # las notas registrales y el nombre del inmueble no van acá.
+            "unidad": clasificar_complemento(r[-1])[0],
             # Categoría/descripción de uso (taxonomía del cliente, de establecimientos CNPJ).
             # La descripción se traduce al SALIR, igual que `tipo_edificacion`: en la DB la
             # etiqueta canónica sigue siendo la portuguesa.
@@ -1836,6 +1846,31 @@ def _descartar_hotel(conn, hotel_id: str, tipo: str) -> tuple[bool, object]:
                              ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, 30)
         """), {"r": region_id, "lat": lat, "lng": lng})
     conn.execute(text("DELETE FROM hoteles WHERE hotel_id::text = :h"), {"h": hotel_id})
+    # Devolver la UF que ese hotel le había sumado a la parcela. Sin esto el descarte
+    # borraba el hotel pero dejaba su unidad de comercio colgada: la parcela seguía
+    # aportando al entregable un hospedaje que el operador acaba de declarar inexistente,
+    # y con el sello `hotel_min` ("hay un hotel acá") sobre algo que no lo es. Medido el
+    # 31-ago-2026: 6 UF fantasma en 3 regiones, 2 de ellas ya entregadas.
+    # Es el MISMO barrido que `hotel_fetcher` corre cuando un hotel cierra o se muda entre
+    # corridas (ver el reset de `uf_fuente IN ('cadastur','hotel_min')`); acá faltaba el
+    # camino del descarte manual. Se limita a los sellos que deja ese agente, así que una
+    # parcela cuya UF de comercio viene del BCI no se toca; y sólo si no quedó NINGÚN otro
+    # hotel vivo en la parcela, porque en ese caso la UF sigue siendo legítima.
+    if parcela_id:
+        conn.execute(text("""
+            UPDATE parcelas SET
+                uf_comercio = 0,
+                unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0),
+                uf_fuente = NULL,
+                uso_principal = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
+                                     ELSE uso_principal END,
+                uso_fuente = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
+                                  ELSE uso_fuente END
+            WHERE parcela_id = CAST(:p AS uuid)
+              AND uf_fuente IN ('cadastur','hotel_min')
+              AND NOT EXISTS (SELECT 1 FROM hoteles h
+                               WHERE h.parcela_id = CAST(:p AS uuid) AND NOT h.cerrado_def)
+        """), {"p": parcela_id})
     return True, parcela_id
 
 
@@ -1844,6 +1879,12 @@ def _descartar_hotel(conn, hotel_id: str, tipo: str) -> tuple[bool, object]:
 # absorbida como el tipo `hotel_sin_habitaciones`. Ver agents/incidencias_reporter.py.
 
 _INCIDENCIA_ESTADOS = ("pendiente", "resuelta", "descartada", "obsoleta")
+
+# Formas con las que el operador escribe "este inmueble no tiene número". Se comparan
+# en mayúsculas y sin espacios ni puntos, y todas se guardan como el canónico `S/N`, que
+# es la convención del cliente y la que ya emiten `dxf_entrega` y el CSV Operadora.
+_SIN_NUMERO = frozenset({"S/N", "SN", "S/NO", "S/Nº", "SEMNUMERO", "SEMNÚMERO",
+                         "SINNUMERO", "SINNÚMERO", "S/NUMERO", "S/NÚMERO"})
 
 
 @app.get("/incidencias/{survey_id}")
@@ -2406,8 +2447,22 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
             # que `direccion` — el número corregido a mano ES la dirección vigente y tiene que
             # llegar al CSV, al CSV Operadora y al apareo contra el relevamiento anterior.
             num = str(valor or "").strip()[:20]
-            if not num or not any(ch.isdigit() for ch in num):
-                return JSONResponse({"ok": False, "error": "número inválido"}, status_code=400)
+            # "No tiene número" es una RESOLUCIÓN válida, no un formulario a medio llenar.
+            # La validación exigía un dígito, así que la única respuesta correcta para un
+            # inmueble sin altura —`S/N`, la convención del cliente— era justo la que el
+            # formulario rechazaba: el caso no se podía cerrar nunca. En la zona piloto eso
+            # son 368 de 383 incidencias `numero_faltante`, donde el PDF del BCI se verificó
+            # y efectivamente no publica número.
+            # Se guarda canónico para que `parcelas.numero` tenga un solo valor posible y el
+            # reporter dé la incidencia por obsoleta sola (su condición es numero NULL / ''
+            # / '0', y 'S/N' ya no matchea).
+            if num.upper().replace(" ", "").replace(".", "") in _SIN_NUMERO:
+                num = "S/N"
+            elif not num or not any(ch.isdigit() for ch in num):
+                return JSONResponse(
+                    {"ok": False,
+                     "error": "Número inválido. Si el inmueble no tiene número, cargá S/N."},
+                    status_code=400)
             if not parcela_id:
                 return JSONResponse({"ok": False, "error": "la incidencia no tiene parcela"},
                                     status_code=400)
@@ -3385,6 +3440,19 @@ _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
         "layout": "operadora_ar",
         "tipos_uso": ("RESIDENCIAL", "COMERCIAL"),
         "cod_operadora": CSV_OPERADORA_COD,
+        # Mismo plano que Brasil, a pedido de Jaz: manzana subdividida en parcelas con el
+        # rótulo de cada una centrado. **Los nombres de bloque y de atributo siguen siendo
+        # los de la operadora brasilera** (`SDU`/`MDU`, `CODLOG`, `CEP`): si el cliente
+        # argentino pide los suyos, hay que mapearlos, no es sólo activar el perfil.
+        #
+        # Acá no hay mapa base municipal ni tabla `logradouros`: las manzanas se arman con
+        # las propias parcelas y los ejes de calle se deducen de ellas.
+        "plano": {
+            "etiqueta": "DXF Entrega (cliente)",
+            "descripcion": "Manzana subdividida en parcelas, con las unidades y los "
+                           "pisos de cada una",
+            "pide_celula": False,
+        },
     },
 }
 _EXPORT_PERFIL_UI = ("etiqueta", "descripcion")
@@ -3527,19 +3595,27 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 "AND extras IS NOT NULL"), {"bid": base[2]}).fetchall()]
             parc = conn.execute(text("""
                 SELECT calle,
-                       -- Toda dirección tiene que salir con número. Cuando el municipio no lo
-                       -- declaró (campo en '0' o vacío, el 12,8% de las parcelas del BCI), se
-                       -- usa el que interpoló `NumeroEstimator` sobre el eje de la calle,
-                       -- pero SÓLO si su confianza llega al piso: las extrapolaciones más allá
-                       -- del último ancla miden mal y esas parcelas van al panel de incidencias
-                       -- para que un humano cargue la altura mirando el frente.
+                       -- Toda dirección sale con algo en el número, pero NO todo inmueble
+                       -- tiene número: cuando no lo tiene, la convención del cliente es
+                       -- `S/N` —la misma que ya usa `dxf_entrega`—, no la celda vacía.
+                       -- Antes acá iba NULL y el CSV salía con el campo en blanco, que el
+                       -- cliente no puede distinguir de un dato que faltó cargar.
+                       -- Orden: el número del municipio; si no lo declaró (campo en '0' o
+                       -- vacío, el 12,8% de las parcelas del BCI), el que interpoló
+                       -- `NumeroEstimator` sobre el eje de la calle, pero SÓLO si su
+                       -- confianza llega al piso —las extrapolaciones más allá del último
+                       -- ancla miden mal y esas parcelas van al panel de incidencias—; y si
+                       -- no hay ninguno, `S/N`.
+                       -- El estimado también se filtra por sentinela: venía saliendo '0' al
+                       -- entregable, que no es una altura de calle sino la marca de que no hay.
                        -- `parcelas.numero` NO se toca: sigue siendo el dato del municipio, y el
                        -- inferido vive en `numero_estimado*` (mig. 050). Acá sólo se elige cuál
                        -- de los dos sale al entregable.
                        CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                             WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                             AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
                                  THEN numero_estimado
-                            ELSE NULL END AS numero,
+                            ELSE 'S/N' END AS numero,
                        complemento, barrio, municipio, estado_provincia,
                        codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
                        -- Nombre del comercio de la parcela (para DSC_NOME_DO_IMOVEL): hoteles +
@@ -3582,10 +3658,16 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             # dato del relevamiento y el que permite re-importar el archivo como baseline).
             rows = conn.execute(text("""
                 SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
+                       -- Sin número va `S/N`, igual que arriba y que `dxf_entrega`. Ojo: acá
+                       -- el GROUP BY incluye este campo, así que todos los inmuebles sin
+                       -- número de una misma calle colapsan en UNA fila con la UF sumada.
+                       -- Es lo correcto para un layout de base de calles (una fila por
+                       -- dirección), pero NO sirve como inventario de unidades.
                        CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                             WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                             AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
                                  THEN numero_estimado
-                            ELSE NULL END AS numero,
+                            ELSE 'S/N' END AS numero,
                        SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
                        SUM(COALESCE(uf_comercio, 0))::int AS uf_c,
                        MIN(uso_principal) AS uso
@@ -3605,14 +3687,25 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             # Una fila por DIRECCIÓN COMPLETA única (varias parcelas con la misma
             # calle+número+CEP+bairro colapsan en un solo registro).
             rows = conn.execute(text("""
-                SELECT municipio, estado_provincia, barrio, calle,
-                       codigo_postal, numero, MAX(codigo_logradouro) AS codigo_logradouro
-                FROM parcelas
-                WHERE survey_id = :sid AND calle IS NOT NULL
-                GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, numero
+                SELECT * FROM (
+                    SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
+                           -- No todo inmueble tiene número: cuando no lo tiene, la convención
+                           -- del cliente es `S/N` —la misma de `dxf_entrega`—, no la celda
+                           -- vacía, que él no puede distinguir de un dato que faltó cargar.
+                           -- El '0' del BCI es la marca de "no declarado", no una altura, así
+                           -- que también sale S/N: medido en la zona piloto, 369 parcelas en
+                           -- NULL y 14 en '0' salían las 383 con el campo en blanco.
+                           COALESCE(NULLIF(NULLIF(numero, '0'), ''), 'S/N') AS numero,
+                           MAX(codigo_logradouro) AS codigo_logradouro
+                    FROM parcelas
+                    WHERE survey_id = :sid AND calle IS NOT NULL
+                    GROUP BY 1, 2, 3, 4, 5, 6
+                ) t
+                -- El orden va AFUERA: adentro `numero` ya es la expresión agrupada y ordenar
+                -- por la columna cruda da "must appear in the GROUP BY clause". Las `S/N`
+                -- caen al final de cada calle (parte numérica vacía → NULL → NULLS LAST).
                 ORDER BY calle,
-                         NULLIF(regexp_replace(COALESCE(numero, ''), '\\D', '', 'g'), '')::bigint
-                           NULLS LAST
+                         NULLIF(regexp_replace(numero, '\\D', '', 'g'), '')::bigint NULLS LAST
             """), {"sid": survey_id}).fetchall()
 
         # Localidad/provincia de respaldo: ARBA/IDERA no las publican por parcela (en

@@ -684,6 +684,11 @@ var I18N_PT = {
   'Abrir un caso en el panel de incidencias para corregir esto a mano':
     'Abrir um caso no painel de ocorrências para corrigir isto à mão',
   '📌 Marcar para revisar': '📌 Marcar para revisar',
+  'Identificación catastral del inmueble (complemento del BCI). No es el número de puerta.': 'Identificação cadastral do imóvel (complemento do BCI). Não é o número da porta.',
+  '✏️ Modificar datos': '✏️ Modificar dados',
+  'Corregir la numeración, el uso o la cantidad de unidades de esta parcela': 'Corrigir a numeração, o uso ou a quantidade de unidades desta parcela',
+  'Edición directa desde el mapa': 'Edição direta a partir do mapa',
+  'Abriendo…': 'Abrindo…',
   'Qué está mal (ej.: es un edificio, no un comercio)…':
     'O que está errado (ex.: é um edifício, não um comércio)…',
 
