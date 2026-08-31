@@ -461,6 +461,14 @@ _SIMPLIFICA_BORDE = 0.4
 # 18 el error queda por debajo del centímetro sobre una manzana de 200 m.
 _PASOS_BISECCION = 18
 _MIN_EN_MANZANA = 0.30
+# Distancia máxima a la que se adopta la manzana MÁS CERCANA cuando ninguna solapa lo
+# suficiente. La manzana es el contenedor: el lote se dibuja adentro de ella y es una guía,
+# así que una parcela sin manzana no puede quedar suelta en la calle. Medido en la zona
+# piloto del 31-ago-2026 con el MUB municipal: 77 de 409 parcelas no solapaban NINGUNA
+# manzana —el catastro y el MUB son dos relevamientos distintos y no encajan—, y las 77
+# estaban a menos de 43,7 m (media 21,8). Con 50 m se asignan las 409 sin forzar nada:
+# el salto siguiente sería a otra manzana, mucho más lejos.
+_DIST_MAX_MANZANA = 50.0
 
 # Hueco por debajo del cual una cadena que da la vuelta se considera cerrada. Medido: en
 # este relevamiento sólo 7 cadenas caen ahí; la mediana de las abiertas de verdad es 76 m.
@@ -1312,6 +1320,18 @@ def _lotes_de_manzana(manzana: Polygon, parcelas: list) -> list:
             areas_reales.append(0.0)
             continue
         trozo = poli.intersection(manzana)
+        if trozo.is_empty:
+            # La parcela NO toca su manzana. Pasa porque el catastro y el mapa municipal
+            # son dos relevamientos distintos que no encajan: en la zona piloto, 77 de 409
+            # parcelas caían en lo que el MUB llama calle, a 21,8 m de media de su manzana.
+            # Antes se devolvía None y la parcela se quedaba sin lote — pero la ficha salía
+            # igual y aterrizaba en la calzada. Como la manzana es el contenedor y el lote
+            # es una guía adentro de ella, se la ancla en el punto de la manzana más cercano
+            # con una semilla del tamaño de la parcela, y el reparto del sobrante (paso 3)
+            # le termina de dar su superficie contra los lotes vecinos.
+            ancla, _ = nearest_points(manzana, poli)
+            radio = max(math.sqrt(max(poli.area, _AREA_MIN_LOTE) / math.pi), 1.0)
+            trozo = ancla.buffer(radio).intersection(manzana)
         if tomado is not None and not trozo.is_empty:
             trozo = trozo.difference(tomado)
         if isinstance(trozo, MultiPolygon) and not trozo.is_empty:
@@ -1973,8 +1993,39 @@ def run(input: EntregaInput) -> EntregaOutput:
         fuentes = {input.fuente_mapa_base: 0}
         if region_id:
             fuentes[f"OSM_{region_id}"] = 1
-            fuentes[f"AC_{region_id}"] = 2
+            # El MUB municipal RECORTADO a la zona (`cargar_base_dwg.py --prefijo MUB`).
+            # Va por encima de OSM porque es el catastro del municipio y no una cara de la
+            # red de calles: en la zona piloto trae 111 manzanas contra las 39 de OSM y las
+            # 42 del MUB general. Y por debajo del `AC_`, que es el dibujo del propio cliente.
+            fuentes[f"MUB_{region_id}"] = 2
+            fuentes[f"AC_{region_id}"] = 3
         quadras, meiofio, lotes_cliente = _mapa_base(conn, fuentes, bbox, tr)
+        # **Recorte al relevamiento.** El bbox es un rectángulo y la zona suele ser un
+        # corredor, así que su bbox ya vale varias veces la zona; encima, una manzana que
+        # apenas TOCA ese rectángulo se dibuja ENTERA y se va mucho más lejos. Medido en la
+        # zona piloto: 21,8 ha de zona y una hoja de 1.503 × 1.230 m (181 ha), con 71 de 100
+        # manzanas caídas fuera del relevamiento. El plano se abría con los datos reducidos
+        # a una mancha en el medio.
+        # Se descarta la manzana que no toca la huella real del relevamiento (la unión de
+        # las parcelas) más el mismo margen que ya se usa para traer la base. No se recorta
+        # la geometría de la manzana —eso la deformaría—: se la incluye entera o no se la
+        # incluye. `prioridad_de` indexa por id(), así que filtrar la lista no lo rompe.
+        huella_utm = unary_union([g for g in (_geom_utm(x, tr) for x in geoms) if g is not None])
+        if not huella_utm.is_empty:
+            # `geoms` viene en 4326 y las manzanas ya están proyectadas: se compara en UTM,
+            # que además permite expresar el margen en metros y no en grados.
+            recorte = huella_utm.buffer(input.margen_base_m)
+            def _toca(t):
+                pts = t[0]
+                if len(pts) < 2:
+                    return False
+                g = Polygon(pts) if (t[1] and len(pts) >= 3) else LineString(pts)
+                return g.buffer(0).intersects(recorte)
+            n_q, n_m = len(quadras), len(meiofio)
+            quadras = [q for q in quadras if _toca(q)]
+            meiofio = [m for m in meiofio if _toca(m)]
+            logger.info(f"Recorte al relevamiento (+{input.margen_base_m:.0f} m): "
+                        f"manzanas {n_q}→{len(quadras)}, meiofio {n_m}→{len(meiofio)}")
         calles_geom, calles_datos = _calles(conn, bbox, tr)
         # Los ejes de calzada CON nombre, de OSM: es lo que decide dónde va cada rótulo.
         ejes_osm = _ejes_de_calle(conn, f"OSM_{region_id}", bbox, tr) if region_id else {}
@@ -2328,6 +2379,18 @@ def run(input: EntregaInput) -> EntregaOutput:
                 i_mz = max(cand, key=lambda k: manzanas[k].intersection(poli).area)
                 if manzanas[i_mz].intersection(poli).area < poli.area * _MIN_EN_MANZANA:
                     i_mz = None
+            # Sin solape suficiente NO se abandona la parcela: se adopta la manzana más
+            # cercana dentro de `_DIST_MAX_MANZANA`. Antes quedaba en None y entonces el
+            # lote no se dibujaba (correcto) pero **la ficha salía igual**, y sin manzana
+            # que la apoye caía en la calle: 106 de 464 fichas fuera de toda manzana en la
+            # zona piloto. La manzana manda y el lote es una guía adentro de ella, así que
+            # lo que corresponde es meter la parcela en la manzana que le toca, no soltarla.
+            if i_mz is None:
+                cerca = [(manzanas[k].distance(poli), k)
+                         for k in arbol_manzanas.query(poli.buffer(_DIST_MAX_MANZANA))]
+                cerca = [(d, k) for d, k in cerca if d <= _DIST_MAX_MANZANA]
+                if cerca:
+                    i_mz = min(cerca)[1]
 
         fichas.append({
             "poli": poli, "frente": frente, "bloques": bloques, "es_mdu": es_mdu,

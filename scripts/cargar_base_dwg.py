@@ -179,7 +179,15 @@ def main() -> int:
     ap.add_argument("dwg", type=Path)
     ap.add_argument("--epsg", type=int, default=32721,
                     help="CRS del DWG. Várzea Grande está en UTM 21S (32721).")
+    # El prefijo NO es cosmético: `DXFEntrega` lo usa como prioridad y `AC_` significa
+    # "as-built que nos devolvió el cliente". Un MUB municipal recortado a la zona es otra
+    # cosa y va como `MUB_<region>`: mejor que las caras de OSM, pero no es su dibujo.
+    ap.add_argument("--prefijo", default="AC",
+                    help="Prefijo de la fuente: AC (as-built del cliente) o MUB "
+                         "(base municipal recortada). Queda como '<prefijo>_<region_id>'.")
     args = ap.parse_args()
+    if args.prefijo not in ("AC", "MUB"):
+        raise SystemExit(f"Prefijo desconocido: {args.prefijo!r} (AC o MUB)")
 
     if not args.dwg.exists():
         raise SystemExit(f"No existe: {args.dwg}")
@@ -203,7 +211,7 @@ def main() -> int:
                               {"s": args.survey_id}).scalar()
         if not region:
             raise SystemExit(f"Survey no encontrado: {args.survey_id}")
-        fuente = f"AC_{region}"
+        fuente = f"{args.prefijo}_{region}"
 
         minx, miny, maxx, maxy = _bbox_utm(conn, args.survey_id, hacia_utm)
         recuadro = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
