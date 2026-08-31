@@ -86,6 +86,7 @@ from sqlalchemy import text
 from scrapitero.agents import geo
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.dxf_export import _consultar
+from scrapitero.agents.logradouro_br import limpiar_nombre_via
 from scrapitero.agents.pisos import texto as pisos_texto
 from scrapitero.db.engine import get_engine
 
@@ -319,13 +320,10 @@ def _nombre_calle(calle: str) -> str:
     confiables]]): así "RUA DA LIBERDADE" y "RUA DA LIBERDADE ." salían como dos calles
     distintas y el tope de dos rótulos por calle daba cuatro, encimados a 20 m.
     """
-    s = re.sub(r"\s*-\s*", " ", (calle or "").strip().upper())
-    s = re.sub(r"\s+", " ", s).strip()
-    limpio = re.sub(r"[\s.,;]*\bS/?\s?N\.?$", "", s).strip(" .,;-")
-    # Si sacar el "S/N" deja sólo el tipo ("RUA"), el S/N era el nombre: se deja como está.
-    if len(limpio.split()) >= 2:
-        s = limpio
-    return s.strip(" .,;-")
+    # La limpieza vive en `logradouro_br.limpiar_nombre_via`, que es la que usa también el
+    # CSV Operadora: una sola definición de "nombre de vía limpio" para plano y entregable.
+    s = limpiar_nombre_via(calle)
+    return re.sub(r"\s+", " ", re.sub(r"\s*-\s*", " ", s)).strip(" .,;-")
 
 
 def _tipo_cliente(uso: str, uf_v: int, uf_c: int) -> str:
@@ -677,6 +675,16 @@ _LEJOS_DE_MANZANA = 40.0
 # Cuánto puede estar el eje de OSM del punto que dedujimos desde la manzana para darlo por
 # la misma calle. 45 m es media cuadra: más lejos ya es otra vía.
 _CERCA_DEL_EJE = 45.0
+
+# Cuánto puede apartarse el renglón del borde de la manzana que tiene enfrente. El nombre
+# tiene que leerse PARALELO a la manzana: cruzado se lee como si nombrara a la transversal.
+# Medido en la zona piloto antes de esto: 5 rótulos a más de 30° —Aracy de Almeida a 44,7° y
+# 75,0°, o sea sus DOS apariciones cruzadas sobre Santa Laura—. 20° tolera la curva de una
+# avenida y el error de la tangente.
+_DESVIO_MAX_MANZANA = 20.0
+# Cuánto pesa el cruce en la penalización, comparado con pisar la manzana (que vale 1,0 al
+# 100% del renglón tapado). Un nombre cruzado se lee mal aunque esté en calzada limpia.
+_PESO_CRUCE = 0.6
 
 # Cuánto se mira hacia cada lado sobre el eje para sacar la tangente. Con menos, un vértice
 # de la polilínea de OSM tuerce el ángulo del texto; con más, se pierde la curva.
@@ -1844,6 +1852,33 @@ def _ejes_de_calle(conn, fuente: str, bbox_4326, tr) -> dict[str, list]:
     return salida
 
 
+def _desvio_de_la_manzana(centro, ang: float, manzanas, arbol) -> float:
+    """Cuántos grados se aparta el renglón del borde de manzana que tiene enfrente.
+
+    Es el criterio del cliente leído literalmente: el nombre de la calle corre a lo largo de
+    la cuadra. Se mide contra la manzana más cercana al centro del renglón —no contra el eje
+    de la calle— porque es lo que se ve en el plano: dos manzanas y el nombre en el medio.
+    """
+    if not manzanas:
+        return 0.0
+    vecinas = (arbol.query(centro.buffer(_LEJOS_DE_MANZANA))
+               if arbol is not None else range(len(manzanas)))
+    mejor, mejor_d = None, None
+    for j in vecinas:
+        borde = getattr(manzanas[j], "exterior", None)
+        if borde is None:
+            continue
+        d = borde.project(centro)
+        dist = centro.distance(borde.interpolate(d))
+        if mejor_d is None or dist < mejor_d:
+            a = borde.interpolate(max(0.0, d - _TANGENTE_EJE))
+            b = borde.interpolate(min(borde.length, d + _TANGENTE_EJE))
+            mejor_d, mejor = dist, math.degrees(math.atan2(b.y - a.y, b.x - a.x))
+    if mejor is None:
+        return 0.0
+    return abs(((ang - mejor + 90) % 180) - 90)
+
+
 def _ejes_de_esta_calle(nombre: str, ejes: dict[str, list],
                         punto: Point) -> tuple[str, list]:
     """Los tramos de eje de esta calle, ordenados por cercanía a este punto.
@@ -1857,8 +1892,17 @@ def _ejes_de_esta_calle(nombre: str, ejes: dict[str, list],
        (`_CERCA_DEL_EJE`). Un nombre parecido en la otra punta de la ciudad no se toma.
     """
     clave = _clave_calle(nombre)
-    candidatas = [clave] if clave in ejes else difflib.get_close_matches(
-        clave, list(ejes), n=3, cutoff=0.82)
+    # **La cota de 45 m es para el match DUDOSO, no para el exacto.** Existe porque un
+    # nombre parecido en la otra punta de la ciudad no puede ganar; pero cuando la clave
+    # coincide letra por letra no hay a quién confundir, y el punto deducido puede estar
+    # legítimamente lejos —viene de la cara de la manzana y en una esquina o una avenida se
+    # va—. Con la cota aplicada al match exacto, 22 de 114 rótulos se quedaban sin eje y
+    # caían por deducción: Ataulfo Alves terminaba a 109 m de su propia calle y Escolástico
+    # Pinto a 349 m, los dos apoyados sobre la calzada de Santa Laura, que es lo que se
+    # leía como "los nombres de las transversales cruzados sobre la avenida".
+    if clave in ejes:
+        return clave, sorted(ejes[clave], key=punto.distance)
+    candidatas = difflib.get_close_matches(clave, list(ejes), n=3, cutoff=0.82)
     mejor, mejor_d = None, _CERCA_DEL_EJE
     for c in candidatas:
         for tramo in ejes.get(c, ()):
@@ -3006,6 +3050,7 @@ def run(input: EntregaInput) -> EntregaOutput:
 
     puestos: dict[str, list] = {}
     n_sobre_manzana = 0
+    n_cruzados = 0
     for nombre, px, py, vx, vy, mx, my, cep_calle, eje in elegidos:
         grupo = claves_osm.get(nombre) or nombre
         nombre = rotulo_del_grupo.get(grupo, nombre)
@@ -3058,21 +3103,46 @@ def run(input: EntregaInput) -> EntregaOutput:
 
         ang, (cx_l, cy_l) = candidatos[0][1], candidatos[0][2]
         mejor_pena = None
+        mejor_par = None
         for _orden, ang_d, cand in candidatos:
             caja_log = _caja_texto(cand, ang_d, largo_log, _H_ROTULO_LOG)
             sobre = _pisa_manzana(caja_log, manzanas, arbol_manzanas)
             choca = cajas_todas.choca(caja_log)
-            if sobre <= _ROCE_MANZANA_OK and not choca:
+            # **Cruzado no sirve aunque la calzada esté limpia.** En la esquina el eje de la
+            # transversal pasa por una calle despejada, así que sin esto la posición cruzada
+            # puntuaba igual que la buena y a veces ganaba por estar más cerca del origen:
+            # Aracy de Almeida salía con sus DOS rótulos atravesados sobre Santa Laura.
+            rr_c = math.radians(ang_d)
+            centro_c = Point(cand[0] + math.cos(rr_c) * largo_log / 2,
+                             cand[1] + math.sin(rr_c) * largo_log / 2)
+            cruce = _desvio_de_la_manzana(centro_c, ang_d, manzanas, arbol_manzanas)
+            if sobre <= _ROCE_MANZANA_OK and not choca and cruce <= _DESVIO_MAX_MANZANA:
                 ang, (cx_l, cy_l) = ang_d, cand
                 mejor_pena = 0.0
                 break
             # Si no hay lugar limpio, se guarda el menos malo en vez de dibujar en el
             # primero: penaliza mucho pisar la manzana y poco rozar otro texto.
-            pena = sobre + (0.15 if choca else 0.0)
+            pena = sobre + (0.15 if choca else 0.0) + (cruce / 90.0) * _PESO_CRUCE
+            # **Paralelo le gana a despejado.** Se lleva aparte el mejor de los candidatos
+            # que SÍ están alineados con la manzana: si existe alguno, se usa ése aunque
+            # roce un texto o entre un poco en el lote. Un nombre torcido se lee como si
+            # nombrara a otra calle; un roce se lee igual. Sin esto, Elvira Monteiro y Jacob
+            # do Bandolin —que tienen un solo rótulo cada una— se quedaban a 20,6° y 24,9°
+            # porque la posición torcida puntuaba mejor por estar limpia.
+            if cruce <= _DESVIO_MAX_MANZANA and (mejor_par is None or pena < mejor_par[0]):
+                mejor_par = (pena, ang_d, cand)
             if mejor_pena is None or pena < mejor_pena:
                 mejor_pena, ang, (cx_l, cy_l) = pena, ang_d, cand
+        if mejor_par is not None and mejor_pena:
+            mejor_pena, ang, (cx_l, cy_l) = mejor_par
         if mejor_pena and mejor_pena > _ROCE_MANZANA_OK:
             n_sobre_manzana += 1
+        rr_f = math.radians(ang)
+        if _desvio_de_la_manzana(
+                Point(cx_l + math.cos(rr_f) * largo_log / 2,
+                      cy_l + math.sin(rr_f) * largo_log / 2),
+                ang, manzanas, arbol_manzanas) > _DESVIO_MAX_MANZANA:
+            n_cruzados += 1
         ref = msp.add_blockref("LOGRADOURO", (cx_l, cy_l),
                                dxfattribs={"layer": "LOGRADOURO", "rotation": ang})
         ref.add_auto_attribs({
@@ -3081,6 +3151,9 @@ def run(input: EntregaInput) -> EntregaOutput:
             "CEP": cep_calle,
         })
         cajas_todas.add(_caja_texto((cx_l, cy_l), ang, largo_log, _H_ROTULO_LOG))
+    if n_cruzados:
+        logger.info(f"Rótulos de calle que quedaron cruzados respecto de la manzana: "
+                    f"{n_cruzados} (no había posición paralela libre en toda la cuadra).")
     if n_sobre_manzana:
         logger.info(f"Rótulos de calle sin lugar limpio en toda la cuadra: "
                     f"{n_sobre_manzana} (se dibujan en la posición menos mala).")
