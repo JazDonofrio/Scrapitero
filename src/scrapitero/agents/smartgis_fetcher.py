@@ -515,6 +515,10 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
                 # diciendo `direccion_source='bci_pdf'`, o sea con el linaje mentido—.
                 # `manual` es la corrección del operador desde el panel de incidencias:
                 # trabajo humano, nunca se pisa.
+                # `bci_pdf_calle` va en la misma lista que `bci_pdf`: el logradouro salió
+                # igual del PDF del BCI y hay que protegerlo. Lo que ese sello distingue es
+                # que el NÚMERO de esa fila no vino del PDF (ver `bci_parser`), y el número
+                # acá no se toca, así que la guarda de la calle aplica igual.
                 conn.execute(text("""
                     UPDATE parcelas SET
                         survey_id = :sid,
@@ -524,11 +528,11 @@ def _upsert_lots(lots: list[dict], region_id: str, survey_id: str) -> tuple[int,
                                        THEN centroid_lat ELSE :lat END,
                         centroid_lng = CASE WHEN ubicacion_source = 'manual'
                                        THEN centroid_lng ELSE :lon END,
-                        calle = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                        calle = CASE WHEN direccion_source IN ('bci_pdf', 'bci_pdf_calle', 'manual')
                                 THEN calle ELSE COALESCE(:calle, calle) END,
-                        barrio = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                        barrio = CASE WHEN direccion_source IN ('bci_pdf', 'bci_pdf_calle', 'manual')
                                  THEN barrio ELSE COALESCE(:barrio, barrio) END,
-                        codigo_postal = CASE WHEN direccion_source IN ('bci_pdf', 'manual')
+                        codigo_postal = CASE WHEN direccion_source IN ('bci_pdf', 'bci_pdf_calle', 'manual')
                                         THEN codigo_postal ELSE COALESCE(:cep, codigo_postal) END,
                         area_m2_terreno = COALESCE(:aterr, area_m2_terreno),
                         area_m2_construida = COALESCE(:acons, area_m2_construida),

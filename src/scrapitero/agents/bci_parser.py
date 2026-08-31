@@ -443,12 +443,37 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                 propietario_nombre          = COALESCE(:prop, propietario_nombre),
                 propietario_documento       = COALESCE(:prop_doc, propietario_documento),
                 contribuyente_secundario    = COALESCE(:prop_sec, contribuyente_secundario),
+                -- El sello vale por la dirección COMPLETA, no sólo por la calle. Antes se
+                -- promovía a 'bci_pdf' con sólo encontrar el logradouro, y como el número se
+                -- conserva con COALESCE(:nro, numero), un número que este PDF nunca dijo
+                -- —típicamente el que interpola `address_resolver` entre los extremos de
+                -- cuadra del IBGE, sellado honestamente como 'ibge_logradouros' con 0.80—
+                -- terminaba con el linaje del catastro y confianza 0.95: la inferencia salía
+                -- con MÁS confianza de la que entró. Medido en Várzea Grande: en
+                -- `zona-varzea-grande-zonalimitada` el parser reproduce 3 de 25 números
+                -- guardados, y los otros 22 no aparecen en su propio PDF ni en texto ni en
+                -- tablas. Mismo modo de falla que 'overture' pisando 'poi'.
+                -- Ahora son tres casos:
+                --   · el PDF trae número, o la fila no tenía ninguno → 'bci_pdf'
+                --   · el PDF trae sólo la calle y ya había un número → 'bci_pdf_calle'
+                --   · el PDF no trae calle                          → se conserva el sello
+                -- `bci_pdf_calle` NO va en `catastro_geocoder.FUENTES_AUTORITATIVAS`, a
+                -- propósito: la calle es del catastro pero la altura es inferida, así que la
+                -- parcela no sirve de ancla para geocodificar. Sí va en la guarda de
+                -- `smartgis_fetcher`, que protege el logradouro completo del BCI de que lo
+                -- pise el de SmartGIS, que viene sin el tipo de vía.
                 direccion_source            = CASE WHEN direccion_source = 'manual' THEN 'manual'
-                                                   WHEN :calle IS NOT NULL THEN 'bci_pdf'
+                                                   WHEN :calle IS NOT NULL
+                                                    AND (:nro IS NOT NULL OR numero IS NULL)
+                                                        THEN 'bci_pdf'
+                                                   WHEN :calle IS NOT NULL THEN 'bci_pdf_calle'
                                                    ELSE direccion_source END,
                 direccion_confidence        = CASE WHEN direccion_source = 'manual'
                                                    THEN direccion_confidence
-                                                   WHEN :calle IS NOT NULL THEN 0.95
+                                                   WHEN :calle IS NOT NULL
+                                                    AND (:nro IS NOT NULL OR numero IS NULL)
+                                                        THEN 0.95
+                                                   WHEN :calle IS NOT NULL THEN 0.80
                                                    ELSE direccion_confidence END
             WHERE parcela_id = :pid
         """), {
