@@ -179,6 +179,27 @@ def clasificar_complemento(complemento: str | None) -> tuple[str, str]:
     return " ".join(unidad).strip(), " ".join(nombre).strip()
 
 
+# El BCI mete el "S/N" del NÚMERO dentro del nombre de la vía y deja puntos sueltos al
+# final (ver [[bci-etiquetas-calle-no-confiables]]). Sin sacarlo, el entregable sale con el
+# S/N duplicado —`R ZEQUINHA DE ABREU S/N   S/N QD 43 LT 11`, una vez en el nombre y otra en
+# la columna del número— y además parte la calle en dos: "SANTA LAURA" y "SANTA LAURA S/N"
+# salían como dos logradouros distintos con el mismo CEP y el mismo código.
+_S_N_AL_FINAL = re.compile(r"[\s.,;]*\bS/?\s?N\.?$", re.IGNORECASE)
+
+
+def limpiar_nombre_via(calle: str | None) -> str:
+    """El nombre de la vía sin la basura de la etiqueta de origen, en mayúsculas.
+
+    Saca sólo un `S/N` **final**: en el medio puede ser parte del nombre. Y si al sacarlo no
+    queda nada más que el tipo de vía ("RUA S/N" → "RUA"), el S/N era el nombre y se deja
+    como estaba: perder el nombre es peor que dejar el ruido.
+    """
+    s = re.sub(r"\s+", " ", (calle or "").strip().upper())
+    limpio = _S_N_AL_FINAL.sub("", s).strip(" .,;-")
+    sin_guion = re.sub(r"\s*-\s*", " ", limpio).split()
+    return limpio if len(sin_guion) >= 2 else s.strip(" .,;")
+
+
 def descomponer_logradouro(calle: str | None) -> dict:
     """Separa `calle` en tipo / título / preposição / nome oficial.
 
@@ -189,7 +210,7 @@ def descomponer_logradouro(calle: str | None) -> dict:
     if not calle or not calle.strip():
         return out
 
-    resto = calle.strip().upper()
+    resto = limpiar_nombre_via(calle)
 
     # Tipo: formato BCI "TIPO - NOMBRE" o primer token reconocido
     m = re.match(r"^([^-]+?)\s*-\s*(.+)$", resto)
