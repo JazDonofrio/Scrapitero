@@ -3756,7 +3756,6 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 # El nombre pasa a su columna propia; el resto no va al layout de operadora
                 # (el valor crudo queda intacto en `parcelas.complemento` y en el CSV completo).
                 unidad, nombre_compl = clasificar_complemento(compl)
-                full = " ".join(x for x in (calle, numero, unidad) if x)
                 if nombre_compl:
                     # Dedupe: el nombre suele venir por partida doble (el hotel ya está en
                     # `hoteles` y además rotulado en el complemento del BCI).
@@ -3775,6 +3774,21 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                 logr_completo = " ".join(x for x in (cod_tipo, d_logr["titulo"],
                                                      d_logr["preposicao"], d_logr["nome"]) if x)
                 pares_unidad = partes_unidad(unidad)
+                # `DSC_ENDERECO_COMPLETO` con el formato EXACTO del cliente, verificado en las
+                # 673 filas de su propia base: vía abreviada + número alineado a la derecha en
+                # un campo de 6 + complemento con SUS abreviaturas.
+                #     'AV PRES ARTHUR BERNARDES    13 QD 12'
+                #     'R SENADOR VICENTE VUOLO   401 CASA 1'
+                # Antes se armaba con `calle` cruda y el complemento sin normalizar, y salía
+                # 'AVENIDA - SANTA LAURA S/N QUADRA 41 LOTE 17': el tipo de vía sin abreviar,
+                # un guión que su base no usa, sin el relleno y con 'QUADRA/LOTE' en vez de
+                # 'QD/LT'. El cliente cuenta filas pivoteando por esta columna, así que una
+                # dirección con otra grafía no le cruza contra su base aunque sea el mismo
+                # inmueble. `logr_completo` y `pares_unidad` ya tenían las formas buenas.
+                compl_txt = " ".join(f"{t} {x}" for t, x in pares_unidad)
+                full = f"{logr_completo}{(numero or ''):>6}"
+                if compl_txt:
+                    full = f"{full} {compl_txt}"
 
                 for tipo in unidades:
                     # Ciudad/provincia: la de la parcela y, si el catastro no las publica
