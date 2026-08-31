@@ -47,8 +47,16 @@ OVERPASS_MIRRORS_TOR = [
 ]
 OVERPASS_TIMEOUT = 120  # segundos
 
+# El User-Agent NO puede contener "Mozilla" ni "Scraper": overpass-api.de filtra por esas dos
+# subcadenas y devuelve **406 Not Acceptable** desde su nginx, antes de mirar la consulta. El UA
+# anterior traía las dos, así que el mirror principal venía rechazando TODAS nuestras consultas
+# —directas y via Tor, que también las manda— y se leía como "Overpass está caído". Ese 406 está
+# anotado como caída ajena desde el 11-ago-2026; era nuestro header. Medido el 31-ago-2026 contra
+# overpass-api.de con la misma consulta: `Mozilla/5.0 (compatible; ScraperGIS/1.0; …)` → 406,
+# `ScraperGIS/1.0` → 406, `Mozilla/5.0` pelado → 406, `aimappingbot/1.0` → 200, el de acá → 200.
+# Si alguna vez hay que volver a tocarlo: probar el UA contra un mirror ANTES de suponer una caída.
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; ScraperGIS/1.0; +https://github.com/Meter0r0/Scrapitero)",
+    "User-Agent": "aimapping-scrapitero/1.0 (+https://aimapping.net)",
     "Accept": "*/*",
 }
 
