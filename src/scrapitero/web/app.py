@@ -3367,10 +3367,34 @@ CSV_OPERADORA_COD = "858"
 # tiene venta liberada, y su COD_HP/COD_IMOVEL lo asigna la operadora, no el relevamiento.
 _OPERADORA_NO_INFERIBLE = (
     "DSC_STATUS_", "DSC_SITUACAO_", "DSC_MOTIVO_", "COD_SITUACAO_", "IND_BLOQUEIO_",
-    "QTD_CAPACIDADE_", "DAT_", "NUM_CONTRATO", "COD_HP", "COD_IMOVEL", "NUM_UTM",
-    "COD_CELULA", "COD_NODE", "COD_BAIRRO", "COD_LOGRADOURO", "COD_TIPO_IMOVEL",
+    "QTD_CAPACIDADE_", "DAT_", "NUM_CONTRATO", "COD_HP", "COD_IMOVEL",
+    # `NUM_UTM` y `COD_CELULA` SALIERON de esta lista: la primera es la coordenada, que la
+    # tenemos; la segunda la asigna el cliente pero nos la dice al pedir el export, igual
+    # que al DXF. `COD_LOGRADOURO` se queda: en su propio archivo 167 de 388 nombres de
+    # calle tienen más de un código, así que deducirlo por nombre acierta 69% y miente 31%.
+    "COD_NODE", "COD_BAIRRO", "COD_LOGRADOURO", "COD_TIPO_IMOVEL",
     "COD_CID_CONTRATO", "NUM_IMPAR_", "NUM_PAR_", "COD_CONDOMINIO", "DSC_CONDOMINIO",
 )
+
+
+def _num_utm(lat, lng) -> str:
+    """`NUM_UTM` del layout: este(6) + los ÚLTIMOS 6 del norte, sin separador.
+
+    Descifrado del propio archivo del cliente: sus 673 filas son 12 dígitos y encajan
+    todas con el huso de Várzea (`593977270516` → E 593977, N 8.270.516). El norte se
+    trunca a 6 porque en el hemisferio sur son 7 dígitos y el primero no varía dentro de
+    una ciudad. Se usa el huso UTM que corresponde a la coordenada, no uno fijo.
+    """
+    if lat is None or lng is None:
+        return ""
+    try:
+        from pyproj import Transformer
+        epsg = 32700 + int((float(lng) + 180) / 6) + 1 if float(lat) < 0 \
+            else 32600 + int((float(lng) + 180) / 6) + 1
+        e, n = Transformer.from_crs(4326, epsg, always_xy=True).transform(float(lng), float(lat))
+        return f"{int(round(e)):06d}"[-6:] + f"{int(round(n)):d}"[-6:]
+    except Exception:   # noqa: BLE001 — una coordenada rara no puede tumbar el export
+        return ""
 
 
 def _constantes_baseline(filas_extras: list, header: list, ya_mapeadas: set) -> dict:
@@ -3546,7 +3570,7 @@ async def export_perfiles(survey_id: str) -> JSONResponse:
 
 
 @app.get("/api/surveys/{survey_id}/export/csv-operadora")
-async def export_csv_operadora(survey_id: str) -> StreamingResponse:
+async def export_csv_operadora(survey_id: str, celula_id: str = "") -> StreamingResponse:
     """CSV con el layout de entrega del cliente (`_EXPORT_PERFILES_CLIENTE`).
 
     Con baseline vinculado se usa el header del CSV que el cliente importó (cualquier
@@ -3643,7 +3667,8 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                        -- UNICO / MULTIPLO: lo sabe el BCI (unidades de la inscrição). Es el
                        -- `COD_TIPO_EDIFICACAO` del layout.
                        (SELECT count(*) FROM parcela_unidades u
-                          WHERE u.parcela_id = parcelas.parcela_id) AS n_unidades
+                          WHERE u.parcela_id = parcelas.parcela_id) AS n_unidades,
+                       centroid_lat, centroid_lng
                 FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
                 ORDER BY calle,
@@ -3753,7 +3778,8 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
             w = csv.writer(buf, delimiter=";")
             w.writerow(header)
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-            for calle, numero, compl, barrio, muni, est, cep, uv, uc, nome, n_unid in parc:
+            for (calle, numero, compl, barrio, muni, est, cep, uv, uc, nome, n_unid,
+                 c_lat, c_lng) in parc:
                 # El `complemento` del BCI mezcla cuatro cosas y sólo una es dirección:
                 # unidad ("QUADRA 04 LOTE 13"), nombre del inmueble ("DROGASIL"), nota
                 # registral ("MAT.57499") y referencia ("ESQUINA COM A RUA X"). Sin separar,
@@ -3814,6 +3840,11 @@ async def export_csv_operadora(survey_id: str) -> StreamingResponse:
                     _set(fila, "DSC_LOGR_COMPLETO", logr_completo)
                     # Una inscrição con más de una unidad en el BCI es edificación MÚLTIPLE.
                     _set(fila, "COD_TIPO_EDIFICACAO", "MULTIPLO" if (n_unid or 0) > 1 else "UNICO")
+                    # La célula la asigna el cliente y nos la dice al pedir el export, igual
+                    # que al DXF; la coordenada es nuestra. Las dos estaban en blanco por
+                    # figurar como "no inferibles", y las dos sí se saben.
+                    _set(fila, "COD_CELULA", celula_id.strip())
+                    _set(fila, "NUM_UTM", _num_utm(c_lat, c_lng))
                     # El complemento de unidad, en los pares tipo/texto del layout (hasta 4).
                     for i, (t_u, x_u) in enumerate(pares_unidad[:4], start=1):
                         _set(fila, f"DSC_IMOVEL_TIPO_COMPLEMENTO{i}", t_u)

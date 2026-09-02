@@ -1987,7 +1987,7 @@ function renderCard(s) {
 
           <div class="detail-footer">
             <button class="btn btn-sm btn-outline" onclick="refreshCard('${sid}')">${t('↻ Actualizar')}</button>
-            ${s.export_cliente ? `<a class="btn btn-sm btn-green" href="/api/surveys/${sid}/export/csv-operadora" download
+            ${s.export_cliente ? `<a class="btn btn-sm btn-green" href="#" onclick="return csvOperadora(event, '${sid}')" download
                style="text-decoration:none"
                title="${tAttr('Descargar el CSV con el formato de entrega propio del cliente')}: ${escHtml(s.export_cliente.descripcion || '')}">⬇ ${escHtml(s.export_cliente.etiqueta)}</a>` : ''}
             ${s.export_plano
@@ -2559,6 +2559,16 @@ async function runNumeros(sid, btn) {
 // (`export_plano` del survey), y entonces lleva el ID de célula (p.ej. VAZ049) en el
 // atributo `ID` de cada bloque. No lo sabemos nosotros: lo asigna el cliente por zona,
 // así que se pide acá en vez de inventar uno. Cancelar aborta; vacío genera sin ID.
+// El CSV de operadora lleva COD_CELULA, que asigna el cliente: se pide igual que para el
+// DXF en vez de dejar la columna vacía.
+function csvOperadora(ev, sid) {
+  ev.preventDefault();
+  const c = prompt(t('ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:'), '');
+  if (c === null) return false;
+  window.location = `/api/surveys/${sid}/export/csv-operadora?celula_id=${encodeURIComponent(c.trim())}`;
+  return false;
+}
+
 function descargarEntrega(sid) {
   const celula = prompt(t('ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:'), '');
   if (celula === null) return;
