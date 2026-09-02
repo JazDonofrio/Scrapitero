@@ -182,12 +182,16 @@ def main() -> int:
     # El prefijo NO es cosmético: `DXFEntrega` lo usa como prioridad y `AC_` significa
     # "as-built que nos devolvió el cliente". Un MUB municipal recortado a la zona es otra
     # cosa y va como `MUB_<region>`: mejor que las caras de OSM, pero no es su dibujo.
+    # `ACV_` es el mismo cliente pero un plano VIEJO (la célula VAZ049 es de 2014). Va por
+    # debajo del `AC_` vigente y por encima del MUB: donde el plano nuevo no cerró una
+    # manzana, el viejo suele tenerla, y sigue siendo su línea y no una cara de OSM.
     ap.add_argument("--prefijo", default="AC",
-                    help="Prefijo de la fuente: AC (as-built del cliente) o MUB "
-                         "(base municipal recortada). Queda como '<prefijo>_<region_id>'.")
+                    help="Prefijo de la fuente: AC (as-built vigente del cliente), ACV "
+                         "(as-built viejo del mismo cliente) o MUB (base municipal "
+                         "recortada). Queda como '<prefijo>_<region_id>'.")
     args = ap.parse_args()
-    if args.prefijo not in ("AC", "MUB"):
-        raise SystemExit(f"Prefijo desconocido: {args.prefijo!r} (AC o MUB)")
+    if args.prefijo not in ("AC", "ACV", "MUB"):
+        raise SystemExit(f"Prefijo desconocido: {args.prefijo!r} (AC, ACV o MUB)")
 
     if not args.dwg.exists():
         raise SystemExit(f"No existe: {args.dwg}")

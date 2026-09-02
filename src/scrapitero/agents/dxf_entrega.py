@@ -102,6 +102,27 @@ _H_META = 2.0        # nuestra nota de auditoría
 # 2 m es el paso de línea del propio bloque (sus atributos ocultos van cada ~2,7 m con
 # texto de 2,0; el rótulo visible mide 1,5).
 _SALTO_PISOS_SDU = 2.0
+# Cuánto se estira el recorte para traer la manzana de ENFRENTE: el ancho de una calle
+# con sus dos veredas. Una unidad del borde necesita esa cara dibujada aunque adentro no
+# haya nada relevado. Más que esto empieza a arrastrar manzanas de barrios vecinos.
+_SALTO_VECINA_M = 45.0
+
+# Una polilínea ABIERTA a la que sólo le falta un lado se cierra; una cadena de borde no.
+# El discriminante es el hueco entre extremos contra el LADO MÁS LARGO que el cliente sí
+# dibujó: si lo que falta no es más largo que un lado suyo, es un lado que no trazó. En
+# Várzea separa sin ambigüedad —los lotes dan 0,15-0,74 y las cadenas 1,11-3,17—. Cerrar
+# TODO lo abierto es el error que ya costó 190 polígonos cruzando lotes.
+_RATIO_LADO_FALTANTE = 1.05
+
+# Relleno de manzana en modo calco: una cara de otra fuente entra sólo donde el cliente no
+# dibujó anillo. Un solape mayor a esto significa que él SÍ la tiene y sería doble línea.
+# A partir de esta prioridad la fuente es un DIBUJO DEL CLIENTE (ACV_ y AC_). Lo suyo se
+# copia ENTERO: ni recorte al relevamiento, ni corte contra la hoja, ni filtro de calle
+# adentro. Pedido explícito de Jaz: "copiá todas sus quadra y pegalas arriba de las
+# nuestras". Los filtros siguen valiendo para OSM y el MUB, que sí meten ruido.
+_PRIO_CLIENTE = 3
+_SOLAPE_MAX_RELLENO = 0.10
+_AREA_MIN_MANZANA_RELLENO = 2_000.0   # m² — por debajo es un cantero, no una manzana
 
 
 def _atributo_clonado(blk, modelo_tag: str, nuevo_tag: str, salto: float) -> bool:
@@ -553,6 +574,15 @@ def _punto_adentro(poli: Polygon, frente, direccion, normal,
             return x, y
     rp = poli.representative_point()
     return rp.x, rp.y
+
+
+def _falta_un_lado(pts) -> bool:
+    """¿Es un anillo al que le falta un lado, o una cadena de borde abierta de verdad?"""
+    if len(pts) < 3:
+        return False
+    hueco = math.dist(pts[0], pts[-1])
+    lado_max = max(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+    return bool(lado_max) and hueco / lado_max <= _RATIO_LADO_FALTANTE
 
 
 def _cadenas_de_mapa_base(tramos, recorte=None) -> list[tuple[list, bool]]:
@@ -2042,7 +2072,12 @@ def run(input: EntregaInput) -> EntregaOutput:
             # red de calles: en la zona piloto trae 111 manzanas contra las 39 de OSM y las
             # 42 del MUB general. Y por debajo del `AC_`, que es el dibujo del propio cliente.
             fuentes[f"MUB_{region_id}"] = 2
-            fuentes[f"AC_{region_id}"] = 3
+            # El plano VIEJO del mismo cliente (`cargar_base_dwg.py --prefijo ACV`). Va
+            # arriba del MUB y de OSM porque sigue siendo SU línea, y abajo del vigente.
+            # En Várzea cierra la manzana de Ponce de Arruda que el plano de 2026 deja
+            # como una cadena abierta de 1,3 km.
+            fuentes[f"ACV_{region_id}"] = 3
+            fuentes[f"AC_{region_id}"] = 4
         quadras, meiofio, lotes_cliente = _mapa_base(conn, fuentes, bbox, tr)
         # **Recorte al relevamiento.** El bbox es un rectángulo y la zona suele ser un
         # corredor, así que su bbox ya vale varias veces la zona; encima, una manzana que
@@ -2064,12 +2099,44 @@ def run(input: EntregaInput) -> EntregaOutput:
                 if len(pts) < 2:
                     return False
                 g = Polygon(pts) if (t[1] and len(pts) >= 3) else LineString(pts)
-                return g.buffer(0).intersects(recorte)
+                # ⚠ `buffer(0)` va SÓLO sobre el polígono, donde repara auto-intersecciones.
+                # Sobre una línea devuelve POLYGON EMPTY, y un vacío no interseca nada: el
+                # recorte se comía el 100 % de las cadenas ABIERTAS —las 88 de manzana que
+                # el cliente dibuja sueltas incluidas— y las manzanas del borde salían sin
+                # cerrar. El log lo cantaba como "0 cadenas de borde".
+                if isinstance(g, Polygon):
+                    g = g.buffer(0)
+                return g.intersects(recorte)
+            def _geom(t):
+                pts = t[0]
+                if len(pts) < 2:
+                    return None
+                g = Polygon(pts) if (t[1] and len(pts) >= 3) else LineString(pts)
+                if isinstance(g, Polygon):
+                    g = g.buffer(0)
+                return None if g.is_empty else g
+
             n_q, n_m = len(quadras), len(meiofio)
-            quadras = [q for q in quadras if _toca(q)]
+            geoms_q = [_geom(q) for q in quadras]
+            dentro = {i for i, (g, q) in enumerate(zip(geoms_q, quadras))
+                      if q[2] >= _PRIO_CLIENTE or (g is not None and g.intersects(recorte))}
+            # **Un salto de vecindad.** Una manzana sin nada relevado adentro igual hace
+            # falta: la unidad del borde da a la calle, y la vereda de enfrente es esa
+            # manzana. Sin ella el lote del borde queda con la calle abierta al vacío.
+            # Se suma UNA vuelta de vecinas a menos del ancho de una calle, que trae la
+            # cara de enfrente sin arrastrar el barrio entero —que es lo que el recorte
+            # vino a evitar—.
+            if dentro:
+                cerca = unary_union([geoms_q[i] for i in dentro]).buffer(_SALTO_VECINA_M)
+                vecinas = {i for i, g in enumerate(geoms_q)
+                           if i not in dentro and g is not None and g.intersects(cerca)}
+            else:
+                vecinas = set()
+            quadras = [q for i, q in enumerate(quadras) if i in dentro or i in vecinas]
             meiofio = [m for m in meiofio if _toca(m)]
             logger.info(f"Recorte al relevamiento (+{input.margen_base_m:.0f} m): "
-                        f"manzanas {n_q}→{len(quadras)}, meiofio {n_m}→{len(meiofio)}")
+                        f"manzanas {n_q}→{len(quadras)} ({len(vecinas)} por vecindad), "
+                        f"meiofio {n_m}→{len(meiofio)}")
         calles_geom, calles_datos = _calles(conn, bbox, tr)
         # Los ejes de calzada CON nombre, de OSM: es lo que decide dónde va cada rótulo.
         ejes_osm = _ejes_de_calle(conn, f"OSM_{region_id}", bbox, tr) if region_id else {}
@@ -2125,14 +2192,18 @@ def run(input: EntregaInput) -> EntregaOutput:
     # el DWG del cliente manda sobre OSM y OSM sobre el MUB.
     por_prioridad: dict[int, list] = {}
     for pts, cerrada, prioridad in quadras:
-        if not cerrada or len(pts) < 3:
+        # La abierta a la que sólo le falta un lado cuenta como anillo: es como el cliente
+        # dibuja la manzana de Ponce de Arruda en su plano viejo —14 m de hueco contra un
+        # lado de 114— y sin esto esa cuadra se queda sin manzana. La cadena de borde de
+        # verdad sigue afuera: cerrarla es lo que metía polígonos cruzando lotes.
+        if (not cerrada and not _falta_un_lado(pts)) or len(pts) < 3:
             continue
         poly = Polygon(pts)
         if not poly.is_valid:
             poly = poly.buffer(0)
         if not isinstance(poly, Polygon) or poly.area < _AREA_MIN_MANZANA:
             continue
-        if not poly.intersects(hoja):
+        if prioridad < _PRIO_CLIENTE and not poly.intersects(hoja):
             continue
         if prioridad < 2:
             # **La cara de OSM llega al EJE de la calle, no a la línea municipal.**
@@ -2155,11 +2226,59 @@ def run(input: EntregaInput) -> EntregaOutput:
     if calco:
         # Ni una manzana de OSM ni del MUB: no coinciden con las suyas y se ven como una
         # segunda línea corrida al lado de la buena.
-        por_prioridad = {2: por_prioridad.get(2, [])}
+        # **La prioridad del cliente no se escribe a mano.** Estaba fijada en `2`, que era
+        # la del `AC_` cuando se escribió esto; al insertarse `MUB_<region>` en el 2 el
+        # `AC_` pasó al 3 y el calco se quedaba filtrando por una fuente que en Várzea no
+        # existe: 0 manzanas, con los 545 lotes del cliente dibujados sueltos. Se toma el
+        # nivel más alto presente, que es de donde salen los lotes que encendieron `calco`.
+        top = max(por_prioridad, default=None)
+        # **Relleno donde él no dibujó manzana.** Sobre Ponce de Arruda el cliente sólo
+        # traza una cadena de borde de 1,3 km, sin anillo cerrado, y las fichas de esa
+        # cuadra quedaban en el aire. Se admite UNA manzana de otra fuente sólo si (a) no
+        # pisa ninguna suya —el solape mata la "segunda línea corrida al lado de la buena"
+        # que motivó el calco— y (b) hay una parcela relevada adentro que hoy no tiene
+        # manzana. Sin las dos condiciones no entra: no es volver al híbrido.
+        suyas = [p for p in por_prioridad.get(top, [])] if top is not None else []
+        relleno = []
+        if suyas:
+            union_suyas = unary_union(suyas)
+            # **Huérfana = su punto NO cae dentro de ninguna manzana.** Con `intersects`
+            # bastaba que un anillo le rozara una esquina para darla por cubierta, y el
+            # relleno siguiente ya no la rescataba: quedaba la ficha en el aire igual.
+            huerfanas = [g.representative_point() for g in (_geom_utm(x, tr) for x in geoms)
+                         if g is not None and not union_suyas.contains(g.representative_point())]
+            # De mayor a menor prioridad: primero el plano viejo del propio cliente, que es
+            # su línea, y sólo después OSM o el MUB para lo que aquél no llegue a tapar.
+            # El criterio de admisión NO es el solape entre rellenos —eso dejaba huecos
+            # sin cubrir— sino si la candidata rescata alguna parcela que siga huérfana.
+            sin_cubrir = list(huerfanas)
+            for prio in sorted(por_prioridad, reverse=True):
+                if prio == top or not sin_cubrir:
+                    continue
+                for poly in por_prioridad[prio]:
+                    if poly.area < _AREA_MIN_MANZANA_RELLENO:
+                        continue
+                    if poly.intersection(union_suyas).area > _SOLAPE_MAX_RELLENO * poly.area:
+                        continue
+                    rescata = [h for h in sin_cubrir if poly.contains(h)]
+                    if not rescata:
+                        continue
+                    relleno.append(poly)
+                    sin_cubrir = [h for h in sin_cubrir if h not in rescata]
+        # Se quedan TODOS los dibujos del cliente (AC_ y ACV_), no sólo el vigente: es el
+        # copy-paste que pidió Jaz. OSM y el MUB siguen fuera salvo como relleno.
+        por_prioridad = {p_: v for p_, v in por_prioridad.items() if p_ >= _PRIO_CLIENTE}
+        if relleno:
+            por_prioridad[top] = por_prioridad[top] + relleno
+            logger.info(f"Relleno de manzana donde el cliente no dibujó ninguna: "
+                        f"{len(relleno)} agregada(s).")
     for prioridad in sorted(por_prioridad, reverse=True):
         nivel = []
         for poly in por_prioridad[prioridad]:
-            if cubierto is not None and \
+            # Lo del cliente NO se descarta por estar cubierto: sus dos planos se pegan
+            # los dos, encimados si hace falta. El descarte es para OSM/MUB, donde dos
+            # juegos superpuestos hacían que un lote cruzara el borde del otro.
+            if prioridad < _PRIO_CLIENTE and cubierto is not None and \
                     poly.intersection(cubierto).area > poly.area * 0.02:
                 continue        # ya la cubre una manzana de una fuente mejor
             prioridad_de[id(poly)] = prioridad
@@ -2255,21 +2374,31 @@ def run(input: EntregaInput) -> EntregaOutput:
     if calco:
         for pts in lotes_ac_pts:
             msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": "DIV"})
+        div_cerradas = 0
         for pts in div_abiertos:
-            msp.add_lwpolyline(pts, close=False, dxfattribs={"layer": "DIV"})
+            cerrar = _falta_un_lado(pts)
+            div_cerradas += cerrar
+            msp.add_lwpolyline(pts, close=cerrar, dxfattribs={"layer": "DIV"})
         # Y las cadenas de borde de manzana que él dibuja abiertas: sin ellas 37 manzanas
-        # se quedan sin contorno, y cerrarlas inventa polígonos que cortan lotes.
-        quadra_abiertas = 0
+        # se quedan sin contorno. Las que sólo tienen un lado sin trazar se cierran; las
+        # cadenas de verdad NO, que es lo que metía polígonos cruzando lotes.
+        # **Sólo las del plano VIGENTE.** Las cadenas del plano viejo del cliente dicen casi
+        # lo mismo unos metros corridas: dibujarlas encima es la doble línea que el calco
+        # vino a sacar. Del viejo se aprovecha sólo lo que cierra manzana, vía el relleno.
+        quadra_abiertas = quadra_cerradas = 0
         for pts, cerrada, prioridad in quadras:
-            if cerrada or prioridad < 2 or len(pts) < 2:
+            if cerrada or prioridad < _PRIO_CLIENTE or len(pts) < 2:
                 continue
-            if not LineString(pts).intersects(hoja):
-                continue
-            msp.add_lwpolyline(pts, close=False, dxfattribs={"layer": "QUADRA"})
+            if _falta_un_lado(pts):
+                continue   # ya salió como anillo cerrado por el camino de los polígonos
+            cerrar = _falta_un_lado(pts)
+            quadra_cerradas += cerrar
+            msp.add_lwpolyline(pts, close=cerrar, dxfattribs={"layer": "QUADRA"})
             quadra_abiertas += 1
         logger.info(f"Calcado del DWG del cliente: {len(anillos_dib)} manzanas cerradas + "
-                    f"{quadra_abiertas} cadenas de borde · {len(lotes_ac)} lotes + "
-                    f"{len(div_abiertos)} cadenas de lote")
+                    f"{quadra_abiertas} cadenas de borde ({quadra_cerradas} cerradas por lado faltante) · "
+                    f"{len(lotes_ac)} lotes + "
+                    f"{len(div_abiertos)} cadenas de lote ({div_cerradas} cerradas por lado faltante)")
     meiofio_dib = _cadenas_de_mapa_base(meiofio, hoja)
     if input.meiofio:
         for pts, cerrada in meiofio_dib:
