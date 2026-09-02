@@ -59,6 +59,11 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 # setearla. El cookie de sesión se firma con HMAC (no se puede falsificar el rol).
 OPERADOR_PASSWORD = os.getenv("OPERADOR_PASSWORD", "")
 CLIENTE_PASSWORD = os.getenv("CLIENTE_PASSWORD", "")
+
+# Planos corregidos a mano que reemplazan la salida del pipeline, uno por survey
+# (`<survey_id>.dxf`). Ver el endpoint de export DXF: si el archivo existe, se sirve ése.
+_DXF_FIJADO_DIR = Path(os.getenv("SCRAPITERO_DXF_FIJADO_DIR",
+                                 "/opt/scrapitero/exports/dxf_fijado"))
 _AUTH_SECRET = (os.getenv("WEB_AUTH_SECRET") or WEBHOOK_SECRET
                 or "scrapitero-dev-secret-cambiar-en-prod")
 _AUTH_COOKIE = "scrap_auth"
@@ -4013,6 +4018,18 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     nombre = (f"entrega_{celula_id or meta[0]}_{fecha}.dxf" if plano
               else f"relevamiento_{meta[0]}_{fecha}.dxf").replace(" ", "_").replace("/", "-")
     destino = os.path.join(tmpdir, nombre)
+
+    # **Archivo fijado a mano.** Si existe `exports/dxf_fijado/<survey_id>.dxf`, el botón
+    # sirve ESE y no genera nada: es para cuando el plano se corrigió en AutoCAD y hay que
+    # entregar esa versión, no la que sale del pipeline. Es deliberadamente un archivo y no
+    # una bandera en la base: se ve con un `ls`, y se desactiva borrándolo.
+    # ⚠ Queda CONGELADO: no refleja ningún cambio posterior del relevamiento.
+    fijado = _DXF_FIJADO_DIR / f"{survey_id}.dxf"
+    if fijado.is_file():
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.warning(f"DXF fijado a mano para {survey_id}: se sirve {fijado} "
+                       f"en vez de generarlo. Borrar el archivo para volver al pipeline.")
+        return FileResponse(str(fijado), media_type="image/vnd.dxf", filename=nombre)
 
     if plano:
         from scrapitero.agents.dxf_entrega import EntregaInput
