@@ -366,10 +366,20 @@ def _tipo_cliente(uso: str, uf_v: int, uf_c: int) -> str:
     return "E"
 
 
-def _etiqueta(num: str, tp: str, qt: int) -> str:
-    """La única etiqueta que se dibuja. `VAZ` para el lote vacío, como en su ejemplo."""
-    if tp == "E" and not num:
+def _etiqueta(num: str, tp: str, qt: int, baldio: bool = False) -> str:
+    """La única etiqueta que se dibuja.
+
+    **`VAZ` es el terreno baldío y `<número>E` el "especial".** Son dos cosas distintas
+    en su estándar y van en capas distintas (`SDU_VAZ` y `SDU_ESP`): el baldío no tiene
+    nada construido y sale SIEMPRE como `VAZ`, tenga número de puerta o no; el especial
+    es un edificio que no es vivienda ni local —una iglesia, un galpón— y conserva su
+    número. Antes se decidía por si había número, así que 33 baldíos con puerta salían
+    rotulados `<número>E` y en la capa equivocada.
+    """
+    if tp == "E" and baldio:
         return "VAZ"
+    # El especial SIN número va `S/NE`, no `VAZ`: es como lo rotula él en su propio plano
+    # (4 de sus 6 fichas `SDU_ESP` son `S/NE`). `VAZ` queda reservado al baldío.
     base = f"{num or 'S/N'}{tp}"
     return f"{base}-{qt}" if qt > 1 else base
 
@@ -1484,8 +1494,8 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
     """Dibuja un bloque `SDU`/`MDU` con todos sus atributos. Devuelve cuál dibujó."""
     es_mdu = rec["es_mdu"]
     sufijo = {"R": "RES", "C": "COM", "E": "ESP"}[tp_b]
-    if not es_mdu and tp_b == "E":
-        sufijo = "VAZ"     # el lote vacío tiene capa propia en el estándar
+    if not es_mdu and tp_b == "E" and rec.get("baldio"):
+        sufijo = "VAZ"     # el baldío tiene capa propia; el "especial" se queda en ESP
     capa = f"{'MDU' if es_mdu else 'SDU'}_{sufijo}"
     ref = msp.add_blockref("MDU" if es_mdu else "SDU", punto,
                            dxfattribs={"layer": capa, "rotation": rot})
@@ -1528,7 +1538,7 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
         return "MDU"
 
     ref.add_auto_attribs({
-        "N_C1_3_TP_QT": _etiqueta(num, tp_b, qt_b),
+        "N_C1_3_TP_QT": _etiqueta(num, tp_b, qt_b, rec.get("baldio", False)),
         # El lote vacío no lleva pisos: no hay nada construido que contar.
         "QTD_ANDARES": "" if tp_b == "E" else pisos,
         # La línea legible. Se arma con las UF **de este bloque**, no las de la parcela:
@@ -2570,6 +2580,9 @@ def run(input: EntregaInput) -> EntregaOutput:
             "manzana": i_mz,
             "num": num, "complemento": complemento, "cep": cep_num, "codlog": codlog,
             "pisos": pisos_texto(pisos or pisos_sat), "uf_v": uf_v, "uf_c": uf_c,
+            # Baldío = el municipio no le declara NADA construido. Es lo que separa el
+            # `VAZ` del `<número>E`; ver `_etiqueta`.
+            "baldio": not (area_c or 0),
             "calle": _nombre_calle(calle) if calle else "", "punto": (cx, cy),
         })
         hp_total += uf_v + uf_c
