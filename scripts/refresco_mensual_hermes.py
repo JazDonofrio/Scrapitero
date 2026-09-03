@@ -161,16 +161,23 @@ def main() -> int:
         return 0
 
     # 1) Universo de hospedagem (baja el dump del mes si hay uno nuevo).
+    #    ⚠ SIN filtro de UF, a propósito. La primera versión de este script le pasaba las
+    #    UFs relevadas y eso **achicó la tabla de 202.087 filas (todo Brasil) a 5.790 (MT)**:
+    #    una pérdida de cobertura que nadie habría notado hasta crear una zona en otro
+    #    estado y encontrarla sin hoteles. Filtrar acá no ahorra descarga —los .zip se bajan
+    #    enteros igual, el filtro es por fila— y el CNAE de hospedagem es tan angosto que
+    #    todo Brasil entra en 200k filas. El filtro por UF sí hace falta en el paso 2, donde
+    #    lo nacional son millones.
     def _hospedagem() -> str:
         from scrapitero.agents.receita_cnpj_fetcher import ReceitaCNPJInput
         from scrapitero.agents.receita_cnpj_fetcher import run as run_cnpj
-        out = run_cnpj(ReceitaCNPJInput(ufs=ufs))
+        out = run_cnpj(ReceitaCNPJInput())
         if not out.ok:
             raise RuntimeError(out.error or "sin detalle")
         nuevo = out.periodo != antes_hosp
         return (f"{'🆕' if nuevo else '✅'} Receita hospedagem: dump {out.periodo}"
                 f"{f' (antes {antes_hosp})' if nuevo else ' — ya estaba al día'}, "
-                f"{out.estabelecimientos:,} establecimientos".replace(",", "."))
+                f"{out.estabelecimientos:,} establecimientos (todo Brasil)".replace(",", "."))
 
     linea, estado = _paso("Receita hospedagem", _hospedagem)
     lineas.append(linea)
