@@ -43,4 +43,9 @@ python3 -m scrapitero.rpc.ibge_logradouros_fetcher <<< '{"region_id":"vg-mt-br",
 - El ZIP del estado completo (~16 MB para MT) se descarga una vez y queda en caché en `/tmp/scrapitero_cache/`
 - El filtro por municipio es un `startswith` sobre el campo `cod_munic` del shapefile
 - Para Várzea Grande, MT: `municipio_codigo = "5108402"`, `estado_uf = "mt"`
+
+## Si la región no tiene `municipio_codigo`
+
+No lo adivines: un código inválido no falla acá, hace que este paso baje el municipio equivocado. Completalo con `scrapitero.rpc.municipio_codigo_fetcher` (`{"region_id":"..."}`), que lo resuelve por región vecina, por reverse-geocoding contra la lista oficial del IBGE o por el nombre de la región, y **nunca escribe un código que no exista**. Si devuelve `sin_resolver`, el `motivo` dice qué le falta a esa región (típicamente: no tiene ni polígono ni parcelas).
+
 - Después de correr, verificar con `coverage-reporter` que `logradouros_count > 0`

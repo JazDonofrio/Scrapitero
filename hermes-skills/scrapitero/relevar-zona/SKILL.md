@@ -121,6 +121,7 @@ Skills disponibles:
 - `scrapitero.rpc.salta_zonificacion_fetcher` → `{"region_id":"...","survey_id":"..."}` (classifica uso por CPUA; `overwrite:true` para reclasificar)
 - `scrapitero.rpc.salta_registro_fetcher` → `{"region_id":"...","survey_id":"..."}` (TIPO registro SIGSA; rural→vacante, club de campo→residencial)
 - `scrapitero.rpc.salta_rentas_fetcher` → `{"region_id":"...","survey_id":"..."}` (baldíos por valorEdificado DGRM; lento, vía Playwright)
+- `scrapitero.rpc.municipio_codigo_fetcher` → `{"region_id":"..."}` (completa `regions.municipio_codigo` si está en NULL; **correrlo ANTES** de census/logradouros/hoteles en Brasil: sin ese código esos pasos se saltean y los hoteles caen a Google, que es pago. `{"dry_run":true}` para ver qué haría; sin `region_id` barre todas las brasileras en NULL)
 - `scrapitero.rpc.ibge_census_fetcher` → `{"region_id":"...","municipio_codigo":"...","survey_id":"..."}` (`estado_uf` opcional: si falta se deriva de los 2 primeros dígitos de `municipio_codigo`, p.ej. 51→MT)
 - `scrapitero.rpc.ibge_logradouros_fetcher` → `{"region_id":"...","municipio_codigo":"..."}` (`estado_uf` opcional: se deriva de `municipio_codigo` si falta)
 - `scrapitero.rpc.address_resolver` → `{"region_id":"...","survey_id":"...","batch_size":200}`
