@@ -27,6 +27,9 @@ después no existe.
                               (comercios, escuelas, hospitales…). No vuelve a descargar.
   3. `CadasturLocalFetcher` — refresca el cache de hoteles con habitaciones (UH).
   4. Purga de dumps viejos  — 6,2 GB por mes; sin esto el disco se llena en un año.
+  5. **Overture** — sondea el bucket y avisa si hay un release nuevo. **No lo adopta**:
+                              mover el pin cambia los comercios del CSV y del plano, y eso
+                              lo decide una persona (elección del operador, 3-sep-2026).
 
 **El alcance sale de la base, no está hardcodeado.** Las UFs y los municípios se derivan de
 `regions.municipio_codigo` de los relevamientos que existen, traducidos con la lista oficial
@@ -59,10 +62,6 @@ _DUMP_DIR = Path("/opt/scrapitero/receita_dump")
 # (96 GB, 56 libres hoy) no aguanta el año.
 _DUMPS_A_CONSERVAR = 2
 
-# Release de Overture pineado en `OverturePlacesFetcher`. No se puede autorefrescar: el
-# bucket no permite listar releases, así que el número hay que saberlo. Se reporta la
-# antigüedad para que una persona lo actualice, en vez de fingir que está al día.
-_OVERTURE_RELEASE = "2026-07-22.0"
 
 
 def _log(msg: str) -> None:
@@ -227,17 +226,24 @@ def main() -> int:
     except OSError:
         pass
 
-    # 5) Lo que este cron NO puede refrescar solo, dicho explícitamente para que no se
-    #    confunda «no lo reporto» con «está al día».
-    try:
-        rel = datetime.strptime(_OVERTURE_RELEASE.split(".")[0], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        meses = (datetime.now(timezone.utc) - rel).days // 30
-        if meses >= 2:
-            lineas.append(f"📌 Overture sigue pineado en {_OVERTURE_RELEASE} ({meses} meses). "
-                          f"El bucket no permite listar releases, así que el número hay que "
-                          f"ponerlo a mano en `overture_places_fetcher`.")
-    except ValueError:
-        pass
+    # 5) Overture: se DETECTA el release nuevo pero NO se adopta.
+    #    Decisión del operador (3-sep-2026): adoptar un release cambia los comercios que
+    #    salen al CSV y al plano del cliente, así que el pin lo mueve una persona. Acá sólo
+    #    se avisa — que es lo que faltaba: estábamos dos releases atrás sin saberlo.
+    def _overture() -> str:
+        from scrapitero.agents.overture_places_fetcher import (
+            _RELEASE_DEFAULT, release_mas_nuevo)
+        nuevo_rel = release_mas_nuevo()
+        if not nuevo_rel:
+            return f"✅ Overture: {_RELEASE_DEFAULT} sigue siendo el último publicado"
+        return (f"📌 Overture: hay release nuevo **{nuevo_rel}** y seguimos en "
+                f"{_RELEASE_DEFAULT}. NO se adoptó solo a propósito: cambia los comercios "
+                f"del CSV y del plano. Para adoptarlo, `_RELEASE_DEFAULT` en "
+                f"`overture_places_fetcher` y re-correr Overture sobre las zonas activas.")
+
+    linea, estado = _paso("Overture", _overture)
+    lineas.append(linea)
+    errores += estado == "error"
 
     cabecera = ("🗓️ Refresco mensual de fuentes descargadas — "
                 + ("todo OK" if not errores else f"{errores} con error"))

@@ -35,6 +35,7 @@ POI de fuente `overture` de la región.
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from loguru import logger
@@ -193,6 +194,59 @@ class OvertureOutput(BaseModel):
 
 
 # ── Consulta a Overture (DuckDB sobre S3 público) ─────────────────────────────
+
+def _existe_release(con, release: str) -> bool:
+    """¿El bucket tiene ese release? Es la única forma de saberlo: `glob` devuelve 0 filas
+    incluso dentro de un release que sí existe (verificado 3-sep-2026), así que no se puede
+    listar y hay que preguntar por uno concreto. Un release presente contesta en ~1,4 s y
+    uno ausente falla en ~0,3 s, así que barrer un mes de fechas cuesta segundos."""
+    try:
+        con.execute(f"SELECT 1 FROM read_parquet("
+                    f"'{_OVERTURE_BUCKET}/{release}/theme=places/type=place/*') LIMIT 1").fetchall()
+        return True
+    except Exception:
+        return False
+
+
+def release_mas_nuevo(desde: str = _RELEASE_DEFAULT,
+                      hasta: Optional[date] = None) -> Optional[str]:
+    """El release publicado más reciente, o None si no hay ninguno posterior a `desde`.
+
+    Sondea el bucket día por día desde el release que estamos usando hasta hoy. Es fuerza
+    bruta a propósito: Overture publica una vez por mes pero **el día cambia** (15, 17, 18,
+    19, 20, 21, 22 en lo que va de 2026), así que no hay fecha que predecir, y raspar la
+    página de release notes ataría esto a un HTML ajeno. Preguntarle al bucket es preguntarle
+    a la misma fuente que después lee el fetcher.
+
+    El sufijo también se sondea: `2026-08-19.1` sería un re-release del mismo día y gana al
+    `.0`. NO toca `_RELEASE_DEFAULT` — quién adopta un release es una decisión humana,
+    porque cambia los comercios que salen al CSV y al plano del cliente.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs"); con.execute("LOAD httpfs")
+    con.execute("SET s3_region='us-west-2'")
+    con.execute("SET s3_url_style='path'")
+
+    try:
+        base = datetime.strptime(desde.split(".")[0], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    tope = hasta or date.today()
+
+    encontrado = None
+    dia = base + timedelta(days=1)
+    while dia <= tope:
+        for sufijo in (0, 1, 2):
+            cand = f"{dia:%Y-%m-%d}.{sufijo}"
+            if _existe_release(con, cand):
+                encontrado = cand
+            elif sufijo == 0:
+                break          # sin `.0` no hay release ese día; no probar `.1`
+        dia += timedelta(days=1)
+    return encontrado
+
 
 def _consultar_overture(bbox: tuple, release: str, min_confidence: float) -> list[dict]:
     """POIs de Overture dentro del bbox. Devuelve dicts ya normalizados."""
