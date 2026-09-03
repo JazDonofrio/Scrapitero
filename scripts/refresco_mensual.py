@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresco MENSUAL de toda fuente que se descarga a disco (cron de Hermes, patrón --no-agent).
+"""Refresco MENSUAL de toda fuente que se descarga a disco (cron del HOST, no de Hermes).
 
 **Por qué existe.** Las fuentes que el sistema baja como dump quedan congeladas en la fecha
 en que alguien las cargó a mano, y nadie se entera. Medido el 3-sep-2026:
@@ -36,9 +36,19 @@ después no existe.
 del IBGE (la misma implementación que usa `MunicipioCodigoFetcher`). Si mañana se releva otra
 ciudad, este cron la incluye solo — no hay que acordarse de editar una lista con `MT` adentro.
 
-Patrón `--no-agent`: lo que se imprime a stdout va tal cual a Telegram. A diferencia de un
-watchdog, **este job SIEMPRE imprime**: es mensual, y un silencio de un mes no distingue
-«todo al día» de «el cron se murió».
+**Por qué en el host y no en el cron de Hermes**, que es donde vive el resto de los jobs: el
+paso de geocoding necesita **R** (`geocodebr` es un paquete de R sobre el CNEFE) y **el
+container de Hermes no tiene R** — verificado el 3-sep-2026. Y sin ese paso el refresco sería
+contraproducente: el `TRUNCATE`+reload de la tabla de hospedagem **borra las coordenadas** que
+geocodebr había escrito, dejando a `HotelFetcher` sin poder ubicar los hoteles de Receita y, por
+lo tanto, dependiendo otra vez de Google Places, que es pago. El host tiene R, el venv y las
+credenciales de Telegram (las tres verificadas), así que el job entero vive acá y **no queda
+ningún job de esto en Hermes**: dos mecanismos para lo mismo es la forma más segura de que uno
+quede desactualizado sin que nadie lo note.
+
+Con `--telegram` manda el resumen él mismo (el cron del host no entrega stdout a ningún lado,
+a diferencia del `--deliver telegram` de Hermes). **Siempre imprime**: es mensual, y un silencio
+de un mes no distingue «todo al día» de «el cron se murió».
 """
 
 from __future__ import annotations
@@ -49,12 +59,17 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/opt/scrapitero/.hermes-packages")
+# Sólo `src`. ⚠ NO agregar `/opt/scrapitero/.hermes-packages`: son las wheels de Python
+# 3.13 del container y este job corre en el venv 3.12 del host, donde revientan con
+# `ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'` (mismo modo de falla
+# que el `_cffi_backend` de pdfplumber). Se corre con el venv del host activado.
 sys.path.insert(0, "/opt/scrapitero/src")
 
 from sqlalchemy import text  # noqa: E402
 
-_LOG = Path("/opt/data/refresco_mensual.log")
+# Junto al proyecto y no en `/opt/data` (que es el HOME de Hermes): este job ya no corre
+# ahí, y un log en el directorio de otro servicio es un log que nadie encuentra.
+_LOG = Path("/opt/scrapitero/refresco_mensual.log")
 _DUMP_DIR = Path("/opt/scrapitero/receita_dump")
 
 # Cuántos períodos de dump de Receita se conservan en disco. Dos: el vigente y el anterior,
@@ -221,7 +236,33 @@ def main() -> int:
     lineas.append(linea)
     errores += estado == "error"
 
-    # 4) Purga: el disco es el recurso que se agota en silencio.
+    # 4) Geocodificar lo que el reload dejó sin coordenadas.
+    #    ⚠ Este paso es la razón por la que el job corre en el HOST y no en Hermes:
+    #    `geocodebr` es un paquete de R y **el container de Hermes no tiene R** (verificado
+    #    3-sep-2026). Sin él, el refresco es contraproducente: el TRUNCATE+reload de la
+    #    tabla de hospedagem **borra las coordenadas** que geocodebr había escrito, así que
+    #    un refresco sin re-geocodificar deja a `HotelFetcher` sin poder ubicar los hoteles
+    #    de Receita — y sin esa fuente vuelve a depender de Google Places, que es pago. Es
+    #    justo el agujero que este trabajo vino a tapar.
+    #
+    #    Se geocodifica sólo las UFs relevadas y no las 28 del país: es gratis pero no es
+    #    instantáneo, y las otras no las mira nadie. `solo_faltantes` lo hace resumible.
+    def _geocoding() -> str:
+        from scrapitero.agents.geocodebr_fetcher import GeocodebrInput
+        from scrapitero.agents.geocodebr_fetcher import run as run_geo
+        partes = []
+        for uf in ufs:
+            out = run_geo(GeocodebrInput(tabla="receita_estabelecimentos_hospedagem", uf=uf))
+            if not out.ok:
+                raise RuntimeError(f"{uf}: {out.error}")
+            partes.append(f"{uf} {out.geocodificados}/{out.candidatos}")
+        return f"✅ Geocoding de hospedagem (geocodebr, gratis): {' · '.join(partes)}"
+
+    linea, estado = _paso("Geocoding hospedagem", _geocoding)
+    lineas.append(linea)
+    errores += estado == "error"
+
+    # 5) Purga: el disco es el recurso que se agota en silencio.
     borrados = _purgar_dumps(_DUMPS_A_CONSERVAR)
     if borrados:
         lineas.append(f"🧹 Dumps viejos borrados: {', '.join(borrados)}")
@@ -233,7 +274,7 @@ def main() -> int:
     except OSError:
         pass
 
-    # 5) Overture: se DETECTA el release nuevo pero NO se adopta.
+    # 6) Overture: se DETECTA el release nuevo pero NO se adopta.
     #    Decisión del operador (3-sep-2026): adoptar un release cambia los comercios que
     #    salen al CSV y al plano del cliente, así que el pin lo mueve una persona. Acá sólo
     #    se avisa — que es lo que faltaba: estábamos dos releases atrás sin saberlo.
@@ -257,6 +298,16 @@ def main() -> int:
     salida = cabecera + "\n" + "\n".join(lineas)
     _log(salida.replace("\n", " | "))
     print(salida)
+
+    # Corriendo desde el cron del host nadie entrega el stdout: lo mandamos nosotros con el
+    # mismo helper que usa el resto del proyecto. (Bajo el cron de Hermes esto se omitía
+    # porque el propio scheduler entregaba el stdout; ver la cabecera del módulo.)
+    if "--telegram" in sys.argv:
+        try:
+            from scrapitero.agents.baseline_geocoder import _tg
+            _tg(salida)
+        except Exception as e:  # noqa: BLE001 — un fallo de aviso no invalida el refresco
+            _log(f"aviso Telegram falló: {e}")
     return 0
 
 

@@ -336,11 +336,23 @@ duplicadas). El match es por `survey_id` + centroide (±0,00005°).
 
 ## Refresco mensual de fuentes descargadas
 
-**Toda fuente que se baja a disco se actualiza sola, una vez por mes.** Lo hace el cron de
-Hermes **`refresco-mensual-fuentes`** (`0 4 18 * *`, modo `--no-agent`, entrega por Telegram,
-script `scripts/refresco_mensual_hermes.py`, desplegado en `/opt/data/scripts/` del container).
-El día 18 es a propósito: Receita publica el dump mensual a mitad de mes (los de esta base se
-bajaron el 17-jun y el 24-jul), así que antes del 18 el agente sólo encontraría el dump viejo.
+**Toda fuente que se baja a disco se actualiza sola, una vez por mes.** Lo hace el **cron del
+host** (`crontab -l`, `0 4 18 * *` → `scripts/refresco_mensual.sh` → `scripts/refresco_mensual.py
+--telegram`). El día 18 es a propósito: Receita publica el dump mensual a mitad de mes (los de
+esta base se bajaron el 17-jun y el 24-jul), así que antes del 18 el agente sólo encontraría el
+dump viejo.
+
+⚠ **En el host y NO en el cron de Hermes**, que es donde vive el resto de los jobs. El paso de
+geocoding necesita **R** (`geocodebr` es un paquete de R sobre el CNEFE) y **el container de
+Hermes no tiene R** (verificado 3-sep-2026). El host tiene R, el venv y las credenciales de
+Telegram, así que el job entero vive ahí y **no queda ningún job de esto en Hermes**: dos
+mecanismos para lo mismo es la forma más segura de que uno quede viejo sin que nadie lo note.
+El envoltorio `.sh` existe porque `cron` corre con `/bin/sh` y un entorno vacío — hay que
+activar el venv y cargar el `.env`, que **no** se puede con `export $(cat .env | xargs)` (los
+comentarios con espacios lo rompen). ⚠ Y el script **no** debe agregar `.hermes-packages` al
+`sys.path`: son wheels de Python 3.13 y en el venv 3.12 del host revientan con
+`ModuleNotFoundError: pydantic_core._pydantic_core` (mismo modo de falla que el `_cffi_backend`
+de pdfplumber).
 
 **Por qué hizo falta.** Un dump que nadie refresca queda congelado y nadie se entera. Medido el
 3-sep-2026: `receita_estabelecimentos` estaba en el dump de **2026-06** y
@@ -357,9 +369,21 @@ Qué hace, en orden y **best-effort** (si una fuente falla, las otras siguen):
 2. **`ReceitaEstabFetcher`** — re-escanea **ese mismo dump** para las categorías del cliente.
    Sin descarga nueva.
 3. **`CadasturLocalFetcher`** — refresca el cache de hoteles con habitaciones (UH).
-4. **Purga de dumps viejos** — conserva los **2** períodos más recientes (`_DUMPS_A_CONSERVAR`).
+4. **`GeocodebrFetcher`** — re-geocodifica la tabla de hospedagem. ⚠ **Sin este paso el
+   refresco sería contraproducente:** el `TRUNCATE`+reload **borra las coordenadas** que
+   geocodebr había escrito, y sin ellas `HotelFetcher` no puede ubicar los hoteles de Receita
+   ⇒ vuelve a depender de **Google Places, que es pago**. Es justo el agujero que este trabajo
+   vino a tapar. Sólo las UFs relevadas, no las 28 del país.
+5. **Purga de dumps viejos** — conserva los **2** períodos más recientes (`_DUMPS_A_CONSERVAR`).
    Un dump pesa **~6,2 GB**: sin purga son ~75 GB al año sobre un disco de 96 GB. Con 2, el
    estado estacionario es **~12,5 GB** y no hace falta comprar disco.
+
+⚠ **`ReceitaCNPJFetcher` va SIN filtro de UF.** La primera versión le pasaba las UFs relevadas
+y eso achicó la tabla de hospedagem de **202.087 filas (todo Brasil) a 5.790 (MT)** — una pérdida
+de cobertura silenciosa y diferida, que no se nota hasta crear una zona en otro estado y
+encontrarla sin un solo hotel. Filtrar ahí tampoco ahorra: los `.zip` se bajan enteros igual y el
+filtro es por fila. El filtro por UF **sí** hace falta en `ReceitaEstabFetcher`, donde lo nacional
+son millones.
 
 ⚠ **El alcance sale de la base, no está hardcodeado.** Las UFs y los municípios se derivan de
 `regions.municipio_codigo` de los relevamientos que existen, traducidos con la lista oficial del
@@ -370,7 +394,7 @@ NULL no se refresca**, así que `MunicipioCodigoFetcher` es prerrequisito de est
 ⚠ **Siempre imprime**, a diferencia de los watchdogs (`receita-proxy-watch`), que sólo hablan en
 la transición: un job mensual en silencio no distingue «todo al día» de «el cron se murió».
 
-⚠ **El cron de Hermes mata los scripts a los 120 s** (`_DEFAULT_SCRIPT_TIMEOUT` en
+⚠ **Ojo si alguna vez se lo mueve al cron de Hermes: mata los scripts a los 120 s** (`_DEFAULT_SCRIPT_TIMEOUT` en
 `/opt/hermes/cron/scheduler.py`). Con ese default este job moría a los 2 minutos en mitad de la
 descarga **sin decir nada**: el mensaje habría salido igual, con los pasos posteriores marcados
 como error de red. Se subió a **6 h** con `cron.script_timeout_seconds: 21600` en el
@@ -379,7 +403,7 @@ como error de red. Se subió a **6 h** con `cron.script_timeout_seconds: 21600` 
 o sea el tope tiene 3× de margen. Si algún día se agrega otro job de descarga larga, este tope es
 **global**: revisar que 6 h le alcance.
 
-5. **Overture** — `release_mas_nuevo()` sondea el bucket y el job **avisa** si hay uno nuevo,
+6. **Overture** — `release_mas_nuevo()` sondea el bucket y el job **avisa** si hay uno nuevo,
    pero **no lo adopta**: mover el pin cambia los comercios que salen al CSV y al plano, así que
    lo decide una persona. Para adoptarlo: `_RELEASE_DEFAULT` en `overture_places_fetcher` y
    re-correr Overture sobre las zonas activas.
