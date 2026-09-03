@@ -36,6 +36,24 @@ def utm_epsg(lon: float, lat: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
+def nombre_crs(epsg: int) -> str:
+    """Nombre corto del CRS como lo escribe un proyectista: 'UTM84-21S', no 'WGS 84 / UTM 21S'.
+
+    Vive acá y no en un agente de export porque **los dos DXF tienen que decir lo mismo**:
+    un DXF no tiene dónde declarar el sistema de coordenadas (el objeto GeoData recién
+    aparece en AC1024 y el plano del cliente es R2000), así que el único lugar donde el
+    dato viaja es la nota de auditoría — y si cada agente la arma por su cuenta, dos
+    planos de la misma zona pueden salir declarando cosas distintas.
+    """
+    if 32701 <= epsg <= 32760:          # WGS 84 / UTM sur
+        return f"UTM84-{epsg - 32700}S"
+    if 32601 <= epsg <= 32660:          # WGS 84 / UTM norte
+        return f"UTM84-{epsg - 32600}N"
+    if 31977 <= epsg <= 31985:          # SIRGAS 2000 / UTM sur
+        return f"SIRGAS2000-{epsg - 31960}S"
+    return f"EPSG:{epsg}"
+
+
 def area_m2(geom: "_shp_base.BaseGeometry") -> Optional[float]:
     """Área en m² proyectando al huso UTM correcto según el centroide de la geometría.
 

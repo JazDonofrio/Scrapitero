@@ -24,10 +24,10 @@ apague lo que necesite:
     _METADATOS        EPSG, survey y fecha, para que el archivo se pueda auditar
 
 **Unidades y coordenadas:** la DB guarda en EPSG:4326 (grados). Un CAD trabaja en
-metros, así que se proyecta a UTM — el huso se autodetecta con `geo.utm_epsg`, que es
-válido en todo el planeta (no hay husos fijos). En Brasil se rotula como SIRGAS 2000
-(EPSG:319xx), que numéricamente es idéntico a WGS 84 UTM pero es la etiqueta que
-espera un proyectista brasilero. `epsg` en el input permite forzar otro.
+metros, así que se proyecta a UTM sobre **WGS 84** — el huso se autodetecta con
+`geo.utm_epsg`, que es válido en todo el planeta (no hay husos fijos). Es el
+**«UTM84-21S»** que pide el cliente, que para Várzea Grande es EPSG:32721 y para el
+conurbano bonaerense el mismo huso. `epsg` en el input permite forzar otro.
 
 No toca la DB: es sólo lectura + archivo.
 """
@@ -228,16 +228,26 @@ def run(input: DXFInput) -> DXFOutput:
 
     geoms = [wkb.loads(bytes(r[0])) for r in rows]
 
-    # EPSG de salida: el huso UTM del centroide del conjunto. En Brasil se rotula como
-    # SIRGAS 2000 (319xx), idéntico numéricamente a WGS 84 UTM pero es la etiqueta local.
+    # EPSG de salida: el huso UTM del centroide del conjunto, sobre **WGS 84** (327xx al
+    # sur, 326xx al norte). Para Várzea Grande da EPSG:32721, que es el «UTM84-21S» que
+    # pide el cliente; para el conurbano bonaerense, el mismo huso 21S.
+    #
+    # Antes, en Brasil, se re-rotulaba a SIRGAS 2000 (319xx) suponiendo que era la etiqueta
+    # que espera un proyectista brasilero. La suposición era nuestra y resultó equivocada:
+    # el cliente pidió UTM84 explícitamente. El cambio es SÓLO de etiqueta —medido sobre
+    # las esquinas del relevamiento de VG, la diferencia entre EPSG:31981 y EPSG:32721 es
+    # de 0,0 cm; pyproj los trata como alineados y no aplica desplazamiento de datum—, así
+    # que ninguna coordenada se mueve y los DXF ya entregados siguen calzando.
+    #
+    # El huso se sigue autodetectando y no se clava en 21S: es la regla del proyecto
+    # (`geo.utm_epsg`, válida en todo el planeta). Clavarlo rompería cualquier zona fuera
+    # de esa franja, y el que quiera forzar otro tiene el parámetro `epsg`.
     if input.epsg:
         epsg = input.epsg
     else:
         c = MultiPolygon([g for g in geoms if isinstance(g, Polygon)]).centroid \
             if len(geoms) > 1 else geoms[0].centroid
         epsg = geo.utm_epsg(c.x, c.y)
-        if -34 <= c.y <= 6 and -74 <= c.x <= -34 and 32717 <= epsg <= 32725:  # Brasil
-            epsg = 31977 + (epsg - 32717)  # 32717/zona17S → 31977, y así
 
     tr = Transformer.from_crs(4326, epsg, always_xy=True)
 
@@ -361,7 +371,8 @@ def run(input: DXFInput) -> DXFOutput:
         [g for g in geoms if isinstance(g, Polygon)]).bounds if len(geoms) > 1 else geoms[0].bounds
     mx, my = tr.transform(minx, miny)
     nota = (f"AI Mapping - {region_nombre} | survey {input.survey_id} | "
-            f"{datetime.now():%Y-%m-%d %H:%M} | CRS EPSG:{epsg} | unidades: metros | "
+            f"{datetime.now():%Y-%m-%d %H:%M} | CRS {geo.nombre_crs(epsg)} "
+            f"(EPSG:{epsg}) | unidades: metros | "
             f"{dibujadas} parcelas | {total_v} UF vivienda | {total_c} UF comercio | "
             f"numero entre parentesis = estimado (el municipio no lo declaro)")
     msp.add_text(nota, dxfattribs={"layer": "_METADATOS", "height": h}) \

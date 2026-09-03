@@ -305,21 +305,6 @@ def _cargar_codlog(path: Optional[str]) -> dict[str, str]:
     return mapa
 
 
-def _nombre_crs(epsg: int) -> str:
-    """Nombre corto del CRS como lo escribe el cliente: 'UTM84-21S', no 'WGS 84 / UTM 21S'.
-
-    Va en la nota de auditoría porque un DXF R2000 no tiene dónde declarar el sistema de
-    coordenadas, y sin eso el plano es incalzable contra los suyos.
-    """
-    if 32701 <= epsg <= 32760:          # WGS 84 / UTM sur
-        return f"UTM84-{epsg - 32700}S"
-    if 32601 <= epsg <= 32660:          # WGS 84 / UTM norte
-        return f"UTM84-{epsg - 32600}N"
-    if 31977 <= epsg <= 31985:          # SIRGAS 2000 / UTM sur
-        return f"SIRGAS2000-{epsg - 31960}S"
-    return f"EPSG:{epsg}"
-
-
 def _recortar(txt: str, n: int) -> str:
     """Recorta a `n` caracteres sin partir palabras."""
     txt = (txt or "").strip()
@@ -3361,7 +3346,7 @@ def run(input: EntregaInput) -> EntregaOutput:
     # Nota de auditoría: un DXF sin CRS declarado es incalzable contra los planos del
     # cliente y nadie puede saber con qué corrida salió.
     nota = (f"AI Mapping - {region_nombre} | survey {input.survey_id} | "
-            f"{datetime.now():%Y-%m-%d %H:%M} | CRS {_nombre_crs(epsg)} (EPSG:{epsg}) | "
+            f"{datetime.now():%Y-%m-%d %H:%M} | CRS {geo.nombre_crs(epsg)} (EPSG:{epsg}) | "
             f"unidades: metros | "
             f"{n_sdu} SDU + {n_mdu} MDU | {hp_total} HPs | "
             f"base {input.fuente_mapa_base} | "
