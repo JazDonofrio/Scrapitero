@@ -185,6 +185,12 @@ class OsmPoiInput(BaseModel):
     exigir_numero: bool = True
     numero_max_m: float = 60.0
     salto_min: int = 300
+    # Adopción por cercanía: el POI que no cae en NINGUNA parcela se vincula al lote
+    # CONSTRUIDO más cercano dentro de estos metros. 0 = desactivada. El default de 15 m
+    # lo eligió el operador (5-sep-2026) midiendo la distancia real de los 186 comercios
+    # que quedaban sin parcela en Hurlingham y Malvinas: cubre 166 y deja afuera el tramo
+    # 15-40 m, donde la vereda de enfrente es tan candidata como la propia.
+    adoptar_max_m: float = 15.0
 
 
 class OsmPoiOutput(BaseModel):
@@ -197,6 +203,7 @@ class OsmPoiOutput(BaseModel):
     pois_reasignados_por_huella: int = 0
     pois_sin_edificio: int = 0
     pois_reasignados_por_numero: int = 0
+    pois_adoptados: int = 0
     duplicados_descartados: int = 0   # el mismo negocio ya lo había traído otra fuente
     pois_taxonomia: int = 0           # los que mapean a una etiqueta del cliente
     parcelas_con_comercio: int = 0
@@ -484,10 +491,11 @@ def run(input: OsmPoiInput) -> OsmPoiOutput:
 
     out.comercios_guardados = _upsert_comercios(input.region_id, input.survey_id, pois)
     (out.vinculados_a_parcela, out.pois_reasignados_por_huella, out.pois_sin_edificio,
-     out.pois_reasignados_por_numero) = _link_to_parcelas(
+     out.pois_reasignados_por_numero, out.pois_adoptados) = _link_to_parcelas(
         input.region_id, input.survey_id, input.exigir_huella, input.reasignar_max_m,
         source="osm", exigir_numero=input.exigir_numero,
-        numero_max_m=input.numero_max_m, salto_min=input.salto_min)
+        numero_max_m=input.numero_max_m, salto_min=input.salto_min,
+        adoptar_max_m=input.adoptar_max_m)
     out.pois_taxonomia = _sellar_pois(input.region_id, pois)
 
     # El conteo de UF lo hace la MISMA función que usa Overture (cuenta las dos fuentes):

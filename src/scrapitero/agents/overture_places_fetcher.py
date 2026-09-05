@@ -176,6 +176,12 @@ class OvertureInput(BaseModel):
     exigir_numero: bool = True
     numero_max_m: float = 60.0
     salto_min: int = 300
+    # Adopción por cercanía: el POI que no cae en NINGUNA parcela se vincula al lote
+    # CONSTRUIDO más cercano dentro de estos metros. 0 = desactivada. El default de 15 m
+    # lo eligió el operador (5-sep-2026) midiendo la distancia real de los 186 comercios
+    # que quedaban sin parcela en Hurlingham y Malvinas: cubre 166 y deja afuera el tramo
+    # 15-40 m, donde la vereda de enfrente es tan candidata como la propia.
+    adoptar_max_m: float = 15.0
 
 
 class OvertureOutput(BaseModel):
@@ -190,6 +196,7 @@ class OvertureOutput(BaseModel):
     pois_reasignados_por_huella: int = 0   # el punto caía en un lote vacío; se movió al vecino
     pois_sin_edificio: int = 0             # ni el lote ni un vecino tienen construcción
     pois_reasignados_por_numero: int = 0   # su ficha declara el número de otra parcela
+    pois_adoptados: int = 0                # no caían en ninguna parcela; lote a ≤15 m
     parcelas_uf_limpiada: int = 0          # perdieron la UF de un comercio que ya no está
     release: Optional[str] = None
     bbox_usado: Optional[str] = None
@@ -524,7 +531,8 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
                       reasignar_max_m: float = 40.0,
                       source: str = "overture", exigir_numero: bool = True,
                       numero_max_m: float = 60.0,
-                      salto_min: int = 300) -> tuple[int, int, int, int]:
+                      salto_min: int = 300,
+                      adoptar_max_m: float = 15.0) -> tuple[int, int, int, int, int]:
     """Vincula cada comercio de `source` a la parcela que contiene su punto.
 
     `source` existe para que otros fetchers de POIs (p.ej. `OsmPoiFetcher`, que trae las
@@ -553,7 +561,26 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
     no los tiene cargados, NO se aplican**: "no hay edificio" y "no se bajaron los edificios"
     no son lo mismo, y castigar el segundo caso desvincularía comercios legítimos.
 
-    Devuelve `(vinculados, reasignados, sin_edificio, movidos_por_numero)`.
+    **Adopción por cercanía** (`adoptar_max_m`, 15 m). Las dos guardas de arriba corrigen al
+    POI que cayó en la parcela EQUIVOCADA; ésta rescata al que no cayó en NINGUNA. El
+    vínculo era contención estricta, así que un punto que aterriza en la vereda o en la
+    calzada no le aporta UF a nadie — y medido el 5-sep-2026 eso no era un caso raro: en
+    Hurlingham **104 comercios dentro del polígono de la zona quedaban sin parcela contra 62
+    vinculados**, o sea más del 60% no contaba, y en Malvinas 82 contra 188. No es ruido:
+    Renault, Sodimac Constructor, Repuestos Santa Lucía, la Iglesia Universal.
+
+    Y no están en otra manzana. La distancia a la parcela más cercana, medida sobre esos
+    186 casos: **ninguno a más de 40 m**, y 99 a **≤5 m** — el ancho de una vereda:
+
+        Hurlingham   ≤5 m: 41 · 5-15 m: 47 · 15-40 m: 16
+        Malvinas     ≤5 m: 58 · 5-15 m: 20 · 15-40 m:  4
+
+    El tope de 15 m lo eligió el operador (5-sep-2026) sobre esa tabla: cubre 166 de los 186
+    y deja afuera los 20 del tramo 15-40 m, donde la vereda de enfrente es tan candidata como
+    la propia. **Se exige lote construido**, el mismo criterio que la guarda de huella: un
+    terreno vacío no gana un comercio por ser el vecino más cercano.
+
+    Devuelve `(vinculados, reasignados, sin_edificio, movidos_por_numero, adoptados)`.
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -568,9 +595,14 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
         """), {"rid": region_id, "src": source})
         vinculados = res.rowcount or 0
         reasignados = huerfanos = por_numero = 0
+        # Base para medir la adopción: cuántos comercios de esta fuente ya tienen parcela.
+        vinculados_previos = conn.execute(text("""
+            SELECT COUNT(*) FROM comercios
+            WHERE region_id = :rid AND source = :src AND parcela_id IS NOT NULL
+        """), {"rid": region_id, "src": source}).scalar() or 0
 
         if not (exigir_huella or exigir_numero):
-            return vinculados, 0, 0, 0
+            return vinculados, 0, 0, 0, 0
 
         hay_footprints = conn.execute(text("""
             SELECT EXISTS (SELECT 1 FROM footprints_revision
@@ -578,8 +610,40 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
         """), {"sid": survey_id}).scalar()
         if not hay_footprints:
             logger.warning("Overture: sin footprints cargados ⇒ no se aplican las guardas "
-                           "de huella ni de número (correr FootprintFetcher antes)")
-            return vinculados, 0, 0, 0
+                           "de huella ni de número ni la adopción por cercanía "
+                           "(correr FootprintFetcher antes)")
+            return vinculados, 0, 0, 0, 0
+
+        # Adopción por cercanía: el POI que no cayó en NINGUNA parcela va al lote
+        # construido más cercano dentro de `adoptar_max_m`. Va ANTES de las dos guardas para
+        # que el resultado quede sujeto a ellas como cualquier otro vínculo.
+        adoptados = 0
+        if adoptar_max_m > 0:
+            res_ad = conn.execute(text("""
+                UPDATE comercios c SET parcela_id = (
+                    SELECT p.parcela_id FROM parcelas p
+                    WHERE p.region_id = :rid AND p.geometry IS NOT NULL
+                      AND ST_DWithin(p.geometry::geography, c.location::geography, :maxm)
+                      AND EXISTS (
+                          SELECT 1 FROM footprints_revision f
+                          WHERE f.survey_id = CAST(:sid AS uuid)
+                            AND ST_Intersects(p.geometry, f.footprint)
+                            AND ST_Area(ST_Intersection(p.geometry,
+                                                        f.footprint)::geography) >= :amin)
+                    ORDER BY p.geometry <-> c.location
+                    LIMIT 1)
+                WHERE c.region_id = :rid AND c.source = :src
+                  AND c.parcela_id IS NULL AND c.location IS NOT NULL
+            """), {"rid": region_id, "sid": survey_id, "src": source,
+                   "maxm": adoptar_max_m, "amin": _HUELLA_MIN_M2})
+            adoptados = conn.execute(text("""
+                SELECT COUNT(*) FROM comercios
+                WHERE region_id = :rid AND source = :src AND parcela_id IS NOT NULL
+            """), {"rid": region_id, "src": source}).scalar() or 0
+            adoptados = max(adoptados - vinculados_previos, 0)
+            if adoptados:
+                logger.info(f"Overture adopción por cercanía: {adoptados} POIs que no caían "
+                            f"en ninguna parcela vinculados al lote construido a ≤{adoptar_max_m:.0f} m")
 
         sin_construccion = [] if not exigir_huella else conn.execute(text("""
             SELECT c.comercio_id::text
@@ -641,7 +705,7 @@ def _link_to_parcelas(region_id: str, survey_id: str, exigir_huella: bool = True
                     f"{caso['destino_calle']} {caso['destino_numero']} "
                     f"(a {caso['destino_dist_m']} m, salto de {caso['salto']} números)")
 
-        return vinculados, reasignados, huerfanos, por_numero
+        return vinculados, reasignados, huerfanos, por_numero, adoptados
 
 
 def _sellar_pois(region_id: str, pois: list[dict]) -> int:
@@ -845,10 +909,10 @@ def run(input: OvertureInput) -> OvertureOutput:
                               error=None)
 
     guardados = _upsert_comercios(input.region_id, input.survey_id, pois)
-    vinculados, reasignados, sin_edificio, por_numero = _link_to_parcelas(
+    vinculados, reasignados, sin_edificio, por_numero, adoptados = _link_to_parcelas(
         input.region_id, input.survey_id, input.exigir_huella, input.reasignar_max_m,
         exigir_numero=input.exigir_numero, numero_max_m=input.numero_max_m,
-        salto_min=input.salto_min)
+        salto_min=input.salto_min, adoptar_max_m=input.adoptar_max_m)
     con_taxonomia = _sellar_pois(input.region_id, pois)
 
     parcelas_con = total_uf = uso_upd = limpiadas = 0
@@ -875,6 +939,7 @@ def run(input: OvertureInput) -> OvertureOutput:
         pois_reasignados_por_huella=reasignados,
         pois_sin_edificio=sin_edificio,
         pois_reasignados_por_numero=por_numero,
+        pois_adoptados=adoptados,
         parcelas_uf_limpiada=limpiadas,
         release=input.release,
         bbox_usado=",".join(f"{c}" for c in bbox),
