@@ -58,7 +58,10 @@ from scrapitero.db.engine import get_engine
 FUENTES_POI = "('overture','osm')"
 
 _OVERTURE_BUCKET = "s3://overturemaps-us-west-2/release"
-_RELEASE_DEFAULT = "2026-07-22.0"
+# Adoptado el 5-sep-2026 (era `2026-07-22.0`). Lo detectó `release_mas_nuevo()` desde el
+# cron mensual; moverlo es decisión humana porque cambia los comercios que salen al CSV y
+# al plano del cliente.
+_RELEASE_DEFAULT = "2026-08-19.0"
 
 # Solape mínimo (m²) para dar por construida una parcela al aplicar la guarda de huella.
 # Mismo umbral que usa `IncidenciasReporter` para no contar un roce de digitalización.
