@@ -410,9 +410,15 @@ def _sellar_pois(region_id: str, pois: list[dict]) -> int:
                 INSERT INTO establecimientos_poi
                     (poi_id, region_id, fuente, categoria, descripcion, nombre, lat, lng,
                      parcela_id, vinculo_resuelto)
-                VALUES (:id, :rid, 'osm_poi', :cat, :desc, :nombre, :lat, :lng,
+                -- ⚠ `:rid` va CASTEADO a varchar en los dos usos. Sin el cast, psycopg lo
+                -- ve una vez como valor de columna (varchar) y otra dentro del WHERE de la
+                -- subconsulta, deduce tipos distintos para el mismo parámetro y aborta con
+                -- `AmbiguousParameter: inconsistent types deduced for parameter $2`. Rompía
+                -- el agente entero, o sea que se perdían POIs gratis — y en Argentina OSM es
+                -- la fuente que ve lo que Overture no (32 negocios en Malvinas).
+                VALUES (:id, CAST(:rid AS varchar), 'osm_poi', :cat, :desc, :nombre, :lat, :lng,
                         (SELECT c.parcela_id FROM comercios c
-                          WHERE c.region_id = :rid AND c.place_id = :pid), true)
+                          WHERE c.region_id = CAST(:rid AS varchar) AND c.place_id = :pid), true)
             """), {"id": str(uuid.uuid4()), "rid": region_id, "cat": p["categoria"],
                    "pid": p["place_id"],
                    "desc": p["etiqueta"], "nombre": p["nombre"],
