@@ -1949,9 +1949,22 @@ async def listar_incidencias(survey_id: str, estado: str = Query("pendiente"),
         "creada_at": r[14].isoformat() if r[14] else None,
         "resuelta_at": r[15].isoformat() if r[15] else None,
     } for r in rows]
+    # Fecha de la imagen que el operador va a tener EN PANTALLA. No es un adorno: la
+    # medición de altura sale de la imagery de Google Solar (2014 en el 87% de VG, 2013 en
+    # Hurlingham) y el basemap de Esri que el panel muestra por default es de 2025-2026. Sin
+    # decirlo, el operador confirma o descarta una construcción sin saber que está mirando
+    # dos épocas distintas. La cobertura de Esri viene en bloques, así que una consulta por
+    # survey alcanza (`geo.imagery_fecha` cachea por ~5 km).
+    from scrapitero.agents import geo          # local: mismo patrón que el resto de app.py
+    imagery_base = None
+    pt = next(((i["lat"], i["lng"]) for i in items
+               if i["lat"] is not None and i["lng"] is not None), None)
+    if pt:
+        imagery_base = geo.imagery_fecha(pt[0], pt[1])
     return JSONResponse({"ok": True, "survey_id": survey_id, "baseline_id": meta[1],
                          "incidencias": items, "total": len(items),
                          "pendientes": resumen["por_estado"].get("pendiente", 0),
+                         "imagery_base": imagery_base,
                          "resumen": resumen})
 
 

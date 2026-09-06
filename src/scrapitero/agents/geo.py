@@ -10,6 +10,7 @@ Centraliza lo que antes estaba hardcodeado por zona en varios agentes:
 
 from __future__ import annotations
 
+import json
 import os
 import unicodedata
 from typing import Optional
@@ -223,6 +224,79 @@ def _nominatim_municipio_uf(lat: float, lng: float) -> tuple[Optional[str], Opti
     except httpx.HTTPError:
         pass
     return None, None
+
+
+_ESRI_IMAGERY_URL = ("https://services.arcgisonline.com/arcgis/rest/services/"
+                     "World_Imagery/MapServer/identify")
+_imagery_cache: dict[tuple, Optional[dict]] = {}
+
+
+def imagery_fecha(lat: float, lng: float) -> Optional[dict]:
+    """Fecha de captura de la imagen satelital que se ve en el basemap de Esri en ese punto.
+
+    Devuelve `{'fecha','resolucion_m','proveedor','sensor'}` o None si no se pudo.
+
+    **Por qué hace falta.** El operador resuelve las incidencias de construcción MIRANDO la
+    foto, y hasta ahora no había forma de saber de cuándo era la que tenía en pantalla. La
+    contradicción medida el 6-sep-2026 es grande: `AlturaFetcher` mide sobre la imagen de
+    Google Solar, que en Várzea Grande es de **2014** en el 87% de los puntos y en Hurlingham
+    de **2013**, mientras el basemap de Esri que el panel muestra por default trae
+    **10-sep-2025** sobre VG (0,46 m, GeoEye-1) y **13-ene-2026** sobre el conurbano (0,50 m,
+    WorldView-2). O sea que la pantalla ya mostraba obra que la medición no podía ver, y
+    nadie lo sabía.
+
+    La cobertura de Esri viene en **bloques** (`DYNAMIC_ESRI_Cuiaba_25Q4`,
+    `DYNAMIC_ESRI_Buenos_Aires_26Q1`), no por parcela, así que la coordenada se **redondea a
+    ~0,05°** (≈5 km) para cachear: una consulta por zona alcanza y el panel no le pega al
+    servicio una vez por tarjeta.
+
+    Best-effort y sin credenciales: el endpoint es público. Ante cualquier fallo devuelve
+    None y el panel simplemente no muestra la línea — nunca rompe la página.
+    """
+    clave = (round(lat / 0.05), round(lng / 0.05))
+    if clave in _imagery_cache:
+        return _imagery_cache[clave]
+    dato = None
+    try:
+        params = {
+            "geometry": json.dumps({"x": lng, "y": lat}), "geometryType": "esriGeometryPoint",
+            "sr": 4326, "layers": "all", "tolerance": 2, "returnGeometry": "false",
+            "mapExtent": f"{lng-0.01},{lat-0.01},{lng+0.01},{lat+0.01}",
+            "imageDisplay": "600,600,96", "f": "json",
+        }
+        with httpx.Client(timeout=12, headers=_HEADERS, follow_redirects=True) as c:
+            r = c.get(_ESRI_IMAGERY_URL, params=params)
+        if r.status_code == 200:
+            mejor = None
+            for f in (r.json().get("results") or []):
+                a = f.get("attributes") or {}
+                res = a.get("SRC_RES")
+                try:
+                    res = float(res)
+                except (TypeError, ValueError):
+                    continue
+                # Nos interesa la mejor resolución disponible: es la capa que el operador
+                # ve al acercarse, no el relleno global de 15 m.
+                if res > 0 and (mejor is None or res < mejor[0]):
+                    mejor = (res, a)
+            if mejor:
+                a = mejor[1]
+                # `SRC_DATE` es AAAAMMDD numérico y NO tiene ambigüedad; `SRC_DATE2` viene
+                # como "9/10/2025", que en formato US es 10-sep pero se lee 9-oct en
+                # castellano. Se usa el numérico y se arma la fecha ISO a mano.
+                iso = None
+                cru = str(a.get("SRC_DATE") or "")
+                if len(cru) == 8 and cru.isdigit():
+                    iso = f"{cru[:4]}-{cru[4:6]}-{cru[6:]}"
+                dato = {"fecha": iso,
+                        "resolucion_m": mejor[0],
+                        "proveedor": a.get("NICE_DESC"),      # p.ej. "Vantor"
+                        "sensor": a.get("SRC_DESC"),          # p.ej. "GE01" / "WV02"
+                        "producto": a.get("NICE_NAME")}       # p.ej. "Vivid Advanced"
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"imagery_fecha: no se pudo consultar Esri en ({lat:.4f},{lng:.4f}): {e}")
+    _imagery_cache[clave] = dato
+    return dato
 
 
 def detect_localidad_provincia(lat: float, lng: float) -> tuple[Optional[str], Optional[str]]:

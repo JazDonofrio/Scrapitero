@@ -749,9 +749,7 @@ estable entre relevamientos, el `parcela_id` no); por el mismo motivo **SmartGIS
 centroide** cuando `ubicacion_source='manual'`. Endpoints: `GET /api/surveys/{sid}/incidencias?estado=&tipo=`
 (lista + `resumen` por tipo/estado), `POST .../incidencias/generar`,
 `POST /api/incidencias/{id}/resolver` (`{accion, valor, nota}`; la acción del editor único es
-`ubicacion` — `direccion` se acepta como alias histórico). En los tipos de altura la tarjeta
-**muestra el año de la imagen satelital** con una advertencia — en VG el 89% es de 2014, así que el
-dato no refleja obra posterior. Resultado VG: **139 incidencias** (55 sin declarar, 45 más alto,
+`ubicacion` — `direccion` se acepta como alias histórico). En los tipos de altura la tarjeta muestra **las DOS fechas**: la de la imagen sobre la que se **midió** (Google Solar) y la de la que el operador tiene **en pantalla** (`imagery_base` en el payload, vía `geo.imagery_fecha`). ⚠ No son la misma y la diferencia es enorme: Solar mide sobre **2014** en el 87% de VG y **2013** en Hurlingham, mientras el basemap de Esri que el panel usa por default es **10-sep-2025** sobre VG (0,46 m, GeoEye-1) y **13-ene-2026** sobre el conurbano (0,50 m, WorldView-2). Mostrando sólo la primera, el operador confirmaba o descartaba una construcción sin saber que estaba mirando otra época — y encima **la de pantalla es la buena**, por eso la tarjeta cierra con «mandá lo que ves». La cobertura de Esri viene en bloques, así que `geo.imagery_fecha` cachea por ~5 km y se consulta **una vez por survey**, no por tarjeta; el endpoint de Esri es público, sin credencial, y ante cualquier fallo la línea simplemente no sale. Resultado VG: **139 incidencias** (55 sin declarar, 45 más alto,
 28 UF imposible, 11 hoteles).
 
 **Falsos hoteles → reclasificar a comercio (botón "🚫 No es hotel"):** Google Places a veces

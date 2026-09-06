@@ -130,6 +130,14 @@ const SID = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop(
 const QS = new URLSearchParams(location.search);
 let filtroTipo = QS.get('tipo') || '';          // el link de Telegram llega con ?tipo=
 let filtroEstado = 'pendiente';
+// Fecha de captura del basemap satelital (Esri) sobre esta zona. La trae el endpoint de
+// incidencias; ver `geo.imagery_fecha`.
+let IMAGERY_BASE = null;
+const _MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+function fechaCorta(iso){                     // '2026-01-13' → '13-ene-2026'
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso||'');
+  return m ? `${+m[3]}-${_MESES[+m[2]-1]}-${m[1]}` : (iso||'');
+}
 
 // maxZoom 22 con maxNativeZoom = último nivel real de cada proveedor: Leaflet sigue
 // acercando (zoom digital) más allá del tile nativo, útil para mirar una construcción.
@@ -357,8 +365,24 @@ function datosHtml(t, d){
   }
   if(d.habitaciones_fuente) p.push(`habitaciones de <b>${esc(d.habitaciones_fuente)}</b>`);
   let html = p.length ? `<div class="datos">${p.join(' · ')}</div>` : '';
-  if(d.imagery_year) html += `<div class="warnbox">🛰 Imagen satelital de ${d.imagery_year}`+
-    `${d.imagery_quality?' ('+esc(d.imagery_quality)+')':''} — no refleja obra posterior.</div>`;
+  // ⚠ Las DOS fechas juntas, a propósito. La medición sale de la imagery de Google Solar
+  // (2014 en el 87% de Várzea Grande, 2013 en Hurlingham) y el basemap que el operador tiene
+  // en pantalla es de 2025-2026. Mostrar sólo la primera hacía que confirmara o descartara
+  // una construcción sin saber que estaba mirando otra época — y encima la de pantalla es
+  // la BUENA: si en la foto de hoy hay un galpón, hay un galpón.
+  if(d.imagery_year){
+    const base = IMAGERY_BASE && IMAGERY_BASE.fecha;
+    const masNueva = base && (+base.slice(0,4) > d.imagery_year);
+    html += `<div class="warnbox">🛰 Medido sobre imagen de <b>${d.imagery_year}</b>`
+      + `${d.imagery_quality?' ('+esc(d.imagery_quality)+')':''} — no refleja obra posterior.`
+      + (base ? `<br>👁 En pantalla estás viendo <b>${fechaCorta(base)}</b>`
+                + `${IMAGERY_BASE.resolucion_m?' · '+String(IMAGERY_BASE.resolucion_m).replace('.',',')+' m':''}`
+                + `${IMAGERY_BASE.proveedor?' · '+esc(IMAGERY_BASE.proveedor):''}`
+                + (masNueva ? ` — <b>${+base.slice(0,4) - d.imagery_year} años más nueva que la medición</b>,`
+                              + ` así que mandá lo que ves.` : '.')
+              : '')
+      + `</div>`;
+  }
   return html;
 }
 
@@ -617,6 +641,7 @@ async function load(){
   const d = await fetch(`/api/surveys/${SID}/incidencias?`+q).then(r=>r.json());
   if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
   pendientes = d.pendientes; updateSub(); renderFiltros(d.resumen);
+  IMAGERY_BASE = d.imagery_base || null;   // fecha de la foto que se ve en pantalla
 
   // Se recarga SIEMPRE (no sólo la primera vez): al mover un punto desde el editor, éste es
   // el que tiene que aparecer en la posición nueva.
