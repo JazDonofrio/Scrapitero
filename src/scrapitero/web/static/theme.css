@@ -458,3 +458,12 @@ select { cursor: pointer; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner { display: inline-block; animation: spin .8s linear infinite; }
+
+/* ── Cartel de fecha de la imagen satelital (imagery-fecha.js) ──────────────────────────
+   Oscuro en los DOS temas a propósito, como el resto de los controles sobre el mapa: va
+   encima de imagen satelital, donde un panel claro no se lee. */
+.imgfecha{background:rgba(15,23,42,.82);color:#e5eaf3;font-size:12px;line-height:1.35;
+  padding:5px 9px;border-radius:6px;border:1px solid rgba(255,255,255,.18);
+  box-shadow:0 1px 4px rgba(0,0,0,.4);backdrop-filter:blur(2px);white-space:nowrap;}
+.imgfecha b{color:#fff;font-weight:700;}
+.imgfecha .dud{color:#f0b866;}

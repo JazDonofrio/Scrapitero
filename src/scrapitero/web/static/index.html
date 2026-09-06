@@ -12,6 +12,7 @@
        ganan si se cargan después. -->
   <link rel="stylesheet" href="/theme.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/imagery-fecha.js"></script>
   <!-- Leaflet-Geoman: dibujar el polígono de la nueva zona sobre el relevamiento anterior -->
   <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.18.3/dist/leaflet-geoman.css"/>
   <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.18.3/dist/leaflet-geoman.min.js"></script>
@@ -1124,11 +1125,15 @@ function actuRenderMapa(puntos) {
   const layersCtl = L.control.layers({ '🛰 Satélite': satelite, '🗺 Mapa': osm },
                                      { 'Etiquetas': etiquetas }, { position: 'topleft' }).addTo(map);
   addGoogleLayers(map, layersCtl);      // reusa el helper del dashboard (si hay key)
+  // Fecha de la imagen: acá se DIBUJA la zona nueva mirando el terreno, así que de cuándo
+  // es la foto cambia lo que se dibuja. Implementación compartida (`/imagery-fecha.js`).
+  const _cf = ImageryFecha.agregarCartel(map);
 
   const pts = puntos.filter(p => p.lat != null && p.lng != null);
   actuState.puntos = pts;
   // Relevamiento anterior en gris: un marcador por ubicación (con la cantidad de
   // direcciones si comparten punto). Se sigue viendo mientras dibujás el sector.
+  if (pts.length) _cf.refrescar(pts[0].lat, pts[0].lng);
   const group = L.featureGroup();
   agruparPorUbicacion(pts).forEach(g => oldRelevMarker(g).addTo(group));
   group.addTo(map);
@@ -2201,6 +2206,9 @@ function initMap(sid) {
     {'🛰 Satélite': satellite, '🗺 Mapa': osm}, {'Etiquetas': labels}, {position: 'topleft'}
   ).addTo(map);
   map._layersCtl = layersCtl;   // para registrar las capas de ítems críticos en loadParcelasMap
+  // Fecha de la imagen satelital, compartida con los otros mapas (`/imagery-fecha.js`). Se
+  // guarda en el mapa para que `loadParcelasMap` la refresque cuando sepa dónde está la zona.
+  map._capaFecha = ImageryFecha.agregarCartel(map);
 
   // Pane para los anillos de "ítems críticos" (Hoteles/Edificios/PH/Shopping/Country): por
   // encima de los marcadores base de parcela (overlayPane=400) para que se vean destacados.
@@ -2231,6 +2239,9 @@ function initMap(sid) {
       }).addTo(map);
       map._zoneBounds = layer.getBounds();   // recordar la zona marcada para re-centrar en cada update
       map.fitBounds(map._zoneBounds, {padding: [16, 16]});
+      // Ya sabemos dónde cae la zona: pedimos la fecha de la imagen de ESE lugar.
+      const _c = map._zoneBounds.getCenter();
+      if (map._capaFecha) map._capaFecha.refrescar(_c.lat, _c.lng);
     } catch(_) { map.setView([-15.65, -56.134], 15); }
   } else {
     map.setView([-20, -50], 5);

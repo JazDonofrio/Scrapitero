@@ -355,6 +355,25 @@ async def theme_css() -> FileResponse:
     return FileResponse(STATIC_DIR / "theme.css", media_type="text/css")
 
 
+@app.get("/imagery-fecha.js")
+async def imagery_fecha_js() -> FileResponse:
+    """Cartel de fecha de la imagen satelital, compartido por los tres mapas de la app.
+
+    `no-store` por el mismo motivo que `i18n.js`: viaja apareado con el markup que lo usa."""
+    return FileResponse(STATIC_DIR / "imagery-fecha.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/imagery-fecha")
+async def api_imagery_fecha(lat: float, lng: float) -> JSONResponse:
+    """Fecha de captura del basemap de Esri en un punto. Ver `geo.imagery_fecha`.
+
+    Endpoint propio y no un campo de otra respuesta porque lo piden mapas que no cargan
+    incidencias: el del relevamiento y el del asistente de actualización."""
+    from scrapitero.agents import geo
+    return JSONResponse({"ok": True, "imagery": geo.imagery_fecha(lat, lng)})
+
+
 @app.get("/i18n.js")
 async def i18n_js() -> FileResponse:
     """Idioma de la interfaz (motor + diccionario ES→PT). Lo piden el dashboard y el

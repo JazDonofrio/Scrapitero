@@ -10,6 +10,7 @@
        mapa tienen la misma especificidad y sólo ganan si se cargan después. -->
   <link rel="stylesheet" href="/theme.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/imagery-fecha.js"></script>
   <script>
     // Mismo tema que el dashboard, sellado antes del primer pintado.
     (function () {
@@ -87,12 +88,7 @@
     .tag.est{background:var(--ok-bg);color:var(--ok-fg)}
     #empty{padding:24px;text-align:center;color:hsl(var(--muted-fg))}
     .warnbox{margin-top:5px;font-size:.72rem;color:var(--a-amber)}
-  .imgfecha{background:rgba(15,23,42,.82);color:#e5eaf3;font-size:12px;line-height:1.35;
-  padding:5px 9px;border-radius:6px;border:1px solid rgba(255,255,255,.18);
-  box-shadow:0 1px 4px rgba(0,0,0,.4);backdrop-filter:blur(2px);white-space:nowrap;}
-.imgfecha b{color:#fff;font-weight:700;}
-.imgfecha .dud{color:#f0b866;}
-</style>
+  </style>
 </head>
 <body>
 <div id="wrap">
@@ -160,46 +156,9 @@ satelite.addTo(map); etiquetas.addTo(map);
 const layersCtl = L.control.layers({'🛰 Satélite': satelite, '🗺 Mapa': osm},
                                    {'Etiquetas': etiquetas}, {position:'topleft'}).addTo(map);
 
-// ── Fecha de la imagen, SOBRE el mapa ──────────────────────────────────────────────────
-// Estas incidencias se resuelven mirando la foto, así que de qué época es la foto no puede
-// vivir sólo en la tarjeta: tiene que estar donde el operador tiene los ojos. Y va atado a
-// la CAPA, no a la zona, porque cada proveedor trae una fecha distinta y de Google no la
-// sabemos — dejar un "sep-2025" fijo mientras alguien mira el satélite de Google sería
-// peor que no poner nada.
-const _MESES_CAP = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
-const CapaFecha = L.Control.extend({
-  options: {position: 'bottomleft'},
-  onAdd: function(){
-    this._d = L.DomUtil.create('div', 'imgfecha');
-    L.DomEvent.disableClickPropagation(this._d);
-    this._render();
-    return this._d;
-  },
-  // Sin argumento re-dibuja la capa actual. Hace falta porque el control se crea al armar
-  // el mapa y `IMAGERY_BASE` recién llega con el fetch de incidencias: sin esto el cartel
-  // se quedaba en "fecha desconocida" para siempre.
-  _render: function(nombre){
-    if(nombre !== undefined) this._nombre = nombre;
-    nombre = this._nombre || '🛰 Satélite';
-    let html;
-    if(/Google/i.test(nombre)){
-      html = `<b>Google</b> · <span class="dud">fecha no publicada</span>`;
-    }else if(/Mapa|OSM/i.test(nombre)){
-      html = `<b>Mapa</b> · sin imagen satelital`;
-    }else if(IMAGERY_BASE && IMAGERY_BASE.fecha){
-      const m = /^(\d{4})-(\d{2})-/.exec(IMAGERY_BASE.fecha);
-      const mes = m ? `${_MESES_CAP[+m[2]-1]}-${m[1]}` : IMAGERY_BASE.fecha;
-      html = `📅 <b>${mes}</b> · Esri`
-           + `${IMAGERY_BASE.proveedor?'/'+IMAGERY_BASE.proveedor:''}`
-           + `${IMAGERY_BASE.resolucion_m?' · '+String(IMAGERY_BASE.resolucion_m).replace('.',',')+' m':''}`;
-    }else{
-      html = `🛰 Esri · <span class="dud">fecha desconocida</span>`;
-    }
-    this._d.innerHTML = html;
-  },
-});
-const capaFecha = new CapaFecha().addTo(map);
-map.on('baselayerchange', e => capaFecha._render(e.name || ''));
+// Cartel de fecha de la imagen: implementación compartida (`/imagery-fecha.js`), la misma
+// que usan los dos mapas del dashboard.
+const capaFecha = ImageryFecha.agregarCartel(map);
 
 // ── Google satélite/mapa (opcional, si hay API key) — mismo mecanismo que el dashboard ──
 function _loadScript(src){
@@ -688,7 +647,10 @@ async function load(){
   if(!d.ok){ document.getElementById('sub').textContent = d.error||'Error'; return; }
   pendientes = d.pendientes; updateSub(); renderFiltros(d.resumen);
   IMAGERY_BASE = d.imagery_base || null;   // fecha de la foto que se ve en pantalla
-  if(typeof capaFecha !== 'undefined') capaFecha._render();   // el cartel del mapa
+  // El cartel del mapa: la fecha se pide con la coordenada de un caso cualquiera — la
+  // cobertura de Esri viene en bloques de varios km, así que cualquiera de la zona sirve.
+  const _pt = (d.incidencias||[]).find(i => i.lat != null && i.lng != null);
+  if(_pt) capaFecha.refrescar(_pt.lat, _pt.lng);
 
   // Se recarga SIEMPRE (no sólo la primera vez): al mover un punto desde el editor, éste es
   // el que tiene que aparecer en la posición nueva.
