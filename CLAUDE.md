@@ -691,10 +691,23 @@ en la tabla `incidencias` (mig. 046). Layout igual a la ex-asistencia de hoteles
 Leaflet, puntos del relevamiento anterior como contexto) más **chips de filtro por tipo** y
 selector de estado; el link de Telegram llega con `?tipo=` preseleccionado.
 **Mapa con satélite y salida a Google Maps** (estas incidencias se resuelven *mirando* la
-construcción): capas base **Esri satélite (default) · OSM · Google satélite/mapa** — las de
-Google se agregan solo si hay `GOOGLE_MAPS_API_KEY` (vía `/api/config` + Leaflet.GoogleMutant,
-el mismo mecanismo que `addGoogleLayers` del dashboard) y `maxZoom` 22 con zoom digital sobre el
-tile nativo. ⚠ **Las capas base de los TRES mapas se crean en un solo lugar** —
+construcción): capas base **Google satélite (default) · Esri satélite · OSM · Google mapa** —
+las de Google salen sólo si hay `GOOGLE_MAPS_API_KEY` (vía `/api/config` + Leaflet.GoogleMutant)
+y `maxZoom` 22 con zoom digital sobre el tile nativo. **Google es el default desde el
+9-sep-2026** (pedido del operador: su imagen es más nueva y más nítida, y en z20 la de Esri
+directamente no existe). Esri queda en el selector y es el **fallback**: sin API key, o si el
+SDK no carga, el mapa se queda con la capa de Esri que ya estaba puesta — verificado bloqueando
+`maps.googleapis.com`. ⚠ **Lo que se paga por ese default, que no se ve en el código:** (1) el
+**cartel de fecha deja de informar** — Google no publica la fecha de captura por API y dice
+«fecha no publicada», así que el pedido de mostrar SIEMPRE de cuándo es la imagen sólo se
+cumple cambiando a Esri; (2) **Google factura por carga de mapa**, y antes sólo se instanciaba
+si alguien elegía esa capa, mientras que ahora ocurre al abrir cualquier relevamiento. Las
+**etiquetas de Esri acompañan sólo a su satélite** (el híbrido de Google ya trae sus rótulos y
+encimarlos duplica cada nombre de calle): se apagan con cualquier otra capa y vuelven al
+reelegirlo. ⚠ Ese encendido va en un `setTimeout(…, 0)` **a propósito**: mientras el control de
+capas procesa su click tiene `_handlingClick` en true y se saltea el refresco de sus casillas,
+así que hacerlo dentro dejaba la capa puesta con el tilde sin marcar — el control diciendo lo
+contrario de lo que el mapa mostraba. ⚠ **Las capas base de los TRES mapas se crean en un solo lugar** —
 `ImageryFecha.capasBase()` en `static/imagery-fecha.js`, junto al cartel de fecha— porque
 estaban copiadas y hubo que corregirlas en las tres a la vez: **`maxNativeZoom` estaba en 20 y
 Esri no tiene imagen en z20 en ninguna zona que relevamos**, así que pasando de z19 el mapa

@@ -154,23 +154,10 @@ const layersCtl = L.control.layers({'🛰 Satélite': satelite, '🗺 Mapa': osm
 // que usan los dos mapas del dashboard.
 const capaFecha = ImageryFecha.agregarCartel(map);
 
-// ── Google satélite/mapa (opcional, si hay API key) — mismo mecanismo que el dashboard ──
-function _loadScript(src){
-  return new Promise((res,rej)=>{ const s=document.createElement('script');
-    s.src=src; s.async=true; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
-}
-async function addGoogleLayers(){
-  try{
-    const cfg = await fetch('/api/config').then(r=>r.json()).catch(()=>({}));
-    if(!cfg || !cfg.google_maps_key) return;       // sin key → se queda con Esri/OSM
-    await _loadScript(`https://maps.googleapis.com/maps/api/js?key=${cfg.google_maps_key}&v=weekly`);
-    await _loadScript('https://unpkg.com/leaflet.gridlayer.googlemutant@0.14.0/dist/Leaflet.GoogleMutant.js');
-    if(!(L.gridLayer && L.gridLayer.googleMutant)) return;
-    layersCtl.addBaseLayer(L.gridLayer.googleMutant({type:'hybrid',  maxZoom:22}), '🛰 Google (satélite)');
-    layersCtl.addBaseLayer(L.gridLayer.googleMutant({type:'roadmap', maxZoom:22}), '🗺 Google (mapa)');
-  }catch(e){ console.warn('Google Maps no disponible (se mantiene Esri/OSM):', e); }
-}
-addGoogleLayers();
+// Google satélite/mapa: implementación compartida (`/imagery-fecha.js`), la misma que usan
+// los otros dos mapas. Queda ACTIVO por default; Esri pasa a ser opción del selector y es el
+// fallback si no hay API key o el SDK no carga.
+ImageryFecha.agregarGoogle(map, layersCtl, {esri: satelite, etiquetas});
 
 // Botón que abre Google Maps en la MISMA vista (centro + zoom actuales), en satélite
 // (`data=!3m1!1e3`), para mirar el caso con Street View / imagery de Google.

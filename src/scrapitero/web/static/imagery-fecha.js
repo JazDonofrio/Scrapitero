@@ -86,6 +86,97 @@
     return m ? MESES[+m[2] - 1] + '-' + m[1] : (iso || '');
   }
 
+  // ── Capas de Google (opcionales) ───────────────────────────────────────────
+  // Google es la capa ACTIVA por default desde el 9-sep-2026, por pedido del operador: su
+  // imagen del conurbano y de Várzea Grande es más nueva y más nítida que la de Esri, que en
+  // z20 ni siquiera existe (ver `MAX_NATIVE_ESRI`). Esri queda como opción del selector, y
+  // es además el **fallback**: si no hay API key o el SDK no carga, el mapa se queda con la
+  // capa de Esri que ya estaba puesta, sin quedarse sin fondo.
+  //
+  // ⚠ Dos cosas que se pagan por tener Google de default, dichas acá porque no se ven en el
+  // código: (1) **el cartel de fecha deja de informar** — Google no publica la fecha de
+  // captura por API, así que dice «fecha no publicada», y el pedido del cliente del
+  // 6-sep-2026 era mostrar SIEMPRE de cuándo es la imagen; quien necesite saberlo tiene que
+  // cambiar a Esri. (2) **se factura por carga de mapa**: antes el SDK sólo instanciaba un
+  // mapa de Google si alguien elegía esa capa; ahora lo hace al abrir cualquier relevamiento.
+  var NOMBRE_GOOGLE_SAT = '🛰 Google (satélite)';
+  var NOMBRE_GOOGLE_MAPA = '🗺 Google (mapa)';
+  var _cfg = null, _sdk = null;
+
+  function _config() {
+    if (!_cfg) _cfg = fetch('/api/config').then(function (r) { return r.json(); })
+                       .catch(function () { return {}; });
+    return _cfg;
+  }
+
+  function _script(src) {
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = src; s.async = true; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+
+  function _cargarSdk(key) {
+    if (!_sdk) {
+      _sdk = _script('https://maps.googleapis.com/maps/api/js?key=' + key + '&v=weekly')
+        .then(function () {
+          return _script('https://unpkg.com/leaflet.gridlayer.googlemutant@0.14.0/'
+                       + 'dist/Leaflet.GoogleMutant.js');
+        });
+    }
+    return _sdk;
+  }
+
+  /**
+   * Suma Google satélite/mapa al control de capas y lo deja activo.
+   * `opts.esri` y `opts.etiquetas` son las capas a apagar al activarlo (el híbrido de Google
+   * ya trae sus propios rótulos: dejar encima los de Esri duplica cada nombre de calle).
+   * `opts.activar: false` las agrega sólo como opción, sin cambiar la capa en uso.
+   */
+  function agregarGoogle(map, layersCtl, opciones) {
+    var opts = opciones || {};
+    var esri = opts.esri, etiquetas = opts.etiquetas;
+    // Las etiquetas de Esri acompañan SÓLO a su satélite: se van con cualquier otra capa y
+    // vuelven al elegirlo de nuevo, para que el selector se comporte igual en los dos casos.
+    if (etiquetas) {
+      map.on('baselayerchange', function (e) {
+        // ⚠ Fuera del ciclo del click: mientras el control de capas procesa el suyo tiene
+        // `_handlingClick` en true y se saltea el refresco de sus casillas, así que un cambio
+        // hecho acá dentro deja la capa puesta pero el tilde de «Etiquetas» sin marcar —
+        // el control diciendo lo contrario de lo que el mapa muestra.
+        setTimeout(function () {
+          if (esri && e.layer === esri) {
+            if (!map.hasLayer(etiquetas)) etiquetas.addTo(map);
+          } else if (map.hasLayer(etiquetas)) {
+            map.removeLayer(etiquetas);
+          }
+        }, 0);
+      });
+    }
+    return _config().then(function (cfg) {
+      if (!cfg || !cfg.google_maps_key) return null;   // sin key → se queda con Esri/OSM
+      return _cargarSdk(cfg.google_maps_key).then(function () {
+        if (!(L.gridLayer && L.gridLayer.googleMutant)) return null;
+        var hybrid = L.gridLayer.googleMutant({ type: 'hybrid', maxZoom: MAX_ZOOM });
+        var road = L.gridLayer.googleMutant({ type: 'roadmap', maxZoom: MAX_ZOOM });
+        layersCtl.addBaseLayer(hybrid, NOMBRE_GOOGLE_SAT);
+        layersCtl.addBaseLayer(road, NOMBRE_GOOGLE_MAPA);
+        if (opts.activar !== false) {
+          if (esri && map.hasLayer(esri)) map.removeLayer(esri);
+          hybrid.addTo(map);
+          // Leaflet sólo emite `baselayerchange` cuando el cambio sale del control; sin este
+          // aviso el cartel seguiría anunciando la fecha de Esri sobre la imagen de Google.
+          map.fire('baselayerchange', { layer: hybrid, name: NOMBRE_GOOGLE_SAT });
+        }
+        return { hybrid: hybrid, road: road };
+      });
+    }).catch(function (e) {
+      console.warn('Google Maps no disponible (se mantiene Esri/OSM):', e);
+      return null;
+    });
+  }
+
   /** Agrega el cartel a un mapa. Devuelve el control, con `.refrescar(lat, lng)`. */
   function agregarCartel(map, opciones) {
     var opts = opciones || {};
@@ -130,5 +221,6 @@
   }
 
   global.ImageryFecha = { agregarCartel: agregarCartel, fechaDeImagen: fechaDeImagen,
-                          mesAnio: mesAnio, capasBase: capasBase, MAX_ZOOM: MAX_ZOOM };
+                          mesAnio: mesAnio, capasBase: capasBase, MAX_ZOOM: MAX_ZOOM,
+                          agregarGoogle: agregarGoogle };
 })(window);

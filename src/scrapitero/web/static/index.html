@@ -1118,7 +1118,8 @@ function actuRenderMapa(puntos) {
   satelite.addTo(map); etiquetas.addTo(map);
   const layersCtl = L.control.layers({ '🛰 Satélite': satelite, '🗺 Mapa': osm },
                                      { 'Etiquetas': etiquetas }, { position: 'topleft' }).addTo(map);
-  addGoogleLayers(map, layersCtl);      // reusa el helper del dashboard (si hay key)
+  // Google satélite queda ACTIVO (Esri pasa a ser opción del selector). Ver `/imagery-fecha.js`.
+  ImageryFecha.agregarGoogle(map, layersCtl, {esri: satelite, etiquetas: etiquetas});
   // Fecha de la imagen: acá se DIBUJA la zona nueva mirando el terreno, así que de cuándo
   // es la foto cambia lo que se dibuja. Implementación compartida (`/imagery-fecha.js`).
   const _cf = ImageryFecha.agregarCartel(map);
@@ -2210,7 +2211,8 @@ function initMap(sid) {
 
   // Google Maps (opcional): si hay API key configurada, se agregan como capas base
   // seleccionables vía Leaflet.GoogleMutant. Da imágenes de Google y más zoom nativo.
-  addGoogleLayers(map, layersCtl);
+  // Google satélite queda ACTIVO (Esri pasa a ser opción del selector). Ver `/imagery-fecha.js`.
+  ImageryFecha.agregarGoogle(map, layersCtl, {esri: satellite, etiquetas: labels});
 
   const geoStr = zoneData[sid];
   if (geoStr) {
@@ -3021,37 +3023,8 @@ function _getConfig() {
   if (!_cfgPromise) _cfgPromise = fetch('/api/config').then(r => r.json()).catch(() => ({}));
   return _cfgPromise;
 }
-function _loadScript(src) {
-  return new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = src; s.async = true; s.onload = res; s.onerror = rej;
-    document.head.appendChild(s);
-  });
-}
-let _gmapsPromise = null;
-function _ensureGoogle(key) {
-  if (_gmapsPromise) return _gmapsPromise;
-  _gmapsPromise = (async () => {
-    await _loadScript(`https://maps.googleapis.com/maps/api/js?key=${key}&v=weekly`);
-    await _loadScript('https://unpkg.com/leaflet.gridlayer.googlemutant@0.14.0/dist/Leaflet.GoogleMutant.js');
-  })();
-  return _gmapsPromise;
-}
-// Agrega Google satélite/mapa como capas base seleccionables si hay API key.
-async function addGoogleLayers(map, layersCtl) {
-  try {
-    const cfg = await _getConfig();
-    if (!cfg || !cfg.google_maps_key) return;       // sin key → se queda con Esri/OSM
-    await _ensureGoogle(cfg.google_maps_key);
-    if (!(L.gridLayer && L.gridLayer.googleMutant)) return;
-    const gHybrid = L.gridLayer.googleMutant({type: 'hybrid',  maxZoom: 22});
-    const gRoad   = L.gridLayer.googleMutant({type: 'roadmap', maxZoom: 22});
-    layersCtl.addBaseLayer(gHybrid, '🛰 Google (satélite)');
-    layersCtl.addBaseLayer(gRoad,   '🗺 Google (mapa)');
-  } catch (e) {
-    console.warn('Google Maps no disponible (se mantiene Esri/OSM):', e);
-  }
-}
+// Las capas de Google viven en `/imagery-fecha.js` (`ImageryFecha.agregarGoogle`), junto a
+// las capas base y al cartel de fecha: eran tres copias del mismo bloque en dos páginas.
 
 /* ── Relevamiento ANTERIOR (gris) — comparación viejo/nuevo sobre el mismo mapa ── */
 // El geocoding gratuito colapsa varias direcciones en el MISMO punto (números
