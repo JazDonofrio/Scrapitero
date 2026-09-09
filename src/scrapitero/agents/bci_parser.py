@@ -107,6 +107,69 @@ _CAT_USO_LABEL = {"vivienda": "residencial", "comercio": "comercial",
 
 # ── Parser de campos ───────────────────────────────────────────────────────────
 
+# Proporción bajo la cual una unidad del BCI se considera **anexo** (cochera, lavadero,
+# edícula) y no vivienda, medida contra la unidad más grande del lote. Cualquier corte entre
+# ~20% y ~50% clasifica igual los seis casos verificados: ninguno queda cerca del límite.
+_ANEXO_PCT = 0.30
+# ...salvo que haya MUCHAS unidades chicas: eso ya no son anexos, es un edificio de kitnets.
+# Da Liberdade 109 tiene una casa de 109 m² y 24 unidades de 18-23 m² que SÍ son viviendas.
+# El mínimo de 3 es el número más frágil de los dos: lo sostienen São Bento 86 (2 chicas, son
+# anexos) de un lado y Da Liberdade (24 chicas, son viviendas) del otro — entre 2 y 24 no hay
+# ningún caso verificado. Si aparece uno con 3 o 4, es el que ajusta este número.
+_ANEXO_MIN_CHICAS = 3
+
+
+def _es_seccion_muerta(blk: str) -> bool:
+    """La sección describe algo sin techo Y sin aberturas: no aloja a nadie.
+
+    Es el caso de GENEROSO TAVARES 174, que no declara ninguna `UNIDADE` y sin embargo traía
+    dos `USO RESIDENCIAL`: el segundo es un `SITUACAO FUNDOS` con `COBERTURA SEM` y
+    `ESQUADRIAS SEM`. `SEM` es un valor deliberado del catastro, no un campo vacío: el
+    vocabulario de `ESQUADRIAS` es FERRO 61% · SEM 22% · VIDRO 6% · PVC 5% · ALUMINIO 4% ·
+    MADEIRA 2%, y cuando de verdad no lo anotan el campo directamente falta (0,4%).
+    """
+    cob = re.search(r'COBERTURA\s+(\S+)', blk, re.I)
+    esq = re.search(r'ESQUADRIAS\s+(\S+)', blk, re.I)
+    return bool(cob and esq and cob.group(1).upper() == "SEM" and esq.group(1).upper() == "SEM")
+
+
+def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
+    """Cuántas de las construcciones residenciales del BCI son de verdad viviendas.
+
+    Dos caminos, según lo que declare el PDF (ver el comentario largo en `_parse_bci`):
+
+    * **Con `UNIDADE` enumeradas** — manda la proporción: cuentan las que miden al menos
+      `_ANEXO_PCT` de la mayor; las más chicas sólo cuentan si hay `_ANEXO_MIN_CHICAS` o más
+      (edificio de kitnets). Las descartadas quedan marcadas `uso='anexo'` en la propia lista,
+      para que el CSV por unidad no las emita como vivienda.
+    * **Sin `UNIDADE`** — se cuentan las secciones `USO` residenciales, salteando las que no
+      tienen techo ni aberturas.
+
+    Nunca devuelve menos de 1 si había alguna construcción residencial: el lote tiene casa.
+    """
+    res = [u for u in unidades if (u.get("uso") or "residencial") == "residencial"]
+    if unit_iter and res:
+        areas = [u["area_m2"] for u in res if u.get("area_m2")]
+        if not areas:
+            return len(res)
+        mayor = max(areas)
+        chicas = [u for u in res
+                  if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
+        if len(chicas) < _ANEXO_MIN_CHICAS:
+            for u in chicas:
+                u["uso"] = "anexo"          # viaja a `parcela_unidades`; el CSV no la cuenta
+            return max(len(res) - len(chicas), 1)
+        return len(res)
+
+    vivos = 0
+    for m in re.finditer(_BCI_USO_RE, text, re.I):
+        if _BCI_USO_CAT.get(m.group(1).upper()) != "vivienda":
+            continue
+        if not _es_seccion_muerta(text[max(0, m.start() - 300):m.end() + 220]):
+            vivos += 1
+    return vivos
+
+
 def _parse_bci(text: str) -> dict:
     """Extrae campos estructurados del texto del BCI."""
     r: dict = {
@@ -184,8 +247,32 @@ def _parse_bci(text: str) -> dict:
         # cliente; antes caían fuera del whitelist → 0 UF + uso_principal 'residencial'.
         usos = re.findall(_BCI_USO_RE, text, re.I)
         cats = [_BCI_USO_CAT[u.upper()] for u in usos]
-        r["uf_vivienda"] = sum(1 for c in cats if c == "vivienda")
         r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
+
+        # ⚠ **La vivienda NO se cuenta así.** El BCI enumera CONSTRUCCIONES, no hogares: la
+        # cochera, el lavadero y el galpón del fondo son "unidades" con su código, su área y
+        # su año, y contarlas una por una infla el relevamiento. Verificado en la calle por
+        # el operador (sep-2026), seis casos, seis errores:
+        #
+        #   GENEROSO TAVARES 174   decía 2 · es 1   (sección de fondo sin techo ni aberturas)
+        #   GENEROSO TAVARES 134   decía 3 · es 1   (anexos de 10 y 47 m²)
+        #   SÃO BENTO 86           decía 3 · es 1   (anexos de 23 y 14 m²)
+        #   SÃO BENTO 95           decía 2 · es 1   (anexo de 46 m², mismo año que la casa)
+        #   JOÃO LIBÂNIO 118       decía 3 · es 1   (anexos de 33 y 36 m²)
+        #   PEDRO PEDROSSIAN 234   decía 3 · es 1   (anexos de 5 y 22 m²)
+        #
+        # Lo que separa el anexo de la casa **no** es el área absoluta —São Bento 95 tiene un
+        # anexo de 46 m² y Filinto Müller 326 tiene kitnets de 18 m² que SÍ son viviendas—
+        # sino la **proporción** contra la mayor del lote, más una excepción para los
+        # edificios de kitnets: una o dos unidades chicas al lado de una grande son anexos;
+        # veinte son un negocio de alquiler.
+        #
+        # Descartados por medición, no por opinión: `TIPO DE OCUPACAO` dice `UNICA` en 510 de
+        # 511 parcelas (constante del formulario, no informa); y el conteo de huellas
+        # satelitales acuerda sólo el 47% del tiempo porque Open Buildings **fusiona**
+        # construcciones pegadas — justo el caso a separar (huellas únicas de 457 y 559 m²).
+        vivi = _viviendas_reales(unidades, unit_iter, text)
+        r["uf_vivienda"] = vivi
         r["uf_total"] = len(unit_iter) or len(usos)
 
         if r["uf_comercio"] > 0 and r["uf_vivienda"] > 0:

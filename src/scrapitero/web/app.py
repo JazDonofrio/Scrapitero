@@ -3370,11 +3370,21 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             if unidades:
                 # Edificio/lote con varias unidades: una fila por unidad (sin conteo).
                 for u in unidades:
-                    es_com = (u["uso"] or "").lower().startswith("comerc")
+                    uso_u = (u["uso"] or "").lower()
+                    es_com = uso_u.startswith("comerc")
+                    # ⚠ `anexo` = construcción que el BCI enumera como unidad pero que no es
+                    # un hogar (cochera, lavadero, edícula). La marca `BCIParser` con la
+                    # regla de proporción; acá tiene que contar **0**, porque el CSV emite
+                    # una fila por unidad y el default de esta rama era "todo lo que no
+                    # empiece con comerc es vivienda". Sin esto la fila expandida devolvía
+                    # la UF que el conteo de la parcela ya había descartado.
+                    es_anexo = uso_u == "anexo"
                     w.writerow(_fila(
                         r, direccion, f"Unidade {u['n']}", u["codigo"] or "",
                         (u["uso"] or "residencial"),
-                        0 if es_com else 1, 1 if es_com else 0, 1,
+                        0 if (es_com or es_anexo) else 1,
+                        1 if es_com else 0,
+                        0 if es_anexo else 1,
                         u["area_m2"] or r[13]))
             else:
                 w.writerow(_fila(r, direccion, "", "", r[8], r[9], r[10], r[11], r[13]))
