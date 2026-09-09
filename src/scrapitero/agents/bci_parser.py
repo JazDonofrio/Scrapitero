@@ -108,15 +108,29 @@ _CAT_USO_LABEL = {"vivienda": "residencial", "comercio": "comercial",
 # ── Parser de campos ───────────────────────────────────────────────────────────
 
 # Proporción bajo la cual una unidad del BCI se considera **anexo** (cochera, lavadero,
-# edícula) y no vivienda, medida contra la unidad más grande del lote. Cualquier corte entre
-# ~20% y ~50% clasifica igual los seis casos verificados: ninguno queda cerca del límite.
+# edícula) y no vivienda, medida contra la unidad más grande del lote. Desde que la
+# `TIPOLOGIA` y la `DISPOSICAO` deciden primero, este corte sólo reparte **dentro de una
+# vila** (≥ `_VILA_MIN_UNIDADES` habitables): distingue la kitnet del lavadero de la vila.
 _ANEXO_PCT = 0.30
 # ...salvo que haya MUCHAS unidades chicas: eso ya no son anexos, es un edificio de kitnets.
 # Da Liberdade 109 tiene una casa de 109 m² y 24 unidades de 18-23 m² que SÍ son viviendas.
-# El mínimo de 3 es el número más frágil de los dos: lo sostienen São Bento 86 (2 chicas, son
-# anexos) de un lado y Da Liberdade (24 chicas, son viviendas) del otro — entre 2 y 24 no hay
-# ningún caso verificado. Si aparece uno con 3 o 4, es el que ajusta este número.
 _ANEXO_MIN_CHICAS = 3
+# Lo que el catastro DICE que es cada construcción, en `TIPOLOGIA`. Nadie vive en una
+# piscina: estas nunca son vivienda, midan lo que midan. Sale de la ficha, no de un
+# supuesto nuestro, y por eso manda sobre cualquier umbral de área — que era el modo de
+# falla anterior: sólo se descartaban por CHICAS, así que la piscina de 58 m² de
+# `DA LIBERDADE 350` contaba como una casa. En VAZ049 hay 162 construcciones que el BCI
+# marca `USO RESIDENCIAL` y rotula piscina, telheiro (cobertizo) o garagem.
+# `SALA` y `APARTAMENTO` NO están acá a propósito: una sala con uso residencial es rara
+# pero habitable, y descartarla perdería UF reales sin evidencia que lo respalde.
+_TIPOLOGIA_NO_HABITABLE = {"PISCINA", "GARAGEM", "TELHEIRO", "GALPAO", "PARQUE"}
+# A partir de cuántas construcciones habitables el lote es una VILA (kitnets en fila) y no
+# una casa con su ampliación del fondo. Ver `_viviendas_reales`. **Es el número frágil de
+# los tres**: entre 2 (Vuolo 151, São Bento 95: casa + ampliación) y 10 (Filinto Müller:
+# vila) no hay ningún caso verificado en la calle. En la célula VAZ049 hay 103 fichas con
+# exactamente 2 construcciones habitables, así que es ahí donde más pesa: si aparece un
+# caso nuevo, mirar primero esas.
+_VILA_MIN_UNIDADES = 3
 
 
 def _es_seccion_muerta(blk: str) -> bool:
@@ -138,28 +152,70 @@ def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
 
     Dos caminos, según lo que declare el PDF (ver el comentario largo en `_parse_bci`):
 
-    * **Con `UNIDADE` enumeradas** — manda la proporción: cuentan las que miden al menos
-      `_ANEXO_PCT` de la mayor; las más chicas sólo cuentan si hay `_ANEXO_MIN_CHICAS` o más
-      (edificio de kitnets). Las descartadas quedan marcadas `uso='anexo'` en la propia lista,
-      para que el CSV por unidad no las emita como vivienda.
+    * **Con `UNIDADE` enumeradas** — se lee lo que el catastro DECLARA de cada una antes de
+      medirla: primero se descartan las `TIPOLOGIA` que no alojan a nadie
+      (`_TIPOLOGIA_NO_HABITABLE`), y sobre las que quedan decide la cantidad: con
+      `_VILA_MIN_UNIDADES` o más es una vila de kitnets y manda la proporción `_ANEXO_PCT`;
+      con una o dos es una casa y su ampliación del fondo, donde la proporción NO sirve y
+      manda `DISPOSICAO` (sólo la CONJUGADA es vivienda aparte).
     * **Sin `UNIDADE`** — se cuentan las secciones `USO` residenciales, salteando las que no
       tienen techo ni aberturas.
 
-    Nunca devuelve menos de 1 si había alguna construcción residencial: el lote tiene casa.
+    Devuelve 0 cuando ninguna construcción residencial del lote es habitable — un lote cuyo
+    "residencial" era sólo un cobertizo no tiene una vivienda que contar, y con construcción
+    a la vista sale por `uf_sin_declarar` del panel de incidencias.
     """
     res = [u for u in unidades if (u.get("uso") or "residencial") == "residencial"]
     if unit_iter and res:
-        areas = [u["area_m2"] for u in res if u.get("area_m2")]
-        if not areas:
-            return len(res)
-        mayor = max(areas)
-        chicas = [u for u in res
-                  if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
-        if len(chicas) < _ANEXO_MIN_CHICAS:
-            for u in chicas:
+        # 1) Lo que el catastro dice que no es habitable, no lo es — sin mirar el área.
+        habitables = []
+        for u in res:
+            if (u.get("tipologia") or "CASA") in _TIPOLOGIA_NO_HABITABLE:
                 u["uso"] = "anexo"          # viaja a `parcela_unidades`; el CSV no la cuenta
-            return max(len(res) - len(chicas), 1)
-        return len(res)
+            else:
+                habitables.append(u)
+        if not habitables:
+            # Todo lo "residencial" del lote era cobertizo/piscina/garagem: no hay vivienda.
+            # Devolver 0 y no 1 es deliberado — si además hay construcción, el lote sale por
+            # `uf_sin_declarar` del panel de incidencias, que es donde un humano lo cierra.
+            return 0
+        areas = [u["area_m2"] for u in habitables if u.get("area_m2")]
+        if not areas:
+            return len(habitables)
+        mayor = max(areas)
+
+        # 2) Tres o más construcciones habitables: es una VILA de kitnets y manda la
+        #    proporción, como venía. (Da Liberdade 109, Filinto Müller 326.)
+        if len(habitables) >= _VILA_MIN_UNIDADES:
+            chicas = [u for u in habitables
+                      if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
+            if len(chicas) < _ANEXO_MIN_CHICAS:
+                for u in chicas:
+                    u["uso"] = "anexo"
+                return max(len(habitables) - len(chicas), 1)
+            return len(habitables)
+
+        # 3) Una o dos: es la casa y, a lo sumo, su ampliación del fondo. **La proporción
+        #    no sirve acá** — SEN. VICENTE VUOLO 151 tiene atrás una CASA de 111 m² que es
+        #    el 61% de la del frente y el operador verificó que es UNA sola vivienda
+        #    (sep-2026); con el corte del 30% pasaba holgada. Lo que separa la ampliación
+        #    de la vivienda independiente es `DISPOSICAO`: las verificadas como viviendas
+        #    reales son CONJUGADA (una fila de unidades pegadas entre sí), y las
+        #    ampliaciones son ISOLADA/GEMINADA al lado de la casa principal.
+        #    Casos que sostienen la regla, los ocho verificados en la calle:
+        #      SEN. VICENTE VUOLO 151  CASA 111 m² FUNDOS GEMINADA  → ampliación
+        #      JOÃO LIBÂNIO 118 (634305) CASA 60 m² FUNDOS ISOLADA  → ampliación
+        #      SÃO BENTO 95            CASA 46 m² FUNDOS GEMINADA   → ampliación
+        #      SÃO BENTO 86            CASA 23 m² FUNDOS ISOLADA    → ampliación
+        #      DA LIBERDADE 109 / FILINTO MÜLLER 326: CONJUGADA     → viviendas (24 y 10)
+        resto = sorted(habitables, key=lambda u: u.get("area_m2") or 0, reverse=True)[1:]
+        vivi = 1
+        for u in resto:
+            if (u.get("disposicion") or "") == "CONJUGADA":
+                vivi += 1
+            else:
+                u["uso"] = "anexo"
+        return vivi
 
     vivos = 0
     for m in re.finditer(_BCI_USO_RE, text, re.I):
@@ -227,6 +283,10 @@ def _parse_bci(text: str) -> dict:
             uso_m = re.search(_BCI_USO_RE, blk, re.I)
             uso_cat = _BCI_USO_CAT.get(uso_m.group(1).upper()) if uso_m else None
             ano_m = re.search(r'ANO\s+CONSTRU[CÇ][AÃ]O:?\s*(\d{4})', blk, re.I)
+            # `TIPOLOGIA` y `DISPOSICAO` son lo que el catastro DICE que es cada
+            # construcción; con el área sólo se puede adivinar. Ver `_viviendas_reales`.
+            tip_m = re.search(r'TIPOLOGIA\s+([A-ZÀ-Ú]+)', blk, re.I)
+            disp_m = re.search(r'DISPOSICAO\s+([A-ZÀ-Ú]+)', blk, re.I)
             try:
                 area_v = float(area_u.replace(",", "."))
             except ValueError:
@@ -236,6 +296,8 @@ def _parse_bci(text: str) -> dict:
                 "codigo": cod_u,
                 "area_m2": area_v,
                 "anio": int(ano_m.group(1)) if (ano_m and ano_m.group(1) != "0") else None,
+                "tipologia": tip_m.group(1).upper() if tip_m else None,
+                "disposicion": disp_m.group(1).upper() if disp_m else None,
                 # Etiqueta canónica (servicios/religioso/etc. → comercial) para que la
                 # expansión del CSV cuente la unidad como comercio, no como vivienda.
                 "uso": _CAT_USO_LABEL.get(uso_cat) if uso_cat else None,

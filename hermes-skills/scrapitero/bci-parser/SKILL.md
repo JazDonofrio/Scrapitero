@@ -14,7 +14,14 @@ metadata:
 
 Lee cada PDF `pdf_downloads/reporte_{cca_code}.pdf` y actualiza la parcela en DB con:
 - `uso_principal`: residencial / comercial / mixto / industrial / vacante
-- `uf_vivienda`: cantidad de unidades residenciales
+- `uf_vivienda`: cuántas de las construcciones residenciales son de verdad **viviendas** —
+  NO el conteo bruto de `UNIDADE` del PDF. El BCI enumera CONSTRUCCIONES: la piscina, el
+  cobertizo (`TELHEIRO`), la garagem y la ampliación del fondo son «unidades» con su código,
+  su área y su año, y contarlas una por una infla el relevamiento. El agente lee la
+  `TIPOLOGIA` y la `DISPOSICAO` que declara la propia ficha para separarlas; las descartadas
+  quedan como `uso='anexo'` en `parcela_unidades` y el CSV por unidad las cuenta 0.
+  Verificado en la calle en ocho lotes de Várzea Grande. Puede dar **0** si todo lo
+  «residencial» del lote era un cobertizo.
 - `uf_comercio`: cantidad de unidades comerciales
 - `uf_fuente = 'bci'`: marca la UF como **exacta** (extraída del PDF oficial). La web la
   muestra sin el badge `est.`/`≈` que llevan las UF estimadas por UnidadesEstimator
