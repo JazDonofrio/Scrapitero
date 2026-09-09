@@ -15,12 +15,53 @@
  * ⚠ El cartel está atado a la CAPA, no a la zona. De Google **no sabemos la fecha** (no la
  * publica por API) y lo dice; dejar la fecha de Esri fija mientras alguien mira el satélite
  * de Google sería peor que no poner nada, porque le da precisión falsa a la decisión.
+ *
+ * Por el mismo motivo vive acá `capasBase()`: las tres definiciones de las capas satelitales
+ * estaban copiadas en los tres mapas, con sus `maxZoom`/`maxNativeZoom` a mano — y eso es
+ * exactamente lo que hizo falta corregir en los tres a la vez (ver `MAX_NATIVE_ESRI`).
  */
 (function (global) {
   'use strict';
 
   var MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun',
                'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+  // Hasta dónde deja acercar el mapa. Más allá del tile nativo Leaflet hace zoom digital
+  // (agranda el último tile real), que es lo que permite mirar un techo de cerca.
+  var MAX_ZOOM = 22;
+  // ⚠ Último nivel en el que Esri tiene imagen DE VERDAD en las zonas que relevamos.
+  // Estaba en 20 y por eso "desaparecía la imagen al hacer zoom" (reportado el 9-sep-2026):
+  // pasando de z19 el mapa quedaba en blanco con los marcadores flotando. No es un fallo de
+  // red y por eso no saltaba en la consola — Esri responde **HTTP 200 con un tile gris que
+  // dice «Map data not yet available»**, así que Leaflet lo pinta como si fuera imagen.
+  // Medido sobre el tile del centro de cada zona (desviación estándar de sus píxeles, que en
+  // una foto aérea es alta y en el relleno gris es 5,4 idéntica en todas):
+  //     Várzea Grande  z18 40,3 · z19 46,5 · z20 5,4 · z21 5,4
+  //     Malvinas Arg.  z18 70,2 · z19 77,2 · z20 5,4 · z21 5,4
+  //     Hurlingham     z18 43,6 · z19 49,4 · z20 5,4 · z21 5,4
+  // Con 19 la imagen se ve siempre, borrosa al final del zoom pero presente, que es lo que el
+  // operador necesita para confirmar una construcción. Si algún día se releva una ciudad con
+  // cobertura más fina, esto es lo que hay que subir — y conviene medirlo igual, no suponerlo.
+  var MAX_NATIVE_ESRI = 19;
+  var MAX_NATIVE_OSM = 19;   // el último nivel que sirve openstreetmap.org
+
+  var URL_ESRI_SAT = 'https://server.arcgisonline.com/ArcGIS/rest/services/'
+                   + 'World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  var URL_ESRI_REF = 'https://server.arcgisonline.com/ArcGIS/rest/services/'
+                   + 'Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+  var URL_OSM = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+  /** Las capas base que comparten los tres mapas de la app, ya configuradas. */
+  function capasBase() {
+    return {
+      satelite: L.tileLayer(URL_ESRI_SAT, {
+        attribution: 'Tiles © Esri', maxZoom: MAX_ZOOM, maxNativeZoom: MAX_NATIVE_ESRI }),
+      etiquetas: L.tileLayer(URL_ESRI_REF, {
+        maxZoom: MAX_ZOOM, maxNativeZoom: MAX_NATIVE_ESRI, opacity: 0.8 }),
+      osm: L.tileLayer(URL_OSM, {
+        attribution: '© OpenStreetMap', maxZoom: MAX_ZOOM, maxNativeZoom: MAX_NATIVE_OSM }),
+    };
+  }
 
   // Caché por página: la cobertura de Esri viene en bloques de varios km, así que dos mapas
   // de la misma ciudad comparten respuesta y no se le pega dos veces al servicio.
@@ -89,5 +130,5 @@
   }
 
   global.ImageryFecha = { agregarCartel: agregarCartel, fechaDeImagen: fechaDeImagen,
-                          mesAnio: mesAnio };
+                          mesAnio: mesAnio, capasBase: capasBase, MAX_ZOOM: MAX_ZOOM };
 })(window);

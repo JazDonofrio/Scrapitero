@@ -1107,20 +1107,14 @@ function actuMapaGrande(btn) {
 function actuRenderMapa(puntos) {
   document.getElementById('actu-mapa-wrap').style.display = '';
   if (actuState.map) { actuState.map.remove(); actuState.map = null; }
-  const map = L.map('actu-mapa', { maxZoom: 22 });
+  const map = L.map('actu-mapa', { maxZoom: ImageryFecha.MAX_ZOOM });
   actuState.map = map;
   actuState.drawnLayer = null;
 
   // Capas base: SATÉLITE por default (para dibujar hay que ver el terreno, no un mapa
   // esquemático) + OSM para leer nombres de calle + Google si hay API key.
-  const satelite = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { attribution: 'Tiles © Esri', maxZoom: 22, maxNativeZoom: 20 });
-  const etiquetas = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-    { maxZoom: 22, maxNativeZoom: 20, opacity: 0.8 });
-  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { maxZoom: 22, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
+  // Mismas capas base que los otros dos mapas (`/imagery-fecha.js`).
+  const {satelite, etiquetas, osm} = ImageryFecha.capasBase();
   satelite.addTo(map); etiquetas.addTo(map);
   const layersCtl = L.control.layers({ '🛰 Satélite': satelite, '🗺 Mapa': osm },
                                      { 'Etiquetas': etiquetas }, { position: 'topleft' }).addTo(map);
@@ -2183,22 +2177,10 @@ function initMap(sid) {
   // Si ya existe un mapa para este sid, solo invalidar tamaño
   if (maps[sid]) { maps[sid].invalidateSize(); return; }
 
-  // maxZoom 22 con maxNativeZoom = último nivel real de cada proveedor: Leaflet
-  // sigue acercando (zoom digital, upscaling) más allá del tile nativo → más zoom.
-  const map = L.map(el, {zoomControl: true, maxZoom: 22});
-
-  const satellite = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    {attribution: 'Tiles © Esri', maxZoom: 22, maxNativeZoom: 20}
-  );
-  const labels = L.tileLayer(
-    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-    {maxZoom: 22, maxNativeZoom: 20, opacity: 0.8}
-  );
-  const osm = L.tileLayer(
-    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {attribution: '© OpenStreetMap', maxZoom: 22, maxNativeZoom: 19}
-  );
+  // Capas base y tope de zoom: definición ÚNICA en `/imagery-fecha.js`. Estaban copiadas en
+  // los tres mapas y el `maxNativeZoom` mal puesto dejaba el mapa en blanco al acercar.
+  const map = L.map(el, {zoomControl: true, maxZoom: ImageryFecha.MAX_ZOOM});
+  const {satelite: satellite, etiquetas: labels, osm} = ImageryFecha.capasBase();
 
   satellite.addTo(map);
   labels.addTo(map);

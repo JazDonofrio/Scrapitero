@@ -140,17 +140,11 @@ function fechaCorta(iso){                     // '2026-01-13' → '13-ene-2026'
   return m ? `${+m[3]}-${_MESES[+m[2]-1]}-${m[1]}` : (iso||'');
 }
 
-// maxZoom 22 con maxNativeZoom = último nivel real de cada proveedor: Leaflet sigue
-// acercando (zoom digital) más allá del tile nativo, útil para mirar una construcción.
-const map = L.map('map', {maxZoom: 22}).setView([-15.65,-56.13], 13);
-const satelite = L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  {attribution:'Tiles © Esri', maxZoom:22, maxNativeZoom:20});
-const etiquetas = L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-  {maxZoom:22, maxNativeZoom:20, opacity:.8});
-const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-  {maxZoom:22, maxNativeZoom:19, attribution:'© OpenStreetMap'});
+// Capas base y tope de zoom: definición ÚNICA en `/imagery-fecha.js`, compartida con los
+// otros dos mapas. Leaflet sigue acercando (zoom digital) más allá del último tile real,
+// que es lo que permite mirar una construcción de cerca.
+const map = L.map('map', {maxZoom: ImageryFecha.MAX_ZOOM}).setView([-15.65,-56.13], 13);
+const {satelite, etiquetas, osm} = ImageryFecha.capasBase();
 // Satélite por default: estas incidencias se resuelven MIRANDO la construcción.
 satelite.addTo(map); etiquetas.addTo(map);
 const layersCtl = L.control.layers({'🛰 Satélite': satelite, '🗺 Mapa': osm},

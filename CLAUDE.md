@@ -694,7 +694,20 @@ selector de estado; el link de Telegram llega con `?tipo=` preseleccionado.
 construcción): capas base **Esri satélite (default) · OSM · Google satélite/mapa** — las de
 Google se agregan solo si hay `GOOGLE_MAPS_API_KEY` (vía `/api/config` + Leaflet.GoogleMutant,
 el mismo mecanismo que `addGoogleLayers` del dashboard) y `maxZoom` 22 con zoom digital sobre el
-tile nativo. Botón **"🌍 Abrir en Google Maps"** sobre el mapa: abre la **misma vista** (centro +
+tile nativo. ⚠ **Las capas base de los TRES mapas se crean en un solo lugar** —
+`ImageryFecha.capasBase()` en `static/imagery-fecha.js`, junto al cartel de fecha— porque
+estaban copiadas y hubo que corregirlas en las tres a la vez: **`maxNativeZoom` estaba en 20 y
+Esri no tiene imagen en z20 en ninguna zona que relevamos**, así que pasando de z19 el mapa
+quedaba **en blanco con los marcadores flotando** (reportado el 9-sep-2026 sobre el mapa del
+relevamiento). No saltaba como error porque Esri responde **HTTP 200 con un tile gris que dice
+«Map data not yet available»** — la falla de una fuente que contesta 200, otra vez. Medido con
+la desviación estándar de los píxeles del tile del centro de cada zona (foto aérea ≈ 40-77, el
+relleno gris **5,4 idéntico en las tres**): Várzea Grande, Malvinas y Hurlingham tienen imagen
+hasta **z19** y nada en z20-21. Con `maxNativeZoom: 19` la imagen se ve siempre, borrosa al
+final del zoom pero presente, que es lo que hace falta para confirmar una construcción. **La
+capa de Google NO tiene el problema** (hace su propio upscaling y a z22 sigue mostrando foto),
+por eso se queda como está. Si algún día se releva una ciudad con cobertura más fina, subir
+`MAX_NATIVE_ESRI` — midiéndolo, no suponiéndolo. Botón **"🌍 Abrir en Google Maps"** sobre el mapa: abre la **misma vista** (centro +
 zoom actuales) en satélite (`/maps/@lat,lng,Nz/data=!3m1!1e3`), y cada tarjeta tiene su propio
 **"🌍 Ver en Google Maps"** para ir directo a ese caso (Street View del edificio). Cada tarjeta muestra
 el caso y **sólo las acciones de su tipo**, y todas ofrecen **"✖ No es un problema"** (cierra con
