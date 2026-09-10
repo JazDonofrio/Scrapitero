@@ -128,6 +128,15 @@ _ANEXO_MIN_CHICAS = 3
 # industrial, que es lo que se quiere descartar. Una tipología nueva se agrega tal como la
 # escribe el municipio, no por su primera palabra.
 _TIPOLOGIA_NO_HABITABLE = {"PISCINA", "GARAGEM", "TELHEIRO", "GALPAO", "PARQUE INDUSTRIAL"}
+# Lo mismo para el COMERCIO, y la lista NO es la misma: nadie atiende un negocio en una pileta
+# ni en una cochera, pero **un galpón sí puede ser el comercio** —un depósito, una
+# distribuidora, el taller— y no un agregado de otro local (criterio del operador, 9-sep-2026,
+# a partir de `COUTO MAGALHAES 290`: galpón + cobertizo + oficina son UN taller). Por eso
+# `GALPAO` y `PARQUE INDUSTRIAL` quedan afuera de esta lista y adentro de la de vivienda.
+# Medido en VG: 259 unidades comerciales son de este tipo (237 TELHEIRO, 12 PISCINA,
+# 8 GARAGEM), y en 8 parcelas de la región vigente son el ÚNICO «comercio» que declaran —
+# `CLÓVIS HUGNEY 63` figuraba **mixta por tener pileta**.
+_TIPOLOGIA_NO_LOCAL = {"PISCINA", "TELHEIRO", "GARAGEM"}
 # A partir de cuántas construcciones habitables el lote es una VILA (kitnets en fila) y no
 # una casa con su ampliación del fondo. Ver `_viviendas_reales`. **Es el número frágil de
 # los tres**: entre 2 (Vuolo 151, São Bento 95: casa + ampliación) y 10 (Filinto Müller:
@@ -333,7 +342,17 @@ def _parse_bci(text: str) -> dict:
         # Cuando el PDF **no** enumera `UNIDADE` no hay construcciones que contar y se cae al
         # conteo por secciones, que es el mismo camino que usa `_viviendas_reales`.
         if unit_iter:
-            r["uf_comercio"] = sum(1 for u in unidades if u.get("uso") == "comercial")
+            # Las que no son un local quedan marcadas `anexo`, igual que en vivienda: así el
+            # CSV por unidad tampoco las emite como comercio.
+            n_com = 0
+            for u in unidades:
+                if u.get("uso") != "comercial":
+                    continue
+                if (u.get("tipologia") or "SALA") in _TIPOLOGIA_NO_LOCAL:
+                    u["uso"] = "anexo"
+                else:
+                    n_com += 1
+            r["uf_comercio"] = n_com
         else:
             r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
 
