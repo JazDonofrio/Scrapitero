@@ -321,8 +321,42 @@ def _casos_duplicados(conn, region_id: str, survey_id: str, dup_dist_m: float) -
     return casos
 
 
+def _ccas_ambiguos(conn, survey_id: str) -> set:
+    """Inscrições que en ESTE survey aparecen en más de una parcela.
+
+    Ahí la inscrição no identifica a una parcela y no sirve de clave: hay catastros que
+    reparten una misma inscrição en varios polígonos (en PBA, José León Suárez 1397 y 1466
+    comparten CCA a 70 m; en `zona-salta-centro-t1` hay una en nueve parcelas). Sin esta
+    guarda, dos casos distintos colapsarían en uno y se perdería el que llegue segundo.
+    """
+    return {r[0] for r in conn.execute(text("""
+        SELECT cca_code FROM parcelas
+        WHERE survey_id = :sid AND cca_code IS NOT NULL AND cca_code <> ''
+        GROUP BY cca_code HAVING count(*) > 1
+    """), {"sid": survey_id})}
+
+
+def _clave_parcela(tipo: str, cca, pid: str, ambiguos=frozenset()) -> str:
+    """Clave natural de un caso de parcela, estable entre corridas **y entre re-scrapes**.
+
+    El `parcela_id` es un UUID que se regenera cuando la parcela se vuelve a bajar del
+    catastro; la **inscrição** no, porque la asigna el municipio. Con la clave por id, cada
+    re-scrape huerfanaba lo que el operador ya había cerrado y el caso reaparecía como nuevo
+    — medido el 9-sep-2026 en VAZ049, que se creó portando el relevamiento: **118 casos de
+    parcela apuntando a parcelas que ya no existían en su survey, 5 de ellos resueltos**. Es
+    el mismo motivo por el que `parcela_direccion_manual` y las demás tablas de override se
+    claven por `(region_id, cca_code)`.
+
+    Se cae al `parcela_id` en los dos casos en que la inscrição no sirve: cuando no hay
+    (parcelas que no salen del catastro, como las de `shopping_poi`/baseline) y cuando está
+    repetida dentro del survey (ver `_ccas_ambiguos`).
+    """
+    return f"{tipo}:cca:{cca}" if cca and cca not in ambiguos else f"{tipo}:{pid}"
+
+
 def _casos_altura(conn, survey_id: str) -> list[dict]:
     """Discrepancias entre la altura satelital y lo que declara el catastro."""
+    ambiguos = _ccas_ambiguos(conn, survey_id)
     rows = conn.execute(text("""
         SELECT a.parcela_id::text, a.motivo, a.altura_m, a.pisos_satelital, a.pisos_bci_proxy,
                a.ground_area_m2, a.imagery_year, a.imagery_quality,
@@ -351,7 +385,7 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
                        f"El satélite ve {pisos_sat} planta/s ({altura:.1f} m) vs {pisos_bci} del catastro.")
         casos.append({
             "tipo": tipo,
-            "clave": f"{tipo}:{pid}",
+            "clave": _clave_parcela(tipo, cca, pid, ambiguos),
             "titulo": titulo,
             "detalle": detalle,
             "lat": float(r[13]) if r[13] is not None else None,
@@ -396,6 +430,7 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
 
     Se incluyen los vecinos con número al alcance de la mano: son la referencia con la que el
     operador deduce la altura sin salir de la tarjeta."""
+    ambiguos = _ccas_ambiguos(conn, survey_id)
     rows = conn.execute(text("""
         SELECT p.parcela_id::text, p.calle, p.numero, p.cca_code, p.barrio,
                p.centroid_lat, p.centroid_lng, p.uso_principal, p.area_m2_terreno,
@@ -450,7 +485,7 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
                       "(sin anclas suficientes o fuera de orden espacial). ")
         casos.append({
             "tipo": "numero_faltante",
-            "clave": f"numero_faltante:{pid}",
+            "clave": _clave_parcela("numero_faltante", cca, pid, ambiguos),
             "titulo": f"🔢 {calle} (sin número) — cargar la altura",
             "detalle": (ubicacion + motivo
                         + (f"Vecinos con número: {vecinos}. " if vecinos else "")
@@ -535,6 +570,7 @@ def _casos_poi_numero_ajeno(conn, region_id: str, survey_id: str,
 
 def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
     """UF declarada que no cabe en el volumen visible (altura × huella)."""
+    ambiguos = _ccas_ambiguos(conn, survey_id)
     rows = conn.execute(text("""
         SELECT p.parcela_id::text, p.calle, p.numero, p.uf_vivienda, p.uf_comercio, p.uf_fuente,
                p.area_m2_construida, p.cca_code, p.centroid_lat, p.centroid_lng,
@@ -558,7 +594,7 @@ def _casos_uf_imposible(conn, survey_id: str, m2_min: float) -> list[dict]:
         dir_txt = _direccion(calle, numero, r[15])
         casos.append({
             "tipo": "uf_imposible",
-            "clave": f"uf_imposible:{pid}",
+            "clave": _clave_parcela("uf_imposible", cca, pid, ambiguos),
             "titulo": f"⚠ {dir_txt} — {uf_v} UF no caben en lo construido",
             "detalle": (f"Declara {uf_v} unidades de vivienda (fuente «{uf_fuente or 's/d'}») pero el "
                         f"volumen visible es {huella:.0f} m² × {pisos} planta/s ⇒ "
@@ -612,6 +648,7 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
     cuando `findClosest` le hacía medir la casa del vecino en los lotes vacíos, y acá el sesgo
     apuntaría al mismo lado, porque el caso se dispara justo donde no hay nada declarado.
     """
+    ambiguos = _ccas_ambiguos(conn, survey_id)
     rows = conn.execute(text("""
         WITH sin_uf AS (
             SELECT p.* FROM parcelas p
@@ -685,7 +722,7 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
                        f"muestra la imagen.{extra} Verificá en el frente y cargá las UF.")
         casos.append({
             "tipo": "uf_sin_declarar",
-            "clave": f"uf_sin_declarar:{pid}",
+            "clave": _clave_parcela("uf_sin_declarar", cca, pid, ambiguos),
             "titulo": titulo,
             "detalle": detalle,
             "lat": float(lat) if lat is not None else None,
