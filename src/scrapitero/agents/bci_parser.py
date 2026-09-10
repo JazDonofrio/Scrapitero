@@ -239,6 +239,61 @@ def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
     return vivos
 
 
+def _comercios_reales(unidades: list) -> int:
+    """Cuántas de las construcciones comerciales del BCI son de verdad un local aparte.
+
+    Mismo criterio que `_viviendas_reales`, que es el punto: el catastro enumera
+    CONSTRUCCIONES y un negocio ocupa varias. Dos pasos:
+
+    * **Tipología** — lo que el catastro dice que no es un local no lo es, mida lo que mida
+      (`_TIPOLOGIA_NO_LOCAL`). Ya estaba.
+    * **Proporción** — la construcción chica al lado de la grande es el depósito, la
+      oficina o el techo del mismo negocio, no otro comercio. Mismo corte que vivienda
+      (`_ANEXO_PCT`), medido contra la mayor del lote.
+
+    El segundo paso es lo que faltaba, y es el criterio que el operador ya venía aplicando
+    a mano: `COUTO MAGALHAES 290` —galpón de 319 m² + oficina de 31— lo cerró como UN taller
+    (9-sep-2026), y `PONCE DE ARRUDA 1096` —galpón de 740 m² con una sala de 130, otra de 68,
+    otra de 14 y un galpón de 57— como UN comercio (10-sep-2026). Las dos son el mismo caso.
+
+    Verificado contra las 279 direcciones que cruzan con la revisión cuadra por cuadra del
+    cliente: con el corte al 30 % arregla 8 direcciones y no rompe ninguna. Probado también
+    a 15/20/25/40/50 %; el 30 % es el óptimo y es el número que ya usa vivienda.
+
+    **No** colapsa la fila de locales iguales: cuatro `SALA` de ~80 m² —`COUTO MAGALHAES
+    300`— son cuatro construcciones del mismo porte y quedan cuatro. Ahí el catastro no
+    alcanza y hace falta el ojo; ver el grupo «predio con varias construcciones del mismo
+    uso» del cotejo.
+
+    Devuelve como mínimo 1 cuando el lote declara algún comercio: si todo lo comercial era
+    cobertizo y pileta, algo hay, pero es uno solo.
+    """
+    com = [u for u in unidades if u.get("uso") == "comercial"]
+    if not com:
+        return 0
+    # 1) Lo que el catastro dice que no es un local. Queda marcado `anexo` —igual que en
+    #    vivienda— así el CSV por unidad tampoco lo emite como comercio.
+    locales = []
+    for u in com:
+        if (u.get("tipologia") or "SALA") in _TIPOLOGIA_NO_LOCAL:
+            u["uso"] = "anexo"
+        else:
+            locales.append(u)
+    if not locales:
+        return 1
+    areas = [u["area_m2"] for u in locales if u.get("area_m2")]
+    if not areas:
+        return len(locales)
+    mayor = max(areas)
+
+    # 2) Lo chico al lado de lo grande es parte del mismo negocio.
+    chicas = [u for u in locales
+              if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
+    for u in chicas:
+        u["uso"] = "anexo"
+    return max(len(locales) - len(chicas), 1)
+
+
 def _parse_bci(text: str) -> dict:
     """Extrae campos estructurados del texto del BCI."""
     r: dict = {
@@ -342,17 +397,7 @@ def _parse_bci(text: str) -> dict:
         # Cuando el PDF **no** enumera `UNIDADE` no hay construcciones que contar y se cae al
         # conteo por secciones, que es el mismo camino que usa `_viviendas_reales`.
         if unit_iter:
-            # Las que no son un local quedan marcadas `anexo`, igual que en vivienda: así el
-            # CSV por unidad tampoco las emite como comercio.
-            n_com = 0
-            for u in unidades:
-                if u.get("uso") != "comercial":
-                    continue
-                if (u.get("tipologia") or "SALA") in _TIPOLOGIA_NO_LOCAL:
-                    u["uso"] = "anexo"
-                else:
-                    n_com += 1
-            r["uf_comercio"] = n_com
+            r["uf_comercio"] = _comercios_reales(unidades)
         else:
             r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
 
