@@ -123,7 +123,11 @@ _ANEXO_MIN_CHICAS = 3
 # marca `USO RESIDENCIAL` y rotula piscina, telheiro (cobertizo) o garagem.
 # `SALA` y `APARTAMENTO` NO están acá a propósito: una sala con uso residencial es rara
 # pero habitable, y descartarla perdería UF reales sin evidencia que lo respalde.
-_TIPOLOGIA_NO_HABITABLE = {"PISCINA", "GARAGEM", "TELHEIRO", "GALPAO", "PARQUE"}
+# ⚠ `PARQUE INDUSTRIAL` va con su nombre COMPLETO. Escrito `PARQUE` parecía decir «plaza» y
+# en el catastro de VG no existe tal tipología: lo único que empieza así es el galpón
+# industrial, que es lo que se quiere descartar. Una tipología nueva se agrega tal como la
+# escribe el municipio, no por su primera palabra.
+_TIPOLOGIA_NO_HABITABLE = {"PISCINA", "GARAGEM", "TELHEIRO", "GALPAO", "PARQUE INDUSTRIAL"}
 # A partir de cuántas construcciones habitables el lote es una VILA (kitnets en fila) y no
 # una casa con su ampliación del fondo. Ver `_viviendas_reales`. **Es el número frágil de
 # los tres**: entre 2 (Vuolo 151, São Bento 95: casa + ampliación) y 10 (Filinto Müller:
@@ -285,7 +289,17 @@ def _parse_bci(text: str) -> dict:
             ano_m = re.search(r'ANO\s+CONSTRU[CÇ][AÃ]O:?\s*(\d{4})', blk, re.I)
             # `TIPOLOGIA` y `DISPOSICAO` son lo que el catastro DICE que es cada
             # construcción; con el área sólo se puede adivinar. Ver `_viviendas_reales`.
-            tip_m = re.search(r'TIPOLOGIA\s+([A-ZÀ-Ú]+)', blk, re.I)
+            # ⚠ La tipología puede ser de MÁS DE UNA PALABRA y hay que leerla entera.
+            # Con `([A-ZÀ-Ú]+)` se leía sólo la primera, y `PARQUE INDUSTRIAL` —un galpón
+            # industrial— entraba como `PARQUE`, que en `_TIPOLOGIA_NO_HABITABLE` significaba
+            # una plaza: dos cosas opuestas bajo la misma palabra (caso JOÃO LIBÂNIO 220,
+            # 9-sep-2026). Medido sobre las dos regiones de VG, el vocabulario completo es
+            # CASA 702 · SALA 250 · TELHEIRO 212 · PISCINA 73 · GALPAO 57 · GARAGEM 22 ·
+            # APARTAMENTO 18 · CONJUNTO 12 · PARQUE INDUSTRIAL 2, y esa última es la única
+            # compuesta — pero la lista es del municipio y puede crecer, así que se lee entera.
+            tip_m = re.search(
+                r'TIPOLOGIA\s+([A-ZÀ-Ú][A-ZÀ-Ú /]*?)\s*(?:\n|RESPONABILIDADE|REGIME|\d\d\s)',
+                blk, re.I)
             disp_m = re.search(r'DISPOSICAO\s+([A-ZÀ-Ú]+)', blk, re.I)
             try:
                 area_v = float(area_u.replace(",", "."))
@@ -296,7 +310,7 @@ def _parse_bci(text: str) -> dict:
                 "codigo": cod_u,
                 "area_m2": area_v,
                 "anio": int(ano_m.group(1)) if (ano_m and ano_m.group(1) != "0") else None,
-                "tipologia": tip_m.group(1).upper() if tip_m else None,
+                "tipologia": " ".join(tip_m.group(1).split()).upper() if tip_m else None,
                 "disposicion": disp_m.group(1).upper() if disp_m else None,
                 # Etiqueta canónica (servicios/religioso/etc. → comercial) para que la
                 # expansión del CSV cuente la unidad como comercio, no como vivienda.
@@ -304,12 +318,24 @@ def _parse_bci(text: str) -> dict:
             })
         r["unidades"] = unidades
 
-        # Cada "USO <X>" reconocido suma 1 UF a su categoría. Servicios/religioso/
-        # ensino/público cuentan como comercio (COMÉRCIO EM GERAL) por decisión del
-        # cliente; antes caían fuera del whitelist → 0 UF + uso_principal 'residencial'.
+        # Servicios/religioso/ensino/público cuentan como comercio (COMÉRCIO EM GERAL) por
+        # decisión del cliente; antes caían fuera del whitelist → 0 UF + uso 'residencial'.
         usos = re.findall(_BCI_USO_RE, text, re.I)
         cats = [_BCI_USO_CAT[u.upper()] for u in usos]
-        r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
+
+        # ⚠ **Una UF por CONSTRUCCIÓN declarada, no por aparición de la palabra en el PDF.**
+        # Se contaba `USO` sobre el texto entero, y el formulario del BCI **repite la sección
+        # de características**: cada repetición sumaba un comercio que no existe. Medido en la
+        # región vigente el 9-sep-2026: 404 UF en la base contra 393 construcciones reales,
+        # con la escuela `EMEB MARILCE` declarando **11 y teniendo 7**, la `SECRETARIA DE
+        # ESPORTES` **10 y teniendo 7**, y `PONCE DE ARRUDA 1016` **3 con una sola
+        # construcción** (su ficha dice `USO COMERCIAL` tres veces, todas de la misma unidad).
+        # Cuando el PDF **no** enumera `UNIDADE` no hay construcciones que contar y se cae al
+        # conteo por secciones, que es el mismo camino que usa `_viviendas_reales`.
+        if unit_iter:
+            r["uf_comercio"] = sum(1 for u in unidades if u.get("uso") == "comercial")
+        else:
+            r["uf_comercio"] = sum(1 for c in cats if c == "comercio")
 
         # ⚠ **La vivienda NO se cuenta así.** El BCI enumera CONSTRUCCIONES, no hogares: la
         # cochera, el lavadero y el galpón del fondo son "unidades" con su código, su área y
