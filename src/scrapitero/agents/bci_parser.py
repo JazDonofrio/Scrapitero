@@ -339,13 +339,20 @@ def _parse_bci(text: str) -> dict:
         # Cada unidade del imóvel arranca con el header "UNIDADE CÓDIGO DA UNIDADE …
         # TOTAL" seguido de su línea de datos (n, código, área_unidade, área_total).
         # Iteramos por bloque para sacar también uso y año de cada una.
+        # ⚠ El número de unidad se escribe de DOS formas: `2` a secas o `2/3` («la 2 de 3»).
+        # Con `(\d+)` sola la segunda no matcheaba y la ficha entera se caía al conteo por
+        # texto, que no sabe de tipología ni de área — o sea, sin ninguno de los filtros.
+        # Son 19 de las 511 fichas de VAZ049, y `PONCE DE ARRUDA 802` es una: declara
+        # SALA + SALA + TELHEIRO y salía con 3 comercios en vez de 2.
         unit_iter = list(re.finditer(
-            r'UNIDADE\s+C[OÓ]DIGO\s+DA\s+UNIDADE.*?TOTAL\s*\n\s*(\d+)\s+(\d+)\s+([\d,]+)\s+([\d,]+)',
+            r'UNIDADE\s+C[OÓ]DIGO\s+DA\s+UNIDADE.*?TOTAL\s*\n\s*'
+            r'(\d+(?:/\d+)?)\s+(\d+)\s+([\d,]+)\s+([\d,]+)',
             text, re.I | re.DOTALL,
         ))
         unidades = []
         for i, mu in enumerate(unit_iter):
             n_u, cod_u, area_u, _area_tot = mu.groups()
+            n_u = n_u.split("/")[0]
             fin = unit_iter[i + 1].start() if i + 1 < len(unit_iter) else len(text)
             blk = text[mu.end():fin]
             uso_m = re.search(_BCI_USO_RE, blk, re.I)
