@@ -4052,6 +4052,54 @@ async def crear_parcial(survey_id: str,
     return JSONResponse({"ok": True, "survey_id": nuevo_sid, "region_id": region_id})
 
 
+@app.get("/api/surveys/{survey_id}/export/procedencia-pdf")
+async def export_procedencia_pdf(survey_id: str):
+    """Ficha de procedencia: de dónde sale cada dato del relevamiento, en una hoja.
+
+    El relevamiento guarda el origen campo por campo, pero nada de eso llegaba al cliente —
+    el CSV Operadora lleva las columnas de su contrato y el DXF los atributos de su estándar
+    de planos. Esta ficha es esa trazabilidad, y acompaña a la entrega.
+
+    Se genera on-the-fly, igual que el DXF, y **no se versiona**: refleja el estado del
+    relevamiento en el momento de pedirla. Si el relevamiento se modifica hay que exportarla
+    de nuevo, y el propio documento lo dice en su encabezado para que nadie archive una ficha
+    que dejó de coincidir con los números que tiene al lado.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        meta = conn.execute(text("""
+            SELECT r.name, s.started_at, s.region_id
+            FROM surveys s JOIN regions r ON s.region_id = r.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).fetchone()
+        if not meta:
+            return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+
+    fecha = meta[1].strftime("%Y-%m-%d") if meta[1] else ""
+    tmpdir = tempfile.mkdtemp(prefix="proc_")
+    nombre = f"procedencia_{meta[0]}_{fecha}.pdf".replace(" ", "_").replace("/", "-")
+    destino = os.path.join(tmpdir, nombre)
+
+    from scrapitero.agents.procedencia_pdf import ProcedenciaInput
+    from scrapitero.agents.procedencia_pdf import run as run_proc
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_proc(ProcedenciaInput(region_id=meta[2], survey_id=survey_id,
+                                         output_path=destino)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    if not data.get("ok"):
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return JSONResponse({"error": data.get("error") or "No se pudo generar la ficha"},
+                            status_code=422)
+
+    return FileResponse(
+        destino, media_type="application/pdf", filename=nombre,
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
 @app.get("/api/surveys/{survey_id}/export/dxf")
 async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
                      dxfversion: str = ""):

@@ -1996,6 +1996,9 @@ function renderCard(s) {
               : `<a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
                style="text-decoration:none"
                title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>`}
+            <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/procedencia-pdf" download
+               style="text-decoration:none"
+               title="${tAttr('Descargar la ficha de procedencia: de dónde sale cada dato del relevamiento, con qué cobertura y de qué fecha es cada fuente. Se genera en el momento, así que hay que volver a descargarla si el relevamiento cambia.')}">${t('⬇ Procedencia (PDF)')}</a>
             ${OPERADOR ? `<button class="btn btn-sm btn-outline"
                onclick="runFootprints('${sid}', this)"
                title="${tAttr('Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.')}">${t('🏗️ Footprints (revisión)')}</button>
