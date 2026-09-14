@@ -3358,13 +3358,19 @@ async def export_csv(survey_id: str) -> StreamingResponse:
 
         for r in rows:
             comp_ef = (r[4] or "").strip() or letras_rep.get(r[34], "")
-            # Mismo criterio que el CSV de operadora: toda dirección sale con número, usando el
-            # estimado cuando el municipio no lo declaró y la interpolación es confiable. Acá el
-            # número crudo del catastro sigue visible en su columna (`DSC_LOGRADOURO_NO`) y el
-            # inferido en las suyas (método y confianza), así se puede auditar cuál se usó.
+            # Mismo criterio que el CSV de operadora: cuando el municipio no declaró número se
+            # usa el que interpoló `NumeroEstimator`, pero ENTRE PARÉNTESIS —`(283)`, igual que
+            # en el plano—: es una guía para encontrar el lote, no el número de la puerta.
+            # Cotejado el 14-sep-2026 contra la revisión del cliente en VAZ049: de 20 estimados
+            # que el cliente miró, 0 coincidían con su número (3 a ±2, 6 a más de 5, y 11 los
+            # tenía como S/N), con confianzas de 0,71-0,81. JAIME BENEVIDES: la casa cuya puerta
+            # dice 293 salía «283» y el galpón de al lado, «293». Acá el número crudo del
+            # catastro sigue visible en su columna (`DSC_LOGRADOURO_NO`) y el inferido en las
+            # suyas (método y confianza).
             num_ef = (r[3] or "").strip()
-            if num_ef in ("", "0") and (r[42] or 0) >= _NUMERO_CONF_MIN:
-                num_ef = str(r[40] or "")
+            if (num_ef in ("", "0") and (r[42] or 0) >= _NUMERO_CONF_MIN
+                    and str(r[40] or "") not in ("", "0")):
+                num_ef = f"({r[40]})"
             direccion = " ".join(s for s in (r[2], num_ef, comp_ef) if s).strip()
             unidades = unidades_por_parcela.get(r[34])
             if unidades:
@@ -3682,10 +3688,13 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                        -- `parcelas.numero` NO se toca: sigue siendo el dato del municipio, y el
                        -- inferido vive en `numero_estimado*` (mig. 050). Acá sólo se elige cuál
                        -- de los dos sale al entregable.
+                       -- El estimado sale ENTRE PARÉNTESIS, `(283)`, como en el plano: es guía,
+                       -- no número de puerta. De 20 que revisó el cliente, 0 coincidían con su
+                       -- número (14-sep-2026; ver el CSV de relevamiento más arriba).
                        CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                             WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
                              AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
-                                 THEN numero_estimado
+                                 THEN '(' || numero_estimado || ')'
                             ELSE 'S/N' END AS numero,
                        complemento, barrio, municipio, estado_provincia,
                        codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
@@ -3735,10 +3744,11 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                        -- número de una misma calle colapsan en UNA fila con la UF sumada.
                        -- Es lo correcto para un layout de base de calles (una fila por
                        -- dirección), pero NO sirve como inventario de unidades.
+                       -- El estimado, entre paréntesis: guía, no número de puerta.
                        CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                             WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
                              AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
-                                 THEN numero_estimado
+                                 THEN '(' || numero_estimado || ')'
                             ELSE 'S/N' END AS numero,
                        SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
                        SUM(COALESCE(uf_comercio, 0))::int AS uf_c,

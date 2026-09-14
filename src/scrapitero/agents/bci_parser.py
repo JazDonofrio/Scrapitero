@@ -52,6 +52,9 @@ class BCIParserOutput(BaseModel):
     actualizadas: int = 0
     sin_pdf: int = 0
     errores: int = 0
+    # Construcciones que el PDF declara y el parser no pudo leer: esas fichas cayeron al
+    # conteo por texto y su comercio puede estar inflado. Debería ser 0.
+    construcciones_sin_leer: int = 0
     error: Optional[str] = None
 
 
@@ -144,6 +147,16 @@ _TIPOLOGIA_NO_LOCAL = {"PISCINA", "TELHEIRO", "GARAGEM"}
 # exactamente 2 construcciones habitables, así que es ahí donde más pesa: si aparece un
 # caso nuevo, mirar primero esas.
 _VILA_MIN_UNIDADES = 3
+# Tamaño de kitnet: la unidad de la fila alquilada. Las verificadas miden 16-23 m²
+# (Da Liberdade 109) y 18 m² (Filinto Müller 326). Con 30 m² el cotejo da lo mismo.
+_KITNET_MAX_M2 = 40.0
+# Años entre la construcción más vieja y la más nueva del lote a partir de los cuales las
+# construcciones son ampliaciones de una casa y no viviendas hechas juntas. Ver
+# `_viviendas_reales`, paso 2.a: entre 2 y 3 años hay casos que se contradicen.
+_AMPLIACION_MIN_ANIOS = 5
+# Dos casas del mismo año son GEMELAS —viviendas hechas juntas— si la chica mide al menos
+# este tanto de la grande. Ver `_viviendas_reales`, paso 2.a.
+_GEMELAS_PCT = 0.80
 
 
 def _es_seccion_muerta(blk: str) -> bool:
@@ -169,8 +182,8 @@ def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
       medirla: primero se descartan las `TIPOLOGIA` que no alojan a nadie
       (`_TIPOLOGIA_NO_HABITABLE`), y sobre las que quedan decide la cantidad: con
       `_VILA_MIN_UNIDADES` o más es una vila de kitnets y manda la proporción `_ANEXO_PCT`;
-      con una o dos es una casa y su ampliación del fondo, donde la proporción NO sirve y
-      manda `DISPOSICAO` (sólo la CONJUGADA es vivienda aparte).
+      con una o dos es una casa y su ampliación del fondo, y es **una** vivienda: ni la
+      proporción ni `DISPOSICAO` sirven para separarlas (ver el paso 3).
     * **Sin `UNIDADE`** — se cuentan las secciones `USO` residenciales, salteando las que no
       tienen techo ni aberturas.
 
@@ -197,9 +210,53 @@ def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
             return len(habitables)
         mayor = max(areas)
 
-        # 2) Tres o más construcciones habitables: es una VILA de kitnets y manda la
-        #    proporción, como venía. (Da Liberdade 109, Filinto Müller 326.)
+        # 2) Tres o más construcciones habitables.
         if len(habitables) >= _VILA_MIN_UNIDADES:
+            # 2.a) ¿Es una CASA QUE CRECIÓ? Sin fila de kitnets y con construcciones de
+            #    años separados, es una sola vivienda con sus ampliaciones — la misma
+            #    conclusión que el paso 3 para los pares, con una construcción más.
+            #    Las unidades independientes se construyen juntas; las ampliaciones se
+            #    agregan con los años.
+            #
+            #    Medido contra la revisión en Google Maps del cliente (DETALLE
+            #    COMPARACION.xlsx, columna GOOGLE, VAZ049, 14-sep-2026) sobre los 19 lotes
+            #    cotejados con 3+ construcciones habitables. Hasta acá contaban todas:
+            #      PEDRO PEDROSSIAN 220  116+63+38 m²   1950/1980/1990 → 1, contábamos 3
+            #      CEL GONÇALO 177       101+83+59 m²   1969/1984/1990 → 1, contábamos 3
+            #      MAL RONDON 75         177+94+72 m²   1975/1980      → 1, contábamos 3
+            #    Sin mirar los años arreglaba 7 pero reducía a 1 casa el condominio de
+            #    PEDRO PEDROSSIAN 139 — cinco bloques de 257 m², todos de 2024, donde el
+            #    cliente ve 15 —, que es justo lo contrario: unidades hechas juntas.
+            #    El umbral de años es `_AMPLIACION_MIN_ANIOS`: con 2 o 3 años hay casos
+            #    que se contradicen (PEDRO PEDROSSIAN 175, 1988/1990, es 1 casa; DA LIBERDADE
+            #    71, 1986/1989, son 3 viviendas: dos gemelas de 84 m² agregadas juntas).
+            #    Con 5: arregla 5, no rompe ninguna, −16 viviendas en el cotejo.
+            #    No toca las dos vilas verificadas en la calle (tienen 23 y 10 kitnets).
+            #    Guarda de GEMELAS: dos casas del mismo año y de tamaño parecido se hicieron
+            #    juntas como viviendas, aunque el lote tenga además una ampliación posterior
+            #    que estire el rango de años (GENEROSO TAVARES 262: 126 + 126 m² de 1987 y
+            #    una de 32 m² de 1997). Mismo año pero tamaños distintos NO es gemela:
+            #    MAL RONDON 75 tiene 177 y 72 m² de 1980 y el cliente ve una sola casa.
+            kitnets = sum(1 for u in habitables
+                          if u.get("area_m2") is not None and u["area_m2"] <= _KITNET_MAX_M2)
+            anios = [u["anio"] for u in habitables if u.get("anio")]
+            casas = [u for u in habitables
+                     if u.get("anio") and (u.get("area_m2") or 0) > _KITNET_MAX_M2]
+            gemelas = any(
+                a["anio"] == b["anio"]
+                and min(a["area_m2"], b["area_m2"]) >= _GEMELAS_PCT * max(a["area_m2"],
+                                                                          b["area_m2"])
+                for i, a in enumerate(casas) for b in casas[i + 1:])
+            if (kitnets < _ANEXO_MIN_CHICAS and not gemelas and len(anios) >= 2
+                    and max(anios) - min(anios) >= _AMPLIACION_MIN_ANIOS):
+                resto = sorted(habitables, key=lambda u: u.get("area_m2") or 0,
+                               reverse=True)[1:]
+                for u in resto:
+                    u["uso"] = "anexo"
+                return 1
+
+            # 2.b) Es una VILA de kitnets y manda la proporción, como venía.
+            #    (Da Liberdade 109, Filinto Müller 326.)
             chicas = [u for u in habitables
                       if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
             if len(chicas) < _ANEXO_MIN_CHICAS:
@@ -208,27 +265,36 @@ def _viviendas_reales(unidades: list, unit_iter: list, text: str) -> int:
                 return max(len(habitables) - len(chicas), 1)
             return len(habitables)
 
-        # 3) Una o dos: es la casa y, a lo sumo, su ampliación del fondo. **La proporción
-        #    no sirve acá** — SEN. VICENTE VUOLO 151 tiene atrás una CASA de 111 m² que es
-        #    el 61% de la del frente y el operador verificó que es UNA sola vivienda
-        #    (sep-2026); con el corte del 30% pasaba holgada. Lo que separa la ampliación
-        #    de la vivienda independiente es `DISPOSICAO`: las verificadas como viviendas
-        #    reales son CONJUGADA (una fila de unidades pegadas entre sí), y las
-        #    ampliaciones son ISOLADA/GEMINADA al lado de la casa principal.
-        #    Casos que sostienen la regla, los ocho verificados en la calle:
-        #      SEN. VICENTE VUOLO 151  CASA 111 m² FUNDOS GEMINADA  → ampliación
-        #      JOÃO LIBÂNIO 118 (634305) CASA 60 m² FUNDOS ISOLADA  → ampliación
-        #      SÃO BENTO 95            CASA 46 m² FUNDOS GEMINADA   → ampliación
-        #      SÃO BENTO 86            CASA 23 m² FUNDOS ISOLADA    → ampliación
-        #      DA LIBERDADE 109 / FILINTO MÜLLER 326: CONJUGADA     → viviendas (24 y 10)
+        # 3) Una o dos: es UNA casa y, a lo sumo, su ampliación del fondo. **Siempre 1.**
+        #    Ni la proporción ni `DISPOSICAO` separan acá una vivienda independiente:
+        #
+        #    · La proporción no sirve — SEN. VICENTE VUOLO 151 tiene atrás una CASA de
+        #      111 m² que es el 61% de la del frente y el operador verificó que es UNA
+        #      sola vivienda (sep-2026); con el corte del 30% pasaba holgada.
+        #    · `DISPOSICAO` tampoco. Hasta el 14-sep-2026 la segunda contaba como vivienda
+        #      aparte si era CONJUGADA, con esta evidencia:
+        #        SEN. VICENTE VUOLO 151  CASA 111 m² FUNDOS GEMINADA  → ampliación
+        #        JOÃO LIBÂNIO 118 (634305) CASA 60 m² FUNDOS ISOLADA  → ampliación
+        #        SÃO BENTO 95            CASA 46 m² FUNDOS GEMINADA   → ampliación
+        #        SÃO BENTO 86            CASA 23 m² FUNDOS ISOLADA    → ampliación
+        #        DA LIBERDADE 109 / FILINTO MÜLLER 326: CONJUGADA     → viviendas (24 y 10)
+        #      Las cuatro verificadas de a DOS construcciones eran todas ampliaciones; la
+        #      prueba de que CONJUGADA es vivienda salía de las dos VILAS, de 24 y 10
+        #      unidades, y se extendió a los pares sin ningún par verificado. Cotejado
+        #      contra la revisión en Google Maps del cliente (DETALLE COMPARACION.xlsx,
+        #      columna GOOGLE, VAZ049): de los 13 lotes de dos construcciones con la
+        #      segunda CONJUGADA, **los 13 estaban mal** — el cliente ve 1 vivienda (9) o
+        #      ninguna (4) donde contábamos 2. Y el tamaño no los salvaba: con la
+        #      CONJUGADA exigida al 60% de la principal seguían 7 mal, porque las hay de
+        #      11% (JAIME BENEVIDES 189: 434 + 46 m²) y de 96% (MAL RONDON 19: 76 + 73).
+        #      Con «siempre 1»: arregla 9 de 243 direcciones cotejadas y no rompe ninguna;
+        #      en todo VAZ049 mueve 18 parcelas (−18 viviendas).
+        #    La vila de verdad sigue saliendo por el paso 2, que empieza en
+        #    `_VILA_MIN_UNIDADES` construcciones habitables.
         resto = sorted(habitables, key=lambda u: u.get("area_m2") or 0, reverse=True)[1:]
-        vivi = 1
         for u in resto:
-            if (u.get("disposicion") or "") == "CONJUGADA":
-                vivi += 1
-            else:
-                u["uso"] = "anexo"
-        return vivi
+            u["uso"] = "anexo"
+        return 1
 
     vivos = 0
     for m in re.finditer(_BCI_USO_RE, text, re.I):
@@ -291,7 +357,28 @@ def _comercios_reales(unidades: list) -> int:
               if u.get("area_m2") is not None and u["area_m2"] < mayor * _ANEXO_PCT]
     for u in chicas:
         u["uso"] = "anexo"
-    return max(len(locales) - len(chicas), 1)
+    quedan = [u for u in locales if u not in chicas]
+
+    # 3) Lo que usa EL DUEÑO es un solo negocio; cada local ALQUILADO es otro.
+    #    El BCI dice quién ocupa cada construcción (`REGIME DE UTILIZACAO`). Varios
+    #    ambientes comerciales `PROPRIA` son el mismo negocio del dueño repartido en salas;
+    #    varios `ALUGADA` son inquilinos distintos. `CEDIDA` y sin dato van con el dueño.
+    #    `FECHADA` (cerrada) sigue contando aparte: es un local, aunque hoy esté vacío.
+    #    Medido contra la revisión en Google Maps del cliente (DETALLE COMPARACION.xlsx,
+    #    columna GOOGLE, VAZ049, 14-sep-2026) sobre 243 direcciones: arregla 5 y no rompe
+    #    ninguna — FILINTO MÜLLER 464 (4 salas `PROPRIA` de 71-166 m²: el cliente ve 1
+    #    comercio, contábamos 4), JOÃO LIBÂNIO 55 (3→1), COUTO MAGALHAES 450, FILINTO
+    #    MÜLLER 218 y PONCE DE ARRUDA 618 (2→1). El área sola no los separaba: son salas
+    #    de tamaño parecido y el corte del 30 % no dispara.
+    #    La misma idea NO sirve para vivienda: arregla 3, rompe 2 y bajaría la vila
+    #    verificada de DA LIBERDADE 109 de 24 a 17 (tiene 9 kitnets `PROPRIA`).
+    duenio = [u for u in quedan if (u.get("regime") or "") in ("PROPRIA", "CEDIDA", "")]
+    if len(duenio) > 1:
+        principal = max(duenio, key=lambda u: u.get("area_m2") or 0)
+        for u in duenio:
+            if u is not principal:
+                u["uso"] = "anexo"
+    return max(len(quedan) - max(len(duenio) - 1, 0), 1)
 
 
 def _parse_bci(text: str) -> dict:
@@ -325,6 +412,10 @@ def _parse_bci(text: str) -> dict:
         # Lista de unidades del imóvel (UNIDADE 1..N del BCI) — para expandir el CSV
         # una fila por unidad. Sólo tiene sentido cuando hay más de una.
         "unidades": [],
+        # Filas de la tabla de construcciones que el PDF abre y el regex no pudo leer.
+        # > 0 significa que esta ficha cayó al conteo por texto SIN ser un terreno: el
+        # comercio queda inflado. Ver la guarda de paridad más abajo.
+        "unidades_no_leidas": 0,
     }
 
     # ── Tipo do imóvel ─────────────────────────────────────────────────────────
@@ -339,20 +430,46 @@ def _parse_bci(text: str) -> dict:
         # Cada unidade del imóvel arranca con el header "UNIDADE CÓDIGO DA UNIDADE …
         # TOTAL" seguido de su línea de datos (n, código, área_unidade, área_total).
         # Iteramos por bloque para sacar también uso y año de cada una.
-        # ⚠ El número de unidad se escribe de DOS formas: `2` a secas o `2/3` («la 2 de 3»).
-        # Con `(\d+)` sola la segunda no matcheaba y la ficha entera se caía al conteo por
-        # texto, que no sabe de tipología ni de área — o sea, sin ninguno de los filtros.
-        # Son 19 de las 511 fichas de VAZ049, y `PONCE DE ARRUDA 802` es una: declara
-        # SALA + SALA + TELHEIRO y salía con 3 comercios en vez de 2.
+        # ⚠ El número de unidad se escribe de TRES formas y hay que aceptar las tres:
+        # `2` a secas, `2/3` («la 2 de 3») y `1-1` / `1-2` (unidad por construcción). Basta
+        # que UNA fila no matchee para que `unit_iter` quede vacío y **la ficha entera** se
+        # caiga al conteo por texto del `else` de abajo, que no sabe de tipología ni de área
+        # —o sea, sin ninguno de los dos filtros— y cuenta la pileta, el cobertizo y el
+        # depósito como locales aparte. Silencioso: `uf_fuente` sigue diciendo `bci` y
+        # `parcela_unidades` queda vacía, que es lo mismo que hace una ficha de una sola
+        # construcción. Sólo se ve cotejando contra un dato externo.
+        #   · `2/3`  → 19 fichas de VAZ049; `PONCE DE ARRUDA 802` declaraba SALA + SALA +
+        #     TELHEIRO y salía con 3 comercios en vez de 2 (10-sep-2026).
+        #   · `1-1`  → 3 fichas de VAZ049, 2 de ellas en Couto Magalhães y las dos con el
+        #     comercio inflado (12-sep-2026, cotejo contra la columna GOOGLE del cliente):
+        #     el `260` contaba 2 locales y es 1 (CASA de 860 m² + SALA de 94 = 11 %, anexo)
+        #     y el `520` contaba 3 y son 2 (SALA 208 + SALA 113 + TELHEIRO, que no es local).
+        # El separador se lee como clase (`[/-]`) y no como alternativa suelta, así que si
+        # el municipio agrega otro basta sumarlo acá; y la GUARDA de más abajo avisa cuando
+        # aparece un formato nuevo, en vez de degradar sin decir nada.
         unit_iter = list(re.finditer(
             r'UNIDADE\s+C[OÓ]DIGO\s+DA\s+UNIDADE.*?TOTAL\s*\n\s*'
-            r'(\d+(?:/\d+)?)\s+(\d+)\s+([\d,]+)\s+([\d,]+)',
+            r'(\d+(?:[/-]\d+)?)\s+(\d+)\s+([\d,]+)\s+([\d,]+)',
             text, re.I | re.DOTALL,
         ))
+        # GUARDA DE PARIDAD: cuántas veces el PDF abre la tabla de construcciones contra
+        # cuántas filas se pudieron leer. Si el header está y la fila no matcheó, es un
+        # formato de numeración que no conocemos —no una ficha sin construcciones— y el
+        # conteo por texto va a inflar el comercio. Se devuelve para que el loop del agente
+        # lo loguee con el cca_code, que es el único lugar donde se sabe de qué ficha se
+        # trata. Esto es lo que faltó las dos veces: el modo de falla no era el regex, era
+        # que fallara **en silencio**.
+        headers = len(re.findall(r'UNIDADE\s+C[OÓ]DIGO\s+DA\s+UNIDADE', text, re.I))
+        r["unidades_no_leidas"] = max(headers - len(unit_iter), 0)
         unidades = []
         for i, mu in enumerate(unit_iter):
             n_u, cod_u, area_u, _area_tot = mu.groups()
-            n_u = n_u.split("/")[0]
+            # `1-1` y `1-2` son dos construcciones del mismo bloque: el número que queda es
+            # el mismo para las dos. Para contar UF da igual (lo que cuenta es la cantidad
+            # de bloques leídos), pero `parcela_unidades.n_unidade` es un entero y las
+            # guarda a las dos como 1. El código de la unidad (`codigo_unidade`) sí es
+            # único, así que es el que identifica la fila.
+            n_u = re.split(r"[/-]", n_u)[0]
             fin = unit_iter[i + 1].start() if i + 1 < len(unit_iter) else len(text)
             blk = text[mu.end():fin]
             uso_m = re.search(_BCI_USO_RE, blk, re.I)
@@ -372,6 +489,10 @@ def _parse_bci(text: str) -> dict:
                 r'TIPOLOGIA\s+([A-ZÀ-Ú][A-ZÀ-Ú /]*?)\s*(?:\n|RESPONABILIDADE|REGIME|\d\d\s)',
                 blk, re.I)
             disp_m = re.search(r'DISPOSICAO\s+([A-ZÀ-Ú]+)', blk, re.I)
+            # Quién ocupa la construcción: PROPRIA (el dueño), ALUGADA, CEDIDA, FECHADA.
+            # Lo usa `_comercios_reales` para no contar como negocios distintos los
+            # ambientes que usa un mismo dueño.
+            reg_m = re.search(r'REGIME DE UTILIZACAO\s+([A-ZÀ-Ú]+)', blk, re.I)
             try:
                 area_v = float(area_u.replace(",", "."))
             except ValueError:
@@ -383,6 +504,7 @@ def _parse_bci(text: str) -> dict:
                 "anio": int(ano_m.group(1)) if (ano_m and ano_m.group(1) != "0") else None,
                 "tipologia": " ".join(tip_m.group(1).split()).upper() if tip_m else None,
                 "disposicion": disp_m.group(1).upper() if disp_m else None,
+                "regime": reg_m.group(1).upper() if reg_m else None,
                 # Etiqueta canónica (servicios/religioso/etc. → comercial) para que la
                 # expansión del CSV cuente la unidad como comercio, no como vivienda.
                 "uso": _CAT_USO_LABEL.get(uso_cat) if uso_cat else None,
@@ -570,6 +692,44 @@ def _parse_bci(text: str) -> dict:
         if sec_m and not re.match(r'^IDENTIFICA', line, re.I):
             r["contribuyente_secundario"] = sec_m.group(1).strip()[:200]
 
+    # ── Lote mixto sobre AVENIDA: es UN comercio ───────────────────────────────
+    # La ficha declara una casa y una construcción comercial en el mismo lote, y la
+    # calle es una avenida. Contado por el BCI sale 1 vivienda + 1 comercio; el cliente
+    # lo cuenta como UN comercio: la casa es el fondo o el piso del negocio que da a la
+    # avenida. Va acá al final porque la calle de la ficha se lee después de las UF.
+    #
+    # Medido contra la revisión en Google Maps del cliente (DETALLE COMPARACION.xlsx,
+    # columna GOOGLE, VAZ049, 14-sep-2026). De 38 lotes mixtos cotejados, el cliente anota
+    # UNA sola cosa en 34 — la que da a la calle:
+    #   · sobre AVENIDA (20): sólo comercio 16 · sólo casa 3 · las dos 1
+    #   · sobre RUA     (18): sólo comercio 8  · sólo casa 7 · las dos 3
+    # En avenida es regla; en rua es una moneda al aire y no se toca. Caso tipo:
+    # PEDRO PEDROSSIAN 447, CASA 236 m² + SALA 29 m² al frente → el cliente ve 1 comercio.
+    # Resultado sobre 243 direcciones cotejadas: arregla 13, rompe 2 (COUTO MAGALHAES 520,
+    # donde el cliente sí ve las dos, y PEDRO PEDROSSIAN 78, donde ve sólo la casa).
+    #
+    # ⚠ Las VILAS quedan afuera por `uf_vivienda == 1`: se mira cuántas viviendas QUEDARON
+    # después de `_viviendas_reales`, no cuántas construcciones declara la ficha. Las 10
+    # kitnets de FILINTO MÜLLER 326 — una de las dos vilas verificadas en la calle, donde
+    # el cliente anota 0 viviendas — terminan en 10 y no se tocan: esas dos fuentes se
+    # contradicen y no lo decide una regla.
+    # Hasta el 14-sep la guarda era `construcciones habitables declaradas ≤ 2`, y eso
+    # dejaba afuera a la casa que creció (paso 2.a de `_viviendas_reales`): declara 3 o más
+    # construcciones pero es UNA vivienda. PEDRO PEDROSSIAN 424 —lote de 8.095 m² sobre la
+    # avenida, 7 construcciones, Receita `COMÉRCIO EM GERAL, IMOBILIÁRIA`— seguía saliendo
+    # mixto. Mirando el resultado final: arregla FILINTO MÜLLER 488 y COUTO MAGALHAES 535
+    # (el cliente ve sólo comercio), no rompe ninguna.
+    if (r["unidades"]
+            and r["uf_vivienda"] == 1 and r["uf_comercio"] >= 1
+            and re.match(r"AVENIDA\b", (r["calle"] or "").upper())):
+        for u in r["unidades"]:
+            # Mismo default que `_viviendas_reales` y que el CSV por unidad: la
+            # construcción sin línea `USO` cuenta como vivienda (FILINTO MÜLLER 310).
+            if (u.get("uso") or "residencial") == "residencial":
+                u["uso"] = "anexo"   # el CSV por unidad no la emite como vivienda
+        r["uf_vivienda"] = 0
+        r["uso_principal"] = "comercial"
+
     return r
 
 
@@ -606,6 +766,90 @@ def _buscar_en_dirs_alternativos(codigos: list[int], pdf_dir: Path) -> dict[str,
         if n:
             encontrados[str(d)] = n
     return encontrados
+
+
+# ── Un solo negocio en la puerta (Receita) ─────────────────────────────────────
+# Este parser es de Várzea Grande: contra ese padrón se cruzan las fichas.
+_RECEITA_MUNICIPIO = "VARZEA GRANDE"
+_PALABRAS_VIA = re.compile(
+    r"\b(AVENIDA|AV|RUA|R|TRAVESSA|TV|BECO|ALAMEDA|PRACA|SEN|SENADOR|GOV|GOVERNADOR|CEL|"
+    r"CORONEL|DR|DOUTOR|PRES|PRESIDENTE|DE|DA|DO|DOS|DAS)\b")
+_SUFIJOS_EMPRESA = re.compile(r"\b(LTDA|ME|EPP|EIRELI|SA|S A|MEI)\b")
+
+
+def _sin_acentos(s: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().upper()
+
+
+def _clave_via(calle: str) -> str:
+    """El nombre de la vía sin tipo, títulos ni preposiciones: `RUA - GOV PEDRO PEDROSSIAN`,
+    `RUA GOVERNADOR PEDRO PEDROSSIAN (LOT CENTRO)` y `AV GOV PEDRO PEDROSSIAN` dan lo mismo."""
+    s = re.sub(r"\([^)]*\)", " ", _sin_acentos(calle))
+    s = _PALABRAS_VIA.sub(" ", re.sub(r"[^A-Z0-9]+", " ", s))
+    return " ".join(s.split())
+
+
+def _clave_negocio(nombre: str) -> str:
+    """Dos CNPJ con el mismo nombre (matriz y filial, o MEI y LTDA) son el mismo negocio."""
+    s = re.sub(r"^[\d.\s]+", "", _sin_acentos(nombre))
+    s = _SUFIJOS_EMPRESA.sub(" ", re.sub(r"[^A-Z0-9]+", " ", s))
+    return " ".join(s.split())
+
+
+def _negocios_por_puerta() -> dict[tuple[str, str], set[str]]:
+    """Negocios distintos con CNPJ ACTIVO en cada (vía, número) del municipio.
+
+    Se cruza por calle y número porque el padrón cargado no trae coordenadas. Sólo `ATIVA`:
+    una empresa dada de baja no es un negocio que esté hoy en el lote.
+    """
+    engine = get_engine()
+    idx: dict[tuple[str, str], set[str]] = {}
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT coalesce(tipo_logradouro, '') || ' ' || coalesce(logradouro, ''),
+                   regexp_replace(coalesce(numero, ''), '\\D', '', 'g'),
+                   coalesce(nullif(nome_fantasia, ''), razao_social)
+            FROM receita_estabelecimentos
+            WHERE municipio_nome = :mun AND situacao = 'ATIVA'
+        """), {"mun": _RECEITA_MUNICIPIO}).fetchall()
+    for via, num, nombre in rows:
+        if num:
+            idx.setdefault((_clave_via(via), num), set()).add(_clave_negocio(nombre))
+    return idx
+
+
+def _un_solo_negocio(data: dict, negocios: dict[tuple[str, str], set[str]]) -> bool:
+    """Varias construcciones comerciales y UN solo negocio en la puerta → 1 comercio.
+
+    Criterio de conteo del cliente (Jaz, 14-sep-2026): se cuentan NEGOCIOS, no salas. Ocho
+    negocios en un edificio son 8; varias salas de un mismo negocio son 1. Del BCI se sabe
+    cuántas construcciones comerciales hay, pero no si son del mismo negocio: eso lo dice
+    Receita cuando en la puerta hay un único CNPJ activo.
+
+    Medido contra la revisión en Google Maps del cliente (DETALLE COMPARACION.xlsx, VAZ049):
+    arregla 4, no rompe ninguna y no aleja ninguna. En las 4 una segunda fuente coincide —
+    COUTO MAGALHAES 520 (Auto Visão, también en Google), 475 (Sanches Automóveis; el plano
+    del cliente de 2014 decía 1), PONCE DE ARRUDA 6 (Aeroporto Grill, también en Google),
+    CEL GONÇALO 187 (Marmitt; plano 2014: 1).
+    ⚠ Sólo BAJA. Subir con "negocios que aparecen" rompía entre 3 y 14 lotes: Receita tiene
+    empresas registradas en domicilios sin local, y Google repite un negocio con variantes
+    y le atribuye negocios del vecino. Por eso PEDRO PEDROSSIAN 100 (8 negocios en un
+    edificio de salas) quedó con un sello manual y no con una regla.
+    """
+    num = re.sub(r"\D", "", data.get("numero") or "")
+    if data.get("uf_comercio", 0) <= 1 or not num or not data.get("calle"):
+        return False
+    if len(negocios.get((_clave_via(data["calle"]), num), set())) != 1:
+        return False
+    com = [u for u in data.get("unidades") or [] if u.get("uso") == "comercial"]
+    if len(com) > 1:
+        principal = max(com, key=lambda u: u.get("area_m2") or 0)
+        for u in com:
+            if u is not principal:
+                u["uso"] = "anexo"   # el CSV por unidad tampoco la emite como comercio
+    data["uf_comercio"] = 1
+    return True
 
 
 def _get_parcelas(region_id: str, batch_size: int) -> list[tuple[str, str]]:
@@ -653,7 +897,20 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
         conn.execute(text("""
             UPDATE parcelas SET
                 uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
-                                              THEN uso_principal ELSE COALESCE(:uso, uso_principal) END,
+                                              THEN uso_principal
+                                              -- UF sellada a mano y uso no: el uso sale de la UF
+                                              -- sellada, no del parser. Si no, el BCI deja
+                                              -- 'comercial' con 1 vivienda sellada (PEDROSSIAN
+                                              -- 262) o 'vacante' con 1 comercio (DA LIBERDADE 0).
+                                              -- Las columnas de la derecha son las VIEJAS: la UF
+                                              -- manual que este mismo UPDATE no toca.
+                                              WHEN uf_fuente = 'manual' THEN
+                                                  CASE WHEN uf_comercio > 0
+                                                        AND uf_vivienda > 0 THEN 'mixto'
+                                                       WHEN uf_comercio > 0 THEN 'comercial'
+                                                       WHEN uf_vivienda > 0 THEN 'residencial'
+                                                       ELSE COALESCE(:uso, uso_principal) END
+                                              ELSE COALESCE(:uso, uso_principal) END,
                 uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
                                               THEN uso_fuente
                                                    WHEN :uso IS NOT NULL THEN 'bci'
@@ -825,6 +1082,11 @@ def run(input: BCIParserInput) -> BCIParserOutput:
         )
 
     procesadas = actualizadas = sin_pdf = errores = 0
+    # Construcciones declaradas que ningún regex pudo leer (guarda de paridad).
+    sin_leer = 0
+    # Negocios con CNPJ activo por puerta, para `_un_solo_negocio`.
+    negocios = _negocios_por_puerta()
+    un_negocio = 0
 
     for parcela_id, cca_code in parcelas:
         try:
@@ -844,6 +1106,22 @@ def run(input: BCIParserInput) -> BCIParserOutput:
         try:
             text = _pdf_text(pdf_path)
             data = _parse_bci(text)
+            if _un_solo_negocio(data, negocios):
+                un_negocio += 1
+            # La ficha abre la tabla de construcciones y no se pudo leer alguna fila: es un
+            # formato de numeración nuevo, y esta parcela se contó por texto (sin filtro de
+            # tipología ni de área). No se interrumpe el parseo —el dato por texto es mejor
+            # que nada— pero tiene que quedar dicho con el código de la ficha para poder ir
+            # a buscarla. Ver la guarda de paridad en `_parse_bci`.
+            if data.get("unidades_no_leidas"):
+                sin_leer += data["unidades_no_leidas"]
+                logger.warning(
+                    f"BCIParser: reporte_{codigo}.pdf declara "
+                    f"{data['unidades_no_leidas']} construcción/es que no se pudieron leer "
+                    f"(numeración de UNIDADE con un formato nuevo) — la ficha se contó por "
+                    f"texto y el comercio puede estar inflado: "
+                    f"uf_viv={data['uf_vivienda']} uf_com={data['uf_comercio']}"
+                )
             _update_parcela(parcela_id, data)
             actualizadas += 1
             logger.debug(
@@ -869,10 +1147,20 @@ def run(input: BCIParserInput) -> BCIParserOutput:
         logger.warning(
             f"BCIParser: {errores} errores de parseo — revisar PDFs individuales con logs DEBUG"
         )
+    if un_negocio:
+        logger.info(f"BCIParser: {un_negocio} fichas con varias salas comerciales y un solo "
+                    f"negocio en Receita quedaron en 1 comercio")
+    if sin_leer > 0:
+        logger.warning(
+            f"BCIParser: {sin_leer} construcciones declaradas que no se pudieron leer — "
+            f"esas fichas se contaron por texto y el comercio puede estar inflado. "
+            f"Buscar 'formato nuevo' en el log para los cca_code."
+        )
     return BCIParserOutput(
         ok=True,
         procesadas=procesadas,
         actualizadas=actualizadas,
         sin_pdf=sin_pdf,
         errores=errores,
+        construcciones_sin_leer=sin_leer,
     )
