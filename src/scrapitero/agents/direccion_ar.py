@@ -322,6 +322,9 @@ def run(input: DireccionARInput) -> DireccionAROutput:
     with engine.begin() as conn:
         for j in range(0, len(res), input.batch):
             lote = res[j:j + input.batch]
+            # ⚠ `numero_estimado` es **varchar** (lo comparte con el número del catastro, que
+            # trae cosas como "1503 BIS"), así que el número va como texto: mandando un int el
+            # COALESCE se queda sin tipo común y la escritura entera falla.
             conn.execute(text(f"""
                 UPDATE parcelas SET
                     calle = :calle,
@@ -333,7 +336,7 @@ def run(input: DireccionARInput) -> DireccionAROutput:
                     numero_estimado_confianza = COALESCE(:conf, numero_estimado_confianza)
                 WHERE parcela_id = CAST(:pid AS uuid)
                   AND COALESCE(direccion_source, '') <> '{DIRECCION_FUENTE_PROTEGIDA}'
-            """), [{"pid": p, "calle": c, "num": n, "conf": cf,
+            """), [{"pid": p, "calle": c, "num": (str(n) if n is not None else None), "conf": cf,
                     "fuente": _FUENTE, "metodo": _METODO} for p, c, n, cf in lote])
             escritas += len(lote)
             logger.info(f"direccion_ar: {escritas}/{len(res)} escritas")
