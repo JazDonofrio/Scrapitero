@@ -46,6 +46,9 @@ _UA_HEADERS      = {"User-Agent": "ScraperGIS/1.0 (+https://github.com/Meter0r0/
 GMAPS_GEO        = "https://maps.googleapis.com/maps/api/geocode/json"
 NOMINATIM        = "https://nominatim.openstreetmap.org/reverse"
 COCHERA_M2       = 25   # subparcela < 25 m² → cochera; >= 25 m² → unidad funcional
+# Cada cuántas parcelas se confirma lo escrito. Con 250 se pierde a lo sumo medio minuto de
+# trabajo ante un corte, y son ~170 commits en una zona de 42.000 parcelas.
+_COMMIT_CADA     = 250
 ARBA_SESSION_FILE = Path(os.environ.get("ARBA_SESSION_FILE",
                                          "/opt/scrapitero/.arba_session.json"))
 # Reintentos de `getInfo` ante un fallo que NO es de sesión. carto corre sobre Tomcat y
@@ -81,6 +84,14 @@ class ARBACartoInput(BaseModel):
     # re-pagarle a Google el reverse geocoding de lo ya resuelto. `rehacer=True` fuerza
     # el barrido completo (p. ej. para refrescar subparcelas contra un carto actualizado).
     rehacer: bool = False
+    # ⚠ **El reverse geocoding de este agente SE PAGA.** Por cada parcela sin caché le pega a
+    # Google (`GMAPS_GEO`) para sacarle la calle al punto: sobre las 42.025 de Merlo son unos
+    # USD 210, el mismo gasto que ya habíamos evitado resolviendo las direcciones con
+    # `DireccionAR` (OSM + el callejero oficial, gratis, 98,3% de cobertura).
+    # Con `usar_reverse=False` el agente trae SÓLO lo que nadie más tiene —las subparcelas, o
+    # sea las UF— y no toca la dirección salvo que carto devuelva el **domicilio registral**,
+    # que es dato oficial y gratis. Es el modo correcto cuando la zona ya tiene direcciones.
+    usar_reverse: bool = True
 
 
 class ARBACartoOutput(BaseModel):
@@ -425,6 +436,10 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
                     fuente_dir: str, domicilio_carto: str,
                     n_uf: int, n_cocheras: int, nomencla: str,
                     partida: str = "") -> None:
+    # Sin domicilio registral y sin geocoding no hay nada que escribir en la dirección, y
+    # pisarla con vacío borraría lo que puso otra fuente (en Merlo, las 41.322 direcciones de
+    # `DireccionAR`). El dato de este agente son las UF; la dirección es un extra.
+    tocar_dir = bool(domicilio_carto or calle or numero)
     # Dirección: preferir carto (datos registrales) sobre geocoding
     calle_final  = domicilio_carto.split()[0] if domicilio_carto else calle
     numero_final = ""
@@ -447,11 +462,14 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
     # corrida sin acumular — ver `overture_places_fetcher._agregar_uf`.
     conn.execute(text(f"""
         UPDATE parcelas SET
-            calle                          = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+            calle                          = CASE WHEN NOT :tocar_dir
+                                                    OR COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
                                                   THEN calle ELSE :calle END,
-            numero                         = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+            numero                         = CASE WHEN NOT :tocar_dir
+                                                    OR COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
                                                   THEN numero ELSE :numero END,
-            direccion_source               = CASE WHEN COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
+            direccion_source               = CASE WHEN NOT :tocar_dir
+                                                    OR COALESCE(direccion_source,'') = '{_DIR_PROTEGIDA}'
                                                   THEN direccion_source ELSE :src END,
             unidades_funcionales_estimadas = :n_uf,
             -- `uf_vivienda` es EL campo de ARBA: se actualiza siempre, salvo corrección
@@ -494,6 +512,7 @@ def _update_parcela(conn, parcela_id: str, calle: str, numero: str,
         "calle": calle_final or None,
         "numero": numero_final or None,
         "src": "arba_carto" if domicilio_carto else fuente_dir,
+        "tocar_dir": tocar_dir,
         "n_uf": n_uf,
         "nomencla": nomencla or None,
         "partida": partida or None,
@@ -649,14 +668,26 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
         client.get(f"{CARTO_BASE}/", timeout=15)
         client.cookies.set("JSESSIONID", jsessionid, domain="carto.arba.gov.ar")
 
-        with engine.begin() as conn:
-            for row in parcelas_db:
+        # ⚠ Commit por lotes, NO una transacción única para todo el barrido. Con
+        # `engine.begin()` envolviendo el loop, una zona grande no escribía nada hasta el
+        # final: sobre las 42.025 parcelas de Merlo son ~8 h en las que un corte —la sesión de
+        # ARBA vence, se cae la red— tiraba todo el trabajo. Y dejaba sin efecto la propia
+        # promesa del agente de ser reanudable (`rehacer=False` saltea las que ya tienen
+        # nomenclatura: si el corte no dejó ninguna escrita, no hay nada que saltear).
+        with engine.connect() as conn:
+            for i_p, row in enumerate(parcelas_db):
+                if i_p and i_p % _COMMIT_CADA == 0:
+                    conn.commit()
+                    logger.info(f"ARBA carto: {i_p}/{len(parcelas_db)} parcelas confirmadas")
                 parcela_id, lat, lng, cca_code = row[0], row[1], row[2], row[3]
                 if lat is None or lng is None:
                     continue
 
                 # Geocodificación
-                calle, numero, fuente_dir = _geocodificar(client, lat, lng)
+                if input.usar_reverse:
+                    calle, numero, fuente_dir = _geocodificar(client, lat, lng)
+                else:
+                    calle, numero, fuente_dir = "", "", "sin_reverse"
 
                 # getInfo desde carto
                 try:
@@ -733,6 +764,7 @@ def run(input: ARBACartoInput) -> ARBACartoOutput:
                     f"| UF={uf} cocheras={cocheras} nomencla={nomencla!r}"
                 )
                 time.sleep(input.delay_ms / 1000)
+            conn.commit()      # lo que quedó del último lote
 
     if session_invalida:
         # Borrar sesión guardada para forzar nuevo handshake
