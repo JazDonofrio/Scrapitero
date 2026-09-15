@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 import ezdxf
+from ezdxf import bbox as ezbbox
 from ezdxf.enums import TextEntityAlignment
 from loguru import logger
 from pydantic import BaseModel
@@ -395,6 +396,16 @@ def run(input: DXFInput) -> DXFOutput:
     out = Path(input.output_path) if input.output_path else Path(
         f"/tmp/relevamiento_{input.survey_id[:8]}.dxf")
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Encuadre inicial: sin esto `$EXTMIN/$EXTMAX` quedan en ±1e20 y la vista activa en
+    # (0,0) con 1 km de alto, mientras el dibujo está en UTM absoluto (Merlo: x≈343 km,
+    # y≈6.160 km). El CAD abría mirando el origen y la pantalla salía en blanco —parecía un
+    # archivo vacío—. Mismo arreglo que `DXFEntrega`: los extents van en el LAYOUT, porque
+    # ezdxf pisa `$EXTMIN/$EXTMAX` al guardar con lo que diga `msp.dxf`.
+    ext = ezbbox.extents(msp, fast=True)
+    msp.dxf.extmin = ext.extmin
+    msp.dxf.extmax = ext.extmax
+    doc.set_modelspace_vport(height=max(ext.size.y, ext.size.x) * 1.05,
+                             center=(ext.center.x, ext.center.y))
     doc.saveas(out)
 
     logger.info(f"DXFExport {input.survey_id}: {dibujadas} parcelas, "
