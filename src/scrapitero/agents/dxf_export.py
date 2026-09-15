@@ -318,8 +318,11 @@ def run(input: DXFInput) -> DXFOutput:
         # El paso entre renglones se calcula sobre la altura REAL de cada uno: las líneas
         # no miden todas igual (la UF es la más grande) y con un paso fijo el número se
         # montaba encima del rótulo de UF.
+        # Una parcela sin número, sin UF y sin tipo no tiene nada que rotular: sale igual su
+        # polígono y el bloque de atributos. Pasa mucho en un relevamiento argentino a medio
+        # hacer (Merlo, sep-2026: sin calle ni huella todavía) y `max([])` tiraba el export.
         alturas = [alto * escala for _, _, alto in lineas]
-        paso = max(alturas) * 1.45
+        paso = max(alturas, default=0) * 1.45
         offset = (len(lineas) - 1) * paso / 2
         for i, ((txt, capa, _), alto) in enumerate(zip(lineas, alturas)):
             t = msp.add_text(txt, dxfattribs={"layer": capa, "height": alto})
