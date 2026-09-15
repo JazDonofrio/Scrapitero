@@ -83,6 +83,10 @@ class DXFInput(BaseModel):
     text_height: float = 2.0            # metros (unidades de dibujo)
     solo_con_uf: bool = False           # exportar sólo parcelas con al menos 1 UF
     max_parcelas: Optional[int] = None  # para generar muestras
+    # Sólo el contorno de cada parcela (capa PARCELAS) + la nota de CRS de `_METADATOS`:
+    # sin rótulos ni bloque de atributos. Para usar el lote como base de dibujo — el completo
+    # de Merlo (93.073 parcelas) pesa 537 MB y casi todo es texto y atributos.
+    solo_poligonos: bool = False
 
 
 class DXFOutput(BaseModel):
@@ -276,6 +280,13 @@ def run(input: DXFInput) -> DXFOutput:
                 [tr.transform(x, y) for x, y in anillo],
                 close=True, dxfattribs={"layer": "PARCELAS"},
             )
+
+        if input.solo_poligonos:
+            if establecimiento_id is None:
+                total_v += uf_v or 0
+                total_c += uf_c or 0
+            dibujadas += 1
+            continue
 
         # Punto de rotulado: representative_point cae SIEMPRE dentro del polígono
         # (el centroide de una parcela en "L" puede caer afuera).
