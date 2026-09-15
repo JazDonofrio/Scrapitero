@@ -296,13 +296,23 @@ def _upsert_parcelas(features: list[dict], region_id: str,
             # 42025" **por cada parcela que se baja**, y empeorando a medida que la tabla
             # crece, porque el costo es cuadrático. Con el índice
             # `idx_parcelas_survey_centroide` y esta forma, es una búsqueda indexada.
+            #
+            # ⚠ La coordenada sola tampoco alcanza: exige ADEMÁS el mismo cca. El centroide es
+            # el promedio de vértices y ±5 m es menos que un lote angosto, así que un lote
+            # pegado a otro (o una subparcela de 7 m² junto a su frentista) "encontraba" la
+            # fila del vecino y le PISABA geometría y cca en vez de insertarse. Medido en Merlo
+            # el 15-sep-2026: 93.074 parcelas en IDERA → 92.980 filas, 96 lotes reales perdidos
+            # (hasta uno de 9.510 m²). Con coordenada + cca las dos identidades se respetan:
+            # mismo cca lejos (JLS 1397/1466) → filas distintas; cca distinto cerca → también.
+            # carto no reescribe `cca_code`, así que la re-corrida sigue reconociendo lo suyo.
             existing = conn.execute(text("""
                 SELECT parcela_id FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid)
                   AND centroid_lat BETWEEN :lat - 0.00005 AND :lat + 0.00005
                   AND centroid_lng BETWEEN :lng - 0.00005 AND :lng + 0.00005
+                  AND cca_code IS NOT DISTINCT FROM :cca
                 LIMIT 1
-            """), {"sid": survey_id, "lat": lat, "lng": lng}).fetchone()
+            """), {"sid": survey_id, "lat": lat, "lng": lng, "cca": cca or None}).fetchone()
 
             if existing:
                 conn.execute(text("""
