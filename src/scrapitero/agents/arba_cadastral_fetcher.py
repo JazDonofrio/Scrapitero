@@ -48,10 +48,20 @@ class ARBAInput(BaseModel):
     circunscripcion: Optional[str] = None    # "2"
     seccion: Optional[str] = None            # "C"
     manzana: Optional[str] = None            # "184"
+    # Tope de features a traer de IDERA. ⚠ **Es un tope NUESTRO y trunca la zona**: con el
+    # default viejo de 50.000, Merlo —161.269 parcelas en su bbox— se cortó en 42.025 y quedó
+    # el 28,4% de la superficie sin relevar, en un solo bloque al sur. El agente avisaba por
+    # WARNING, pero eso vive en el log de Hermes y nadie lo ve: por eso ahora el truncamiento
+    # además **viaja en el resultado** (`truncado`), donde el pipeline y la UI pueden mostrarlo.
+    max_features: int = 250000
 
 
 class ARBAOutput(BaseModel):
     ok: bool
+    # True si se alcanzó `max_features`: la zona quedó incompleta y hay que subir el tope o
+    # partirla. Un relevamiento truncado se ve completo en la web —parcelas, UF, mapa— y el
+    # hueco sólo se nota mirando el polígono, así que tiene que decirlo el propio resultado.
+    truncado: bool = False
     parcelas_insertadas: int = 0
     parcelas_actualizadas: int = 0
     fuentes: list[str] = []
@@ -147,7 +157,8 @@ def _load_zone_polygon(region_id: str, survey_id=None):
 IDERA_PAGE_SIZE = 1000
 
 
-def fetch_idera_spatial(zone_poly, max_features: int = 50000) -> list[dict]:
+def fetch_idera_spatial(zone_poly, max_features: int = 250000,
+                        _flag: Optional[dict] = None) -> list[dict]:
     """Baja parcelas de IDERA por el bbox del polígono de la zona y las recorta
     exactamente al polígono con shapely.
 
@@ -190,6 +201,8 @@ def fetch_idera_spatial(zone_poly, max_features: int = 50000) -> list[dict]:
 
     logger.info(f"IDERA WFS bbox devolvió {len(raw)} features (sin recortar)")
     if len(raw) >= max_features:
+        if _flag is not None:
+            _flag["truncado"] = True
         logger.warning(
             f"IDERA WFS alcanzó el tope de {max_features} features — la zona puede "
             "estar truncada. Subdividir el GeoJSON o subir max_features."
@@ -276,11 +289,18 @@ def _upsert_parcelas(features: list[dict], region_id: str,
             # repartidas en más de un polígono (José León Suárez 1397 y 1466 comparten
             # `133050J…0160000001000`, "Manzana 16 Parcela 1" las dos, a 70 m una de otra).
             # Deduplicar por cca las fusionaría y perderíamos una parcela real.
+            # ⚠ El rango va como BETWEEN y no como `ABS(col - :v) < tol`: son lo mismo para
+            # Postgres salvo en lo único que importa acá — **con `ABS()` no puede usar el
+            # índice** y resuelve cada búsqueda escaneando todas las parcelas del survey.
+            # Medido en Merlo con 42.025 parcelas cargadas: 20 ms y "Rows Removed by Filter:
+            # 42025" **por cada parcela que se baja**, y empeorando a medida que la tabla
+            # crece, porque el costo es cuadrático. Con el índice
+            # `idx_parcelas_survey_centroide` y esta forma, es una búsqueda indexada.
             existing = conn.execute(text("""
                 SELECT parcela_id FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid)
-                  AND ABS(centroid_lat - :lat) < 0.00005
-                  AND ABS(centroid_lng - :lng) < 0.00005
+                  AND centroid_lat BETWEEN :lat - 0.00005 AND :lat + 0.00005
+                  AND centroid_lng BETWEEN :lng - 0.00005 AND :lng + 0.00005
                 LIMIT 1
             """), {"sid": survey_id, "lat": lat, "lng": lng}).fetchone()
 
@@ -337,6 +357,7 @@ def run(input: ARBAInput) -> ARBAOutput:
                     "Verificar nomenclatura."
                 ))
             fuente = "idera_wfs"
+            truncado = False
         else:
             zone_poly = _load_zone_polygon(input.region_id, input.survey_id)
             if zone_poly is None:
@@ -345,7 +366,9 @@ def run(input: ARBAInput) -> ARBAOutput:
                     "espacialmente. Creá la zona desde un GeoJSON (GeoJSONZoneFetcher) o "
                     "pasá la nomenclatura completa (partido/circunscripcion/seccion/manzana)."
                 ))
-            features = fetch_idera_spatial(zone_poly)
+            _tope = {}
+            features = fetch_idera_spatial(zone_poly, input.max_features, _tope)
+            truncado = bool(_tope.get("truncado"))
             if not features:
                 return ARBAOutput(ok=False, error=(
                     f"IDERA WFS no devolvió parcelas dentro del polígono de "
@@ -362,6 +385,7 @@ def run(input: ARBAInput) -> ARBAOutput:
             parcelas_insertadas=insertadas,
             parcelas_actualizadas=actualizadas,
             fuentes=[fuente],
+            truncado=truncado,
         )
     except httpx.HTTPStatusError as e:
         return ARBAOutput(ok=False, error=f"IDERA HTTP {e.response.status_code}: {e.response.text[:200]}")
