@@ -4112,7 +4112,7 @@ async def export_procedencia_pdf(survey_id: str):
 
 @app.get("/api/surveys/{survey_id}/export/dxf")
 async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
-                     dxfversion: str = ""):
+                     dxfversion: str = "", capas: str = "", solo_con_uf: bool = False):
     """DXF (AutoCAD) del relevamiento, **en el formato que espera el cliente del país**.
 
     Si su perfil define un estándar de planos (`plano` en `_EXPORT_PERFILES_CLIENTE`, hoy
@@ -4125,6 +4125,11 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     `celula_id` (el `ID` de bloque que asigna el cliente por zona, p.ej. `VAZ049`) y
     `codlog_csv` (mapeo calle→CODLOG de su sistema) sólo aplican al entregable; en el
     dibujo interno se ignoran.
+
+    `capas` (separadas por coma, de `dxf_export.CAPAS_ELEGIBLES`) y `solo_con_uf` son del
+    dibujo interno: los elige quien descarga para achicar el archivo — el completo de Merlo
+    (93.073 parcelas) pesa 537 MB y sólo los contornos 31 MB. Vacío = todas las capas. En el
+    entregable se ignoran: su contenido lo fija el estándar del cliente.
 
     DXF y no DWG: el `.dwg` es formato cerrado de Autodesk y ninguna librería libre lo
     escribe; el DXF es el formato de intercambio del propio AutoCAD, que lo abre nativo.
@@ -4146,7 +4151,7 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
 
     fecha = meta[1].strftime("%Y-%m-%d") if meta[1] else ""
     tmpdir = tempfile.mkdtemp(prefix="dxf_")
-    nombre = (f"entrega_{celula_id or meta[0]}_{fecha}.dxf" if plano
+    nombre = (f"entrega_{celula_id or meta[0]}_{fecha}.dxf" if plano and not capas
               else f"relevamiento_{meta[0]}_{fecha}.dxf").replace(" ", "_").replace("/", "-")
     destino = os.path.join(tmpdir, nombre)
 
@@ -4156,13 +4161,17 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     # una bandera en la base: se ve con un `ls`, y se desactiva borrándolo.
     # ⚠ Queda CONGELADO: no refleja ningún cambio posterior del relevamiento.
     fijado = _DXF_FIJADO_DIR / f"{survey_id}.dxf"
-    if fijado.is_file():
+    # El fijado reemplaza al ENTREGABLE; quien pide capas quiere el dibujo interno y
+    # recibir el plano corregido en su lugar sería darle otra cosa sin avisar.
+    if fijado.is_file() and not capas:
         shutil.rmtree(tmpdir, ignore_errors=True)
         logger.warning(f"DXF fijado a mano para {survey_id}: se sirve {fijado} "
                        f"en vez de generarlo. Borrar el archivo para volver al pipeline.")
         return FileResponse(str(fijado), media_type="image/vnd.dxf", filename=nombre)
 
-    if plano:
+    # Pedir capas es pedir el dibujo interno, aunque el país tenga plano: el diálogo de
+    # descarga ofrece los dos formatos y el entregable no tiene capas elegibles.
+    if plano and not capas:
         from scrapitero.agents.dxf_entrega import EntregaInput
         from scrapitero.agents.dxf_entrega import run as run_agent
         entrada = EntregaInput(survey_id=survey_id, celula_id=celula_id,
@@ -4171,7 +4180,9 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     else:
         from scrapitero.agents.dxf_export import DXFInput
         from scrapitero.agents.dxf_export import run as run_agent
-        entrada = DXFInput(survey_id=survey_id, output_path=destino)
+        entrada = DXFInput(survey_id=survey_id, output_path=destino,
+                           capas=[c for c in capas.split(",") if c.strip()] or None,
+                           solo_con_uf=solo_con_uf)
 
     def _job() -> dict:
         _thread_job_id.value = survey_id

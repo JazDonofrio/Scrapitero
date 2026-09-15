@@ -37,6 +37,21 @@ def utm_epsg(lon: float, lat: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
+# CRS de los DXF por país, cuando el cliente fijó uno; sin entrada, huso UTM WGS 84 del
+# centroide (`utm_epsg`). Argentina: «PGA98.Argentina-5», el código de AutoCAD Map/Civil 3D
+# para POSGAR 98 / Argentina faja 5 = **EPSG:22175** — ojo, NO 22185, que es POSGAR 94.
+# Pedido del cliente el 15-sep-2026. Faja FIJA y no por longitud, a propósito: es la base
+# con la que trabajan sus planos. Merlo, Hurlingham, Malvinas y Tigre caen en la 5 igual;
+# lejos del meridiano -60 (Salta, -65,4) la faja 5 deforma y ahí habría que preguntar.
+_CRS_DXF_POR_PAIS = {"ARG": 22175}
+
+
+def epsg_dxf(pais: Optional[str], lon: float, lat: float) -> int:
+    """EPSG en que salen los DXF de un relevamiento. Única implementación: la usan los dos
+    agentes de DXF, que tienen que dibujar en el mismo sistema (mismo motivo que `nombre_crs`)."""
+    return _CRS_DXF_POR_PAIS.get((pais or "").upper()) or utm_epsg(lon, lat)
+
+
 def nombre_crs(epsg: int) -> str:
     """Nombre corto del CRS como lo escribe un proyectista: 'UTM84-21S', no 'WGS 84 / UTM 21S'.
 
@@ -52,6 +67,8 @@ def nombre_crs(epsg: int) -> str:
         return f"UTM84-{epsg - 32600}N"
     if 31977 <= epsg <= 31985:          # SIRGAS 2000 / UTM sur
         return f"SIRGAS2000-{epsg - 31960}S"
+    if 22171 <= epsg <= 22177:          # POSGAR 98 / Argentina faja N (Gauss-Krüger)
+        return f"PGA98.Argentina-{epsg - 22170}"   # el código de AutoCAD Map / Civil 3D
     return f"EPSG:{epsg}"
 
 

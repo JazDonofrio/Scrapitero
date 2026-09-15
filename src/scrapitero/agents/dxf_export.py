@@ -76,6 +76,12 @@ _ATRIBUTOS = [
 
 _BLOQUE = "PARCELA_INFO"
 
+# Capas que se pueden pedir (`DXFInput.capas`). `DATOS` es el bloque de atributos invisibles.
+# Espejo de `DXF_CAPAS` en static/index.html: si se agrega una acá, sumarla allá.
+CAPAS_ELEGIBLES = ["PARCELAS", "UF_VIVIENDA", "UF_COMERCIO", "DIRECCION",
+                   "TIPO_EDIFICACION", "DATOS"]
+_CAPAS_POR_PARCELA = {"UF_VIVIENDA", "UF_COMERCIO", "DIRECCION", "TIPO_EDIFICACION", "DATOS"}
+
 
 class DXFInput(BaseModel):
     survey_id: str
@@ -84,10 +90,12 @@ class DXFInput(BaseModel):
     text_height: float = 2.0            # metros (unidades de dibujo)
     solo_con_uf: bool = False           # exportar sólo parcelas con al menos 1 UF
     max_parcelas: Optional[int] = None  # para generar muestras
-    # Sólo el contorno de cada parcela (capa PARCELAS) + la nota de CRS de `_METADATOS`:
-    # sin rótulos ni bloque de atributos. Para usar el lote como base de dibujo — el completo
-    # de Merlo (93.073 parcelas) pesa 537 MB y casi todo es texto y atributos.
-    solo_poligonos: bool = False
+    # Qué capas salen (de `CAPAS_ELEGIBLES`); None = todas. Lo elige quien descarga desde la
+    # web para achicar el archivo: el completo de Merlo (93.073 parcelas) pesa 537 MB y casi
+    # todo es texto y atributos — sólo PARCELAS son 31 MB. `_METADATOS` (la nota de CRS)
+    # sale siempre: sin ella el archivo no se puede calzar contra otro plano.
+    capas: Optional[list[str]] = None
+    solo_poligonos: bool = False        # atajo de capas=['PARCELAS']
 
 
 class DXFOutput(BaseModel):
@@ -167,6 +175,16 @@ def _consultar(survey_id: str, solo_con_uf: bool,
     return list(rows), meta[0], (int(est[0] or 0), int(est[1] or 0))
 
 
+def _pais_de_survey(survey_id: str) -> Optional[str]:
+    """ISO-3 del relevamiento: decide el CRS del dibujo (`geo.epsg_dxf`). Lo comparten los
+    dos DXF, igual que `_consultar`."""
+    with get_engine().connect() as conn:
+        return conn.execute(text("""
+            SELECT r.country_code FROM surveys s JOIN regions r ON s.region_id = r.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).scalar()
+
+
 def _tipo_label(uso, uf_v, area, descripcion, hotel_tipo, manual, uf_c=0, huella=None) -> str:
     """Etiqueta de la taxonomía del cliente.
 
@@ -224,6 +242,22 @@ def _anillos(geom) -> list[list[tuple[float, float]]]:
 
 @agent_run
 def run(input: DXFInput) -> DXFOutput:
+    if input.solo_poligonos:
+        capas = {"PARCELAS"}
+    elif input.capas is None:
+        capas = set(CAPAS_ELEGIBLES)
+    else:
+        capas = {c.strip().upper() for c in input.capas if c and c.strip()}
+    invalidas = capas - set(CAPAS_ELEGIBLES)
+    if invalidas:
+        return DXFOutput(ok=False, error=(f"Capas desconocidas: {', '.join(sorted(invalidas))}. "
+                                          f"Válidas: {', '.join(CAPAS_ELEGIBLES)}"))
+    if not capas:
+        return DXFOutput(ok=False, error="No se eligió ninguna capa para el DXF.")
+    # Sin rótulos ni atributos no hace falta calcular dirección/tipo por parcela: es la
+    # parte cara del loop (el tipo reusa `_tipo_edificacion` de la web).
+    solo_geometria = not (capas & _CAPAS_POR_PARCELA)
+
     rows, region_nombre, (est_uf_v, est_uf_c) = _consultar(
         input.survey_id, input.solo_con_uf, input.max_parcelas)
     if region_nombre is None:
@@ -252,15 +286,19 @@ def run(input: DXFInput) -> DXFOutput:
     else:
         c = MultiPolygon([g for g in geoms if isinstance(g, Polygon)]).centroid \
             if len(geoms) > 1 else geoms[0].centroid
-        epsg = geo.utm_epsg(c.x, c.y)
+        # Argentina NO va en UTM: el cliente trabaja en «PGA98.Argentina-5» (POSGAR 98
+        # faja 5, EPSG:22175). El país decide; ver `geo.epsg_dxf`.
+        epsg = geo.epsg_dxf(_pais_de_survey(input.survey_id), c.x, c.y)
 
     tr = Transformer.from_crs(4326, epsg, always_xy=True)
 
     doc = ezdxf.new("R2018", setup=True)
     doc.header["$INSUNITS"] = 6  # metros
     for nombre, color in _LAYERS.items():
-        doc.layers.add(nombre, color=color)
-    _definir_bloque(doc)
+        if nombre in capas or nombre == "_METADATOS":
+            doc.layers.add(nombre, color=color)
+    if "DATOS" in capas:
+        _definir_bloque(doc)
     msp = doc.modelspace()
 
     h = input.text_height
@@ -276,13 +314,14 @@ def run(input: DXFInput) -> DXFOutput:
         anillos = _anillos(geom)
         if not anillos:
             continue
-        for anillo in anillos:
-            msp.add_lwpolyline(
-                [tr.transform(x, y) for x, y in anillo],
-                close=True, dxfattribs={"layer": "PARCELAS"},
-            )
+        if "PARCELAS" in capas:
+            for anillo in anillos:
+                msp.add_lwpolyline(
+                    [tr.transform(x, y) for x, y in anillo],
+                    close=True, dxfattribs={"layer": "PARCELAS"},
+                )
 
-        if input.solo_poligonos:
+        if solo_geometria:
             if establecimiento_id is None:
                 total_v += uf_v or 0
                 total_c += uf_c or 0
@@ -317,6 +356,7 @@ def run(input: DXFInput) -> DXFOutput:
             lineas.append((f"{uf_c} COM", "UF_COMERCIO", h))
         if tipo:
             lineas.append((tipo, "TIPO_EDIFICACION", h * 0.7))
+        lineas = [linea for linea in lineas if linea[1] in capas]
 
         # Los lotes de VG son angostos y muy desiguales: con una altura fija los rótulos
         # de los chicos se pisan entre sí y con los del vecino. Se escala al ancho real
@@ -341,8 +381,7 @@ def run(input: DXFInput) -> DXFOutput:
             t.set_placement((cx, cy + offset - i * paso), align=TextEntityAlignment.MIDDLE_CENTER)
 
         # Bloque invisible con todo el dato consultable en propiedades de AutoCAD.
-        ref = msp.add_blockref(_BLOQUE, (cx, cy), dxfattribs={"layer": "DATOS"})
-        ref.add_auto_attribs({
+        atributos = {
             "DIRECCION": direccion,
             "CALLE": calle or "",
             "NUMERO": str(numero or ""),
@@ -362,7 +401,10 @@ def run(input: DXFInput) -> DXFOutput:
             # guarda niveles (PB = 1); la conversión y el porqué están en `pisos.py`.
             "PISOS": pisos_texto(pisos),
             "ESTABLECIMIENTO": " - ".join(x for x in [est_tipo or "", est_nombre or ""] if x),
-        })
+        }
+        if "DATOS" in capas:
+            ref = msp.add_blockref(_BLOQUE, (cx, cy), dxfattribs={"layer": "DATOS"})
+            ref.add_auto_attribs(atributos)
 
         # El total NO suma las parcelas agrupadas en un establecimiento: la entidad
         # cuenta una vez (por su miembro más desarrollado) y se agrega aparte, abajo.

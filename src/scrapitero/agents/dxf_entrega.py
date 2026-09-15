@@ -85,7 +85,7 @@ from sqlalchemy import text
 
 from scrapitero.agents import geo
 from scrapitero.agents._run import agent_run
-from scrapitero.agents.dxf_export import _consultar
+from scrapitero.agents.dxf_export import _consultar, _pais_de_survey
 from scrapitero.agents.logradouro_br import limpiar_nombre_via
 from scrapitero.agents.pisos import texto as pisos_texto
 from scrapitero.db.engine import get_engine
@@ -2013,7 +2013,10 @@ def run(input: EntregaInput) -> EntregaOutput:
     if input.epsg:
         epsg = input.epsg
     else:
-        epsg = geo.utm_epsg(conjunto.centroid.x, conjunto.centroid.y)
+        # Argentina NO va en UTM: «PGA98.Argentina-5» (POSGAR 98 faja 5, EPSG:22175), pedido
+        # del cliente. El país decide; ver `geo.epsg_dxf`.
+        epsg = geo.epsg_dxf(_pais_de_survey(input.survey_id),
+                            conjunto.centroid.x, conjunto.centroid.y)
     tr = Transformer.from_crs(4326, epsg, always_xy=True)
 
     codlog_map = _cargar_codlog(input.codlog_csv)

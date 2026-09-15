@@ -1858,6 +1858,7 @@ async function importarBaseline(sid, btn) {
 
 /* ── Card render ───────────────────────────────────────────────── */
 function renderCard(s) {
+  SURVEY_PLANO[s.survey_id] = s.export_plano || null;   // lo lee descargarDxf
   const sid = s.survey_id;
   const mapId = 'map-' + sid.replace(/-/g,'');
   const areaKm = s.area_total_m2 ? (s.area_total_m2/1e6).toFixed(2)+' km²' : '—';
@@ -1990,12 +1991,10 @@ function renderCard(s) {
             ${s.export_cliente ? `<a class="btn btn-sm btn-green" href="#" onclick="return csvOperadora(event, '${sid}')" download
                style="text-decoration:none"
                title="${tAttr('Descargar el CSV con el formato de entrega propio del cliente')}: ${escHtml(s.export_cliente.descripcion || '')}">⬇ ${escHtml(s.export_cliente.etiqueta)}</a>` : ''}
-            ${s.export_plano
-              ? `<button class="btn btn-sm btn-green" onclick="descargarEntrega('${sid}')"
-               title="${tAttr('Descargar el DXF con el estándar de planos del cliente: un bloque SDU/MDU por inmueble con sus atributos, sobre el mapa base municipal (manzanas y cordón). Es el formato en que se entrega el relevamiento.')}">⬇ ${escHtml(s.export_plano.etiqueta)}</button>`
-              : `<a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/dxf" download
-               style="text-decoration:none"
-               title="${tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</a>`}
+            <button class="btn btn-sm ${s.export_plano ? 'btn-green' : 'btn-outline'}" onclick="descargarDxf('${sid}')"
+               title="${s.export_plano
+                 ? tAttr('Descargar el DXF con el estándar de planos del cliente: un bloque SDU/MDU por inmueble con sus atributos, sobre el mapa base municipal (manzanas y cordón). Es el formato en que se entrega el relevamiento.')
+                 : tAttr('Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.')}">${t('⬇ DXF (AutoCAD)')}</button>
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/procedencia-pdf" download
                style="text-decoration:none"
                title="${tAttr('Descargar la ficha de procedencia: de dónde sale cada dato del relevamiento, con qué cobertura y de qué fecha es cada fuente. Se genera en el momento, así que hay que volver a descargarla si el relevamiento cambia.')}">${t('⬇ Procedencia (PDF)')}</a>
@@ -2567,10 +2566,91 @@ function csvOperadora(ev, sid) {
   return false;
 }
 
-function descargarEntrega(sid) {
-  const celula = prompt(t('ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:'), '');
-  if (celula === null) return;
-  window.location = `/api/surveys/${sid}/export/dxf?celula_id=${encodeURIComponent(celula.trim())}`;
+// Un solo diálogo para bajar el DXF. Si el país tiene estándar de planos (`export_plano`,
+// hoy Brasil y Argentina) ofrece primero el formato: el ENTREGABLE del cliente
+// (DXFEntrega, contenido fijo; en Brasil lleva el ID de célula) o el dibujo POR CAPAS
+// (DXFExport), donde quien descarga elige qué va para achicar el archivo —Merlo, 93.073
+// parcelas: 537 MB con todo, 31 MB sólo contornos—. Sin plano va directo a las capas.
+// `DXF_CAPAS` es espejo de `CAPAS_ELEGIBLES` en agents/dxf_export.py: si se suma una capa,
+// sumarla en los dos.
+const SURVEY_PLANO = {};
+function dxfCapas() {
+  return [
+    ['PARCELAS', t('Contorno de las parcelas')],
+    ['UF_VIVIENDA', t('UF de vivienda (rótulo)')],
+    ['UF_COMERCIO', t('UF de comercio (rótulo)')],
+    ['DIRECCION', t('Número de puerta (rótulo)')],
+    ['TIPO_EDIFICACION', t('Tipo de edificación (rótulo)')],
+    ['DATOS', t('Atributos por parcela (invisibles; es lo que más pesa)')],
+  ];
+}
+
+function descargarDxf(sid) {
+  document.getElementById('dxf-dialog')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.id = 'dxf-dialog';
+  dlg.style.cssText = 'max-width:26rem;width:calc(100% - 32px);padding:1.25rem;'
+    + 'border:1px solid hsl(var(--border));border-radius:.75rem;'
+    + 'background:hsl(var(--card));color:hsl(var(--fg))';
+  const plano = SURVEY_PLANO[sid] || null;
+  const filas = dxfCapas().map(([capa, label]) => `
+    <label style="display:flex;gap:.5rem;align-items:center;margin:.35rem 0;cursor:pointer">
+      <input type="checkbox" class="dxf-capa" value="${capa}" checked> ${escHtml(label)}
+    </label>`).join('');
+  const radio = 'display:flex;gap:.5rem;align-items:center;margin:.35rem 0;cursor:pointer;font-weight:600';
+  const formato = plano ? `
+    <label style="${radio}"><input type="radio" name="dxf-formato" value="entrega" checked> ${escHtml(plano.etiqueta)}</label>
+    <div style="margin:0 0 .5rem 1.6rem;font-size:.75rem;color:hsl(var(--muted-fg))">${t('Contenido fijo, en el estándar del cliente.')}</div>
+    ${plano.pide_celula ? `<input type="text" class="dxf-celula" placeholder="${tAttr('ID de célula (p.ej. VAZ049), opcional')}"
+      style="margin:0 0 .5rem 1.6rem;width:calc(100% - 1.6rem);padding:.35rem .5rem;border:1px solid hsl(var(--border));border-radius:.5rem;background:hsl(var(--bg));color:hsl(var(--fg))">` : ''}
+    <label style="${radio}"><input type="radio" name="dxf-formato" value="capas"> ${t('Por capas: elegís qué va en el archivo')}</label>` : '';
+  dlg.innerHTML = `
+    <h3 style="margin:0 0 .75rem">${t('⬇ DXF (AutoCAD)')}</h3>
+    ${formato}
+    <div class="dxf-capas-box" style="${plano ? 'margin-left:1.6rem' : ''}" ${plano ? 'hidden' : ''}>
+    <p style="margin:0 0 .75rem;font-size:.8rem;color:hsl(var(--muted-fg))">${t('Elegí qué va en el archivo. Cuanto menos marques, menos pesa.')}</p>
+    <div style="display:flex;gap:.4rem;margin-bottom:.5rem">
+      <button type="button" class="btn btn-xs btn-outline dxf-preset-parcelas">${t('Sólo contornos')}</button>
+      <button type="button" class="btn btn-xs btn-outline dxf-preset-todo">${t('Todas las capas')}</button>
+    </div>
+    ${filas}
+    <hr style="border:0;border-top:1px solid hsl(var(--border));margin:.75rem 0">
+    <label style="display:flex;gap:.5rem;align-items:center;cursor:pointer">
+      <input type="checkbox" class="dxf-solo-uf"> ${t('Sólo parcelas con UF')}
+    </label>
+    </div>
+    <p style="margin:.75rem 0 0;font-size:.72rem;color:hsl(var(--muted-fg))">${t('En zonas grandes puede tardar unos minutos en generarse.')}</p>
+    <p class="dxf-error" style="margin:.5rem 0 0;font-size:.78rem;color:var(--danger-fg)" hidden></p>
+    <div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem">
+      <button type="button" class="btn btn-sm btn-ghost dxf-cancelar">${t('Cancelar')}</button>
+      <button type="button" class="btn btn-sm btn-green dxf-descargar">${t('⬇ Descargar')}</button>
+    </div>`;
+  document.body.appendChild(dlg);
+  const marcar = (fn) => dlg.querySelectorAll('.dxf-capa').forEach(cb => { cb.checked = fn(cb.value); });
+  dlg.querySelector('.dxf-preset-parcelas').onclick = () => marcar(c => c === 'PARCELAS');
+  dlg.querySelector('.dxf-preset-todo').onclick = () => marcar(() => true);
+  dlg.querySelector('.dxf-cancelar').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => dlg.remove());
+  const esEntrega = () => dlg.querySelector('input[name="dxf-formato"]:checked')?.value === 'entrega';
+  dlg.querySelectorAll('input[name="dxf-formato"]').forEach(r => {
+    r.onchange = () => { dlg.querySelector('.dxf-capas-box').hidden = esEntrega(); };
+  });
+  dlg.querySelector('.dxf-descargar').onclick = () => {
+    if (esEntrega()) {
+      const celula = dlg.querySelector('.dxf-celula')?.value.trim() || '';
+      dlg.close();
+      window.location = `/api/surveys/${sid}/export/dxf?celula_id=${encodeURIComponent(celula)}`;
+      return;
+    }
+    const capas = [...dlg.querySelectorAll('.dxf-capa:checked')].map(cb => cb.value);
+    const err = dlg.querySelector('.dxf-error');
+    if (!capas.length) { err.textContent = t('Elegí al menos una capa.'); err.hidden = false; return; }
+    const soloUf = dlg.querySelector('.dxf-solo-uf').checked;
+    dlg.close();
+    window.location = `/api/surveys/${sid}/export/dxf?capas=${encodeURIComponent(capas.join(','))}`
+      + (soloUf ? '&solo_con_uf=true' : '');
+  };
+  dlg.showModal();
 }
 
 async function runFootprints(sid, btn) {

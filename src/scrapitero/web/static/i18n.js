@@ -567,6 +567,23 @@ var I18N_PT = {
   'Descargar el relevamiento en DXF para AutoCAD: parcelas, unidades de vivienda y comercio, dirección y tipo de edificación, cada cosa en su capa. AutoCAD lo abre nativo y permite guardarlo como DWG.':
     'Baixar o levantamento em DXF para AutoCAD: lotes, unidades de moradia e comércio, endereço e tipo de edificação, cada coisa em sua camada. O AutoCAD abre nativamente e permite salvar como DWG.',
   '⬇ DXF (AutoCAD)': '⬇ DXF (AutoCAD)',
+  'Elegí qué va en el archivo. Cuanto menos marques, menos pesa.':
+    'Escolha o que vai no arquivo. Quanto menos marcar, menor o arquivo.',
+  'Contorno de las parcelas': 'Contorno dos lotes',
+  'UF de vivienda (rótulo)': 'UF de moradia (rótulo)',
+  'UF de comercio (rótulo)': 'UF de comércio (rótulo)',
+  'Número de puerta (rótulo)': 'Número da porta (rótulo)',
+  'Tipo de edificación (rótulo)': 'Tipo de edificação (rótulo)',
+  'Atributos por parcela (invisibles; es lo que más pesa)': 'Atributos por lote (invisíveis; é o que mais pesa)',
+  'Sólo contornos': 'Só contornos',
+  'Todas las capas': 'Todas as camadas',
+  'Sólo parcelas con UF': 'Só lotes com UF',
+  'En zonas grandes puede tardar unos minutos en generarse.': 'Em zonas grandes pode levar alguns minutos para gerar.',
+  'Elegí al menos una capa.': 'Escolha pelo menos uma camada.',
+  '⬇ Descargar': '⬇ Baixar',
+  'Contenido fijo, en el estándar del cliente.': 'Conteúdo fixo, no padrão do cliente.',
+  'ID de célula (p.ej. VAZ049), opcional': 'ID da célula (ex. VAZ049), opcional',
+  'Por capas: elegís qué va en el archivo': 'Por camadas: você escolhe o que vai no arquivo',
   '⬇ Procedencia (PDF)': '⬇ Procedência (PDF)',
   'Descargar la ficha de procedencia: de dónde sale cada dato del relevamiento, con qué cobertura y de qué fecha es cada fuente. Se genera en el momento, así que hay que volver a descargarla si el relevamiento cambia.':
     'Baixar a ficha de procedência: de onde vem cada dado do levantamento, com que cobertura e de que data é cada fonte. É gerada na hora, então é preciso baixá-la de novo se o levantamento mudar.',
