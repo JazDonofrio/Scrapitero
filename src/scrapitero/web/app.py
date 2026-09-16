@@ -2123,6 +2123,18 @@ _CAMPOS_DIRECCION = ("calle", "numero", "complemento", "barrio", "codigo_postal"
 # quedan parcelas sin número en el CSV y sin incidencia que las reclame.
 _NUMERO_CONF_MIN = 0.4
 
+# ⚠ Métodos de estimación cuyo número NO sale al entregable, por malo. Medido contra el
+# reverse de Google sobre 1.000 parcelas de Merlo (16-sep-2026): `georef_osm` —el método
+# viejo, que interpolaba contra el rango de la CALLE ENTERA— da **mediana 998 de error** y
+# el **77,7% cae en la cuadra equivocada**, contra 3,4% de `georef_cuadra`. No es «menos
+# preciso»: es ruido con formato de número. El corte de confianza ya filtraba 14.828 de sus
+# 15.788 filas, pero **960 seguían saliendo al CSV del cliente**.
+#
+# Y el corte de confianza NO alcanza como guarda: separa métodos, no calidad. Dentro de
+# cada método la correlación con acertar es cero (Spearman +0,02 en `eje_osm`, −0,07 en
+# `georef_cuadra`), así que el filtro tiene que ser explícito por método.
+_NUMERO_METODOS_EXCLUIDOS = ("georef_osm",)
+
 
 @app.get("/api/parcelas/{parcela_id}")
 async def get_parcela_editable(parcela_id: str, lang: Optional[str] = None) -> JSONResponse:
@@ -3752,6 +3764,7 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                            -- El estimado, entre paréntesis: guía, no número de puerta.
                            CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                                 WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 AND COALESCE(numero_estimado_metodo, '') <> ALL(:excl)
                                  AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
                                      THEN '(' || numero_estimado || ')'
                                 ELSE 'S/N' END AS numero,
@@ -3773,7 +3786,8 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                 -- lo saca el regexp, así que (1234) ordena junto a 1234.
                 ORDER BY calle,
                          NULLIF(regexp_replace(numero, '\\D', '', 'g'), '')::bigint NULLS LAST
-            """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN}).fetchall()
+            """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN,
+                   "excl": list(_NUMERO_METODOS_EXCLUIDOS)}).fetchall()
         elif not plantilla:
             # Fallback BRA (survey sin baseline): layout de base de logradouros de operadora.
             # Una fila por DIRECCIÓN COMPLETA única (varias parcelas con la misma
