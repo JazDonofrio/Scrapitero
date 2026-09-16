@@ -64,6 +64,13 @@ MAX_DIST_EJE_M = 120.0
 DIST_ANCLA_BUENA_M = 80.0
 
 
+# Métodos de `numero_estimado` que valen como ANCLA y que este agente no puede pisar: son
+# alturas de un callejero OFICIAL, no una interpolación nuestra. Hoy sólo `arba_calles`
+# (`ARBACallesFetcher`), que en la provincia de Buenos Aires es lo único parecido a un
+# número real, porque ARBA no publica el domicilio de la parcela.
+_METODOS_ANCLA = ("arba_calles",)
+
+
 class NumeroEstimatorInput(BaseModel):
     survey_id: Optional[str] = None
     region_id: Optional[str] = None
@@ -358,7 +365,13 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
             SELECT p.parcela_id::text, p.calle, p.numero, p.centroid_lat, p.centroid_lng,
-                   p.cca_code, p.municipio, p.region_id
+                   p.cca_code, p.municipio, p.region_id,
+                   -- El número OFICIAL del callejero de ARBA (`ARBACallesFetcher`) vive en
+                   -- `numero_estimado`, no en `numero`: es interpolación sobre tramos
+                   -- oficiales y por eso no se escribe como dato del municipio. Pero como
+                   -- ancla vale tanto como uno real, y en PBA es lo único que hay — sin
+                   -- esto el agente lo ignora y sigue descartando calles por `pocas_anclas`.
+                   p.numero_estimado, p.numero_estimado_metodo
             FROM parcelas p
             WHERE {scope} AND p.calle IS NOT NULL AND p.calle <> ''
               AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
@@ -375,17 +388,24 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
     # Agrupar por núcleo de calle (tolerante a "RUA - X" vs "X", títulos, acentos).
     por_calle: dict = defaultdict(lambda: {"anclas": [], "targets": [], "raw": None})
     updates: list = []
-    for pid, calle, numero, lat, lng, cca, _mun, _reg in rows:
+    anclas_oficiales = 0
+    for pid, calle, numero, lat, lng, cca, _mun, _reg, num_est, met_est in rows:
         nuc = nucleo_calle(calle)
         if not nuc:
             continue
         g = por_calle[nuc]
         g["raw"] = g["raw"] or calle
         num = normalizar_numero(numero)          # '' cubre NULL, '', '0', 'S/N'
+        if not num and met_est in _METODOS_ANCLA:
+            num = normalizar_numero(num_est)     # altura oficial del callejero de ARBA
+            if num:
+                anclas_oficiales += 1
         if num:
             g["anclas"].append((int(num), float(lat), float(lng)))
         else:
             g["targets"].append((pid, float(lat), float(lng), cca, calle))
+    if anclas_oficiales:
+        logger.info(f"NumeroEstimator: {anclas_oficiales} anclas oficiales de callejero")
 
     # Anclas extra: la dirección que DECLARA cada comercio relevado (`comercios.tipos`, que
     # es el `freeform` de Overture y el `addr:street`+`addr:housenumber` de OSM). No se toca
@@ -594,11 +614,17 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
                              UNNEST(CAST(:mets AS text[])) AS met,
                              UNNEST(CAST(:confs AS float8[])) AS conf) d
                 WHERE parcelas.parcela_id = d.pid
+                  -- ⚠ Una altura OFICIAL del callejero no se reemplaza por una interpolada:
+                  -- el reset de arriba ya la respeta, pero sin esto el UPDATE la pisaba
+                  -- igual, porque la parcela entra como target cuando no tiene `numero`
+                  -- real. Medido en Merlo: una corrida se llevó puestas 23 de 301 anclas.
+                  AND COALESCE(parcelas.numero_estimado_metodo, '') <> ALL(:anclas)
             """), {
                 "ids": [u[0] for u in updates[i:i + 500]],
                 "nums": [u[1] for u in updates[i:i + 500]],
                 "mets": [u[2] for u in updates[i:i + 500]],
                 "confs": [u[3] for u in updates[i:i + 500]],
+                "anclas": list(_METODOS_ANCLA),
             })
 
     logger.info(f"NumeroEstimator: {out.estimadas}/{out.candidatas} números estimados en "

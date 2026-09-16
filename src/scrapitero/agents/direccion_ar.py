@@ -101,6 +101,13 @@ class DireccionARInput(BaseModel):
     # Merlo sólo 4.018 superaban el piso de confianza. Con `False` se vuelve al método viejo
     # (y no se toca el bulk de 1,12 GB, que la primera vez hay que bajar).
     usar_cuadras: bool = True
+    # Medir la distancia a la calle desde el POLÍGONO del lote y no desde su centro. El
+    # centro de un fondo de manzana o de un baldío grande queda a más de `max_dist_m` del
+    # eje aunque su FRENTE dé a la calle, y esas parcelas quedaban sin calle: 2.615 en
+    # Merlo. La proyección sobre el eje (para la altura y la vereda) se sigue haciendo con
+    # el centroide, que es lo que representa al lote. Cuesta traer la geometría completa,
+    # así que para barrer las 94.000 de una zona entera conviene apagarlo.
+    usar_poligono: bool = True
     dry_run: bool = False
     batch: int = 5000
 
@@ -314,7 +321,8 @@ def run(input: DireccionARInput) -> DireccionAROutput:
 
         cond = ("AND (calle IS NULL OR calle = '')" if input.solo_faltantes else "")
         filas = conn.execute(text(f"""
-            SELECT parcela_id::text, ST_AsGeoJSON(ST_Centroid(geometry)) g
+            SELECT parcela_id::text, ST_AsGeoJSON(ST_Centroid(geometry)) g,
+                   {"ST_AsGeoJSON(geometry)" if input.usar_poligono else "NULL"} AS gp
             FROM parcelas
             WHERE survey_id = CAST(:s AS uuid) AND geometry IS NOT NULL
               AND COALESCE(direccion_source, '')
@@ -370,10 +378,18 @@ def run(input: DireccionARInput) -> DireccionAROutput:
     arbol = STRtree(tramos)
 
     res, con_calle, con_num, lejos, n_cuadra = [], 0, 0, 0, 0
-    for pid, gj in filas:
+    for pid, gj, gpj in filas:
         pt = transform(proj, shape(__import__("json").loads(gj)))
-        i = arbol.nearest(pt)
-        d = tramos[i].distance(pt)
+        # El lote se BUSCA por su polígono (su frente toca la calle aunque su centro esté
+        # lejos) pero se PROYECTA por su centroide, que es lo que lo representa sobre el eje.
+        forma = pt
+        if gpj:
+            try:
+                forma = transform(proj, shape(__import__("json").loads(gpj)))
+            except Exception:  # noqa: BLE001
+                forma = pt
+        i = arbol.nearest(forma)
+        d = tramos[i].distance(forma)
         if d > input.max_dist_m:
             lejos += 1
             continue
@@ -431,21 +447,26 @@ def run(input: DireccionARInput) -> DireccionAROutput:
                     direccion_confidence = 0.5,
                     -- ⚠ `numero_estimado` NO es de este agente: `NumeroEstimator` estima en
                     -- la misma columna con los métodos `eje_*` (y en Brasil es el bueno, que
-                    -- interpola entre los números REALES del catastro). Sin esta guarda gana
+                    -- interpola entre los números REALES del catastro), y `ARBACallesFetcher`
+                    -- escribe ahí las alturas OFICIALES del callejero de ARBA (`arba_calles`),
+                    -- que valen más que cualquier interpolación nuestra. Sin esta guarda gana
                     -- el último que corre y cada agente deshace al otro en silencio, que es
                     -- justo el modo de falla que costó 75.656 estimaciones en Merlo. Acá se
                     -- respeta lo suyo; el reset de aquel agente ya respeta lo de éste.
                     numero_estimado = CASE
                         WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
                             THEN numero_estimado
                         ELSE COALESCE(:num, numero_estimado) END,
                     numero_estimado_metodo = CASE
                         WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
                             THEN numero_estimado_metodo
                         WHEN :num IS NULL THEN numero_estimado_metodo
                         ELSE :metodo END,
                     numero_estimado_confianza = CASE
                         WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
                             THEN numero_estimado_confianza
                         ELSE COALESCE(:conf, numero_estimado_confianza) END
                 WHERE parcela_id = CAST(:pid AS uuid)
