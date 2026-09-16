@@ -907,9 +907,15 @@ Brasil; cambia el layout. Columnas: `COD_OPERADORA`, `LOCALIDAD`, `PROVINCIA`, `
 argentino de `logradouro_br.py`: en AR la vía casi nunca trae tipo —"Arturo Jauretche"— y cuando
 lo trae viene abreviado —"Av. Vergara", "Pje. San Martín"—; si el primer token no es un tipo
 reconocido, `TIPO_CALLE` queda vacío y el texto va **entero** a `NOMBRE_CALLE`), `CODIGO_POSTAL`,
-`NUMERO`, `DIRECCION`, `TIPO_INMUEBLE`, `UF_VIVIENDA`, `UF_COMERCIO`. **Una fila por dirección
-única**, con la UF **sumada** de las parcelas que la comparten (a diferencia del layout brasilero,
-que no lleva UF).
+`NUMERO`, `DIRECCION`, `TIPO_INMUEBLE`, `UF_VIVIENDA`, `UF_COMERCIO`. ⚠ **Una fila por UNIDAD
+FUNCIONAL** (pedido del cliente, 16-sep-2026), no por dirección: es un inventario de unidades, así
+que un lote con 3 viviendas sale en **3 filas** con la misma dirección y `UF_VIVIENDA=1` cada una,
+y la parcela **sin UF declarada emite igual su fila** (0/0 y el `uso_principal` del catastro). De
+ahí la invariante: **el archivo nunca tiene menos filas que parcelas relevadas**. Antes agrupaba
+por dirección y sumaba la UF, y como el 78% de las parcelas de PBA sale `S/N` —ARBA no publica el
+número y el estimado no llega al piso de confianza— **todas las de una misma calle colapsaban en
+UNA fila**: Merlo daba **4.486 filas para 94.540 parcelas**; ahora da 102.284. El layout brasilero
+no lleva UF y sigue siendo una fila por dirección.
 - **Los nombres de columna son los del contrato de import `ARG`** (`_BASELINE_PERFILES`) a
   propósito: así el entregable se puede **volver a importar como baseline** del relevamiento
   siguiente sin traducir nada. Por eso `TIPO_INMUEBLE` sigue la MISMA regla que

@@ -3748,23 +3748,23 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
             rows = conn.execute(text("""
                 SELECT * FROM (
                     SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
-                           -- Sin número va `S/N`, igual que abajo y que `dxf_entrega`. Ojo:
-                           -- acá el GROUP BY incluye este campo, así que todos los inmuebles
-                           -- sin número de una misma calle colapsan en UNA fila con la UF
-                           -- sumada. Es lo correcto para un layout de base de calles (una
-                           -- fila por dirección), pero NO sirve como inventario de unidades.
+                           -- Sin número va `S/N`, igual que abajo y que `dxf_entrega`.
                            -- El estimado, entre paréntesis: guía, no número de puerta.
                            CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
                                 WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
                                  AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
                                      THEN '(' || numero_estimado || ')'
                                 ELSE 'S/N' END AS numero,
-                           SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
-                           SUM(COALESCE(uf_comercio, 0))::int AS uf_c,
-                           MIN(uso_principal) AS uso
+                           -- UNA FILA POR PARCELA, sin agrupar: el layout emite después una
+                           -- fila por unidad funcional (ver `_gen_ar`). Agrupando por
+                           -- dirección —como hacía antes— las parcelas sin número caían
+                           -- todas en la misma fila «S/N» de su calle: 4.486 filas para
+                           -- 94.540 parcelas de Merlo, que no es un inventario de unidades.
+                           COALESCE(uf_vivienda, 0)::int AS uf_v,
+                           COALESCE(uf_comercio, 0)::int AS uf_c,
+                           uso_principal AS uso
                     FROM parcelas
                     WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
-                    GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, 6
                 ) t
                 -- El orden va AFUERA, igual que en el layout brasilero: adentro `numero` ya
                 -- es la expresión agrupada y ordenar por la columna cruda revienta la
@@ -3950,7 +3950,7 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
             for municipio, prov, barrio, calle, cp, numero, uf_v, uf_c, uso in rows:
                 d = descomponer_calle(calle)
-                w.writerow([
+                base = [
                     perfil["cod_operadora"],
                     (municipio or loc_region or "").upper(),
                     (prov or prov_region or "").upper(),
@@ -3960,10 +3960,19 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                     cp or "",                    # ARBA/IDERA no publican código postal
                     numero or "",
                     " ".join(x for x in (calle, numero) if x),
-                    _tipo_inmueble(int(uf_v or 0), int(uf_c or 0), uso),
-                    int(uf_v or 0),
-                    int(uf_c or 0),
-                ])
+                ]
+                # UNA FILA POR UNIDAD FUNCIONAL (pedido del cliente, 16-sep-2026): el CSV es
+                # un inventario de unidades, no una lista de direcciones, así que un lote con
+                # 3 viviendas sale en 3 filas con la misma dirección y 1 UF cada una. La
+                # parcela SIN UF declarada emite igual su fila —existe y se relevó—, con 0/0
+                # y el uso del catastro: por eso el archivo nunca tiene menos filas que
+                # parcelas. En Merlo: 4.486 filas antes, 102.284 ahora.
+                unidades = ([(TIPO_VIV, 1, 0)] * int(uf_v or 0)
+                            + [(TIPO_COM, 0, 1)] * int(uf_c or 0))
+                if not unidades:
+                    unidades = [(_tipo_inmueble(0, 0, uso), 0, 0)]
+                for tipo, n_v, n_c in unidades:
+                    w.writerow(base + [tipo, n_v, n_c])
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
 
         return StreamingResponse(
