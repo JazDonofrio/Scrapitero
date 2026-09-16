@@ -1858,7 +1858,8 @@ async function importarBaseline(sid, btn) {
 
 /* ── Card render ───────────────────────────────────────────────── */
 function renderCard(s) {
-  SURVEY_PLANO[s.survey_id] = s.export_plano || null;   // lo lee descargarDxf
+  SURVEY_PLANO[s.survey_id] = s.export_plano || null;       // lo lee descargarDxf
+  SURVEY_CLIENTE[s.survey_id] = s.export_cliente || null;   // lo lee csvOperadora
   const sid = s.survey_id;
   const mapId = 'map-' + sid.replace(/-/g,'');
   const areaKm = s.area_total_m2 ? (s.area_total_m2/1e6).toFixed(2)+' km²' : '—';
@@ -2556,13 +2557,17 @@ async function runNumeros(sid, btn) {
 // (`export_plano` del survey), y entonces lleva el ID de célula (p.ej. VAZ049) en el
 // atributo `ID` de cada bloque. No lo sabemos nosotros: lo asigna el cliente por zona,
 // así que se pide acá en vez de inventar uno. Cancelar aborta; vacío genera sin ID.
-// El CSV de operadora lleva COD_CELULA, que asigna el cliente: se pide igual que para el
-// DXF en vez de dejar la columna vacía.
+// El ID de célula se pide SÓLO si el layout del cliente lo lleva (`pide_celula`): el
+// brasilero tiene COD_CELULA, el argentino no tiene esa columna y preguntarlo era pedirle
+// al operador un dato que después no se usa.
+const SURVEY_CLIENTE = {};
 function csvOperadora(ev, sid) {
   ev.preventDefault();
+  const url = `/api/surveys/${sid}/export/csv-operadora`;
+  if (!SURVEY_CLIENTE[sid]?.pide_celula) { window.location = url; return false; }
   const c = prompt(t('ID de célula del cliente (p.ej. VAZ049). Dejalo vacío si todavía no lo asignaron:'), '');
   if (c === null) return false;
-  window.location = `/api/surveys/${sid}/export/csv-operadora?celula_id=${encodeURIComponent(c.trim())}`;
+  window.location = `${url}?celula_id=${encodeURIComponent(c.trim())}`;
   return false;
 }
 

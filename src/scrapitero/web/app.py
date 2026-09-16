@@ -3494,6 +3494,7 @@ _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
     "BRA": {
         "etiqueta": "CSV Operadora",
         "descripcion": "Layout de base de logradouros de operadora (Brasil)",
+        "pide_celula": True,          # su layout lleva COD_CELULA
         "layout": "operadora_br",
         "tipos_uso": ("RESIDENCIAL", "COMERCIO EM GERAL"),
         "cod_operadora": CSV_OPERADORA_COD,
@@ -3512,8 +3513,12 @@ _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
     # (DIRECCION/LOCALIDAD/PROVINCIA/CODIGO_POSTAL/TIPO_INMUEBLE), así el entregable se
     # puede volver a importar como baseline del próximo relevamiento sin traducir nada.
     "ARG": {
-        "etiqueta": "CSV Operadora",
-        "descripcion": "Layout de base de calles de operadora (Argentina)",
+        # «Entrega» y no «Operadora»: el cliente argentino no es una operadora y el rótulo
+        # confundía (pedido del operador, 16-sep-2026). El brasilero conserva el suyo,
+        # que es el nombre de su contrato.
+        "etiqueta": "CSV Entrega",
+        "descripcion": "Layout de base de calles en español, una fila por dirección",
+        "pide_celula": False,         # su layout no tiene COD_CELULA
         "layout": "operadora_ar",
         "tipos_uso": ("RESIDENCIAL", "COMERCIAL"),
         "cod_operadora": CSV_OPERADORA_COD,
@@ -3532,7 +3537,10 @@ _EXPORT_PERFILES_CLIENTE: dict[str, dict] = {
         },
     },
 }
-_EXPORT_PERFIL_UI = ("etiqueta", "descripcion")
+# Lo que viaja al front. `pide_celula` dice si el CSV de ESE cliente lleva un ID de célula
+# que asigna él (el layout brasilero tiene COD_CELULA; el argentino no tiene esa columna):
+# sin esto el front preguntaba siempre, incluso donde el dato no se usa para nada.
+_EXPORT_PERFIL_UI = ("etiqueta", "descripcion", "pide_celula")
 
 
 _LOCALIDAD_REGION_CACHE: dict[str, tuple[str, str]] = {}
@@ -3738,31 +3746,33 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
             # esa dirección (a diferencia del layout brasilero, que no lleva UF: acá es el
             # dato del relevamiento y el que permite re-importar el archivo como baseline).
             rows = conn.execute(text("""
-                SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
-                       -- Sin número va `S/N`, igual que arriba y que `dxf_entrega`. Ojo: acá
-                       -- el GROUP BY incluye este campo, así que todos los inmuebles sin
-                       -- número de una misma calle colapsan en UNA fila con la UF sumada.
-                       -- Es lo correcto para un layout de base de calles (una fila por
-                       -- dirección), pero NO sirve como inventario de unidades.
-                       -- El estimado, entre paréntesis: guía, no número de puerta.
-                       CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
-                            WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
-                             AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
-                                 THEN '(' || numero_estimado || ')'
-                            ELSE 'S/N' END AS numero,
-                       SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
-                       SUM(COALESCE(uf_comercio, 0))::int AS uf_c,
-                       MIN(uso_principal) AS uso
-                FROM parcelas
-                WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
-                GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, 6
+                SELECT * FROM (
+                    SELECT municipio, estado_provincia, barrio, calle, codigo_postal,
+                           -- Sin número va `S/N`, igual que abajo y que `dxf_entrega`. Ojo:
+                           -- acá el GROUP BY incluye este campo, así que todos los inmuebles
+                           -- sin número de una misma calle colapsan en UNA fila con la UF
+                           -- sumada. Es lo correcto para un layout de base de calles (una
+                           -- fila por dirección), pero NO sirve como inventario de unidades.
+                           -- El estimado, entre paréntesis: guía, no número de puerta.
+                           CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
+                                WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 AND COALESCE(NULLIF(numero_estimado, '0'), '') <> ''
+                                     THEN '(' || numero_estimado || ')'
+                                ELSE 'S/N' END AS numero,
+                           SUM(COALESCE(uf_vivienda, 0))::int AS uf_v,
+                           SUM(COALESCE(uf_comercio, 0))::int AS uf_c,
+                           MIN(uso_principal) AS uso
+                    FROM parcelas
+                    WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
+                    GROUP BY municipio, estado_provincia, barrio, calle, codigo_postal, 6
+                ) t
+                -- El orden va AFUERA, igual que en el layout brasilero: adentro `numero` ya
+                -- es la expresión agrupada y ordenar por la columna cruda revienta la
+                -- consulta con "must appear in the GROUP BY clause". Pasó de verdad: el
+                -- botón del CSV daba 500 en Merlo (16-sep-2026). El paréntesis del estimado
+                -- lo saca el regexp, así que (1234) ordena junto a 1234.
                 ORDER BY calle,
-                         NULLIF(regexp_replace(COALESCE(
-                             CASE WHEN COALESCE(NULLIF(numero, '0'), '') <> '' THEN numero
-                                  WHEN COALESCE(numero_estimado_confianza, 0) >= :conf
-                                       THEN numero_estimado
-                                  ELSE NULL END, ''), '\\D', '', 'g'), '')::bigint
-                           NULLS LAST
+                         NULLIF(regexp_replace(numero, '\\D', '', 'g'), '')::bigint NULLS LAST
             """), {"sid": survey_id, "conf": _NUMERO_CONF_MIN}).fetchall()
         elif not plantilla:
             # Fallback BRA (survey sin baseline): layout de base de logradouros de operadora.
