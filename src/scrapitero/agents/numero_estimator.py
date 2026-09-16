@@ -78,6 +78,26 @@ class NumeroEstimatorInput(BaseModel):
     usar_osm: bool = True          # False → sólo eje PCA (sin tocar Overpass)
     dry_run: bool = False          # calcula y devuelve, no escribe
     max_detalle: int = 400         # filas de detalle en la salida
+    # Sumar como anclas las direcciones que DECLARAN los comercios ya relevados
+    # (`comercios.tipos`, de Overture y OSM). En Brasil el catastro publica el número y las
+    # anclas sobran; en la provincia de Buenos Aires ARBA no lo publica y quedan 165 anclas
+    # para 750 calles, así que el agente descarta casi todo por `pocas_anclas`. Medido en
+    # Merlo: 1.898 anclas válidas en 167 calles con ≥2, que cubren 32.210 parcelas.
+    # ⚠ Default **False**: medido en Merlo el 16-sep-2026, las anclas de comercios NO mejoran
+    # el número contra las dos verdades independientes (vecino con número real: mediana 17 vs
+    # 19 de las cuadras; parcelas con número de Google: 20 vs 9), cubren 4× menos parcelas y su
+    # modo de falla es peor — confunden calles HOMÓNIMAS, que `_misma_calle` no distingue
+    # (Beruti tiene 4 `calle_id`, Sáenz Peña 5, Pueyrredón 6): declaran 229 donde la cuadra
+    # dice 1722. Y producen fallos catastróficos con confianza ALTA (Av. Perón: declarado 699,
+    # estimado 25.744, confianza 0,72). El número lo pone `DireccionAR` con las cuadras de
+    # georef. Se deja la opción porque sirven como DETECTOR: donde cuadra y ancla difieren en
+    # más de 300 (1.946 parcelas en Merlo) hay algo para mirar a mano — ahí apareció que los
+    # rangos de georef en Av. Eva Perón están corridos ~2.700.
+    anclas_poi: bool = False
+    # Un comercio en una esquina declara la OTRA calle: si la declarada no coincide con la de
+    # su parcela, su número pertenece a otra numeración y como ancla arrastra el tramo entero.
+    # Medido en Merlo: 919 de 2.852 (32%) declaran otra calle.
+    anclas_poi_exigir_calle: bool = True
 
 
 class NumeroEstimatorOutput(BaseModel):
@@ -86,6 +106,7 @@ class NumeroEstimatorOutput(BaseModel):
     survey_id: Optional[str] = None
     region_id: Optional[str] = None
     candidatas: int = 0            # parcelas con calle pero sin número utilizable
+    anclas_poi_usadas: int = 0     # direcciones declaradas por comercios usadas como ancla
     estimadas: int = 0
     sin_estimar: int = 0
     calles: int = 0                # calles con al menos una estimación
@@ -297,7 +318,11 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
     from shapely.ops import transform as shp_transform
 
     from scrapitero.agents.baseline_interp import _osm_geometrias, _stitch
-    from scrapitero.agents.direccion_norm import normalizar_numero, nucleo_calle
+    from scrapitero.agents.direccion_norm import (normalizar_numero, nucleo_calle,
+                                                  separar_numero)
+    # La MISMA comparación de calles que usa la guarda de número ajeno de Overture: si se
+    # escribe otra acá, las dos se desincronizan y el ancla de una esquina entra sin avisar.
+    from scrapitero.agents.overture_places_fetcher import _misma_calle
 
     out = NumeroEstimatorOutput(survey_id=input.survey_id, region_id=input.region_id)
     if not input.survey_id and not input.region_id:
@@ -361,6 +386,35 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
             g["anclas"].append((int(num), float(lat), float(lng)))
         else:
             g["targets"].append((pid, float(lat), float(lng), cca, calle))
+
+    # Anclas extra: la dirección que DECLARA cada comercio relevado (`comercios.tipos`, que
+    # es el `freeform` de Overture y el `addr:street`+`addr:housenumber` de OSM). No se toca
+    # `parcelas.numero`: son anclas de referencia para interpolar, no dato del catastro.
+    if input.anclas_poi:
+        with engine.connect() as conn:
+            poi = conn.execute(text(f"""
+                SELECT c.tipos, p.calle, p.centroid_lat, p.centroid_lng
+                FROM comercios c JOIN parcelas p ON p.parcela_id = c.parcela_id
+                WHERE {scope} AND c.tipos ~ '\\d'
+                  AND p.calle IS NOT NULL AND p.calle <> ''
+                  AND p.centroid_lat IS NOT NULL AND p.centroid_lng IS NOT NULL
+            """), params).fetchall()
+        descartadas_calle = 0
+        for tipos, calle_p, la, lo in poi:
+            calle_dec, num = separar_numero(tipos)
+            num = normalizar_numero(num)
+            if not num or not num.isdigit():
+                continue
+            if input.anclas_poi_exigir_calle and not _misma_calle(calle_dec, calle_p):
+                descartadas_calle += 1
+                continue
+            nuc = nucleo_calle(calle_p)
+            if not nuc or nuc not in por_calle:
+                continue
+            por_calle[nuc]["anclas"].append((int(num), float(la), float(lo)))
+            out.anclas_poi_usadas += 1
+        logger.info(f"NumeroEstimator: {out.anclas_poi_usadas} anclas de comercios sumadas "
+                    f"({descartadas_calle} descartadas por declarar otra calle)")
 
     out.candidatas = sum(len(g["targets"]) for g in por_calle.values())
     if not out.candidatas:
@@ -515,11 +569,21 @@ def run(input: NumeroEstimatorInput) -> NumeroEstimatorOutput:
     # Escritura: SOLO las columnas *_estimado (parcelas.numero es del municipio, no se toca).
     # Idempotente: limpia el alcance y reescribe (una parcela que recuperó su número real en un
     # re-scrape deja de tener estimación).
+    #
+    # ⚠ El reset limpia SÓLO lo que escribió este agente (`numero_estimado_metodo` empieza por
+    # `eje_`) o lo que quedó sin método. La columna NO es suya: `DireccionAR` estima ahí con
+    # `georef_osm` para toda la provincia de Buenos Aires, donde ARBA no publica el número.
+    # Sin esta guarda el reset vaciaba el alcance entero: medido en Merlo el 16-sep-2026, una
+    # corrida se llevó puestas **75.656 estimaciones** de `DireccionAR` (4.323 por encima del
+    # piso de confianza) y las reemplazó por 1.232 propias — el relevamiento quedó peor que
+    # antes de correrlo y hubo que recorrer `DireccionAR` para recuperarlas.
     with engine.begin() as conn:
         conn.execute(text(f"""
             UPDATE parcelas p SET numero_estimado = NULL, numero_estimado_metodo = NULL,
                                   numero_estimado_confianza = NULL
             WHERE {scope} AND p.numero_estimado IS NOT NULL
+              AND (p.numero_estimado_metodo IS NULL
+                   OR p.numero_estimado_metodo LIKE 'eje\\_%' ESCAPE '\\')
         """), params)
         for i in range(0, len(updates), 500):
             conn.execute(text("""

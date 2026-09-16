@@ -57,6 +57,8 @@ pdf_downloads/
 # === Dumps de datos descargados (no código) ===
 cadastur_dump/
 receita_dump/
+# cuadras de georef filtradas por partido (45 MB hoy), se rebajan del bulk si faltan
+georef_dump/
 
 # === Paquetes pre-compilados para Hermes container ===
 .hermes-packages/

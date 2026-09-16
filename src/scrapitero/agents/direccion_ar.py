@@ -67,6 +67,7 @@ from shapely.strtree import STRtree
 from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
+from scrapitero.agents import georef_cuadras
 from scrapitero.agents.direccion_norm import normalizar_calle, nucleo_calle
 from scrapitero.agents.precedencia import (DIRECCION_FUENTE_PROTEGIDA,
                                            DIRECCION_FUENTES_PROTEGIDAS)
@@ -77,6 +78,10 @@ _GEOREF = "https://apis.datos.gob.ar/georef/api"
 # CSV y la ficha de procedencia tienen que poder decirlo.
 _FUENTE = "osm_georef"
 _METODO = "georef_osm"
+# La altura salió del rango de LA CUADRA (georef bulk), no del de la calle entera. Se sella
+# distinto para poder medir cuál de los dos puso cada número: son métodos con precisión muy
+# distinta y el CSV y la ficha de procedencia tienen que poder distinguirlos.
+_METODO_CUADRA = "georef_cuadra"
 
 
 class DireccionARInput(BaseModel):
@@ -91,6 +96,11 @@ class DireccionARInput(BaseModel):
     # rango oficial (que es de la calle entera) se estira sobre el tramo y da números absurdos.
     margen_km: float = 3.0
     solo_faltantes: bool = True
+    # Interpolar contra el rango de CADA CUADRA (georef bulk) en vez del de la calle entera.
+    # Es lo que decide si el número sirve: con el rango global, de 76.629 estimaciones de
+    # Merlo sólo 4.018 superaban el piso de confianza. Con `False` se vuelve al método viejo
+    # (y no se toca el bulk de 1,12 GB, que la primera vez hay que bajar).
+    usar_cuadras: bool = True
     dry_run: bool = False
     batch: int = 5000
 
@@ -103,6 +113,7 @@ class DireccionAROutput(BaseModel):
     sin_calle_cerca: int = 0
     calles_osm: int = 0
     calles_oficiales: int = 0
+    con_numero_cuadra: int = 0     # cuántos salieron por cuadra (el resto, por calle entera)
     partidos: list[str] = []
     escritas: int = 0
     error: Optional[str] = None
@@ -163,6 +174,67 @@ def _callejero(partidos: list[str]) -> dict[str, tuple]:
             if not r.get("calles"):
                 break
     return out
+
+
+def _preparar_cuadras(cuadras: dict[str, list[dict]], proj) -> dict[str, list[tuple]]:
+    """Las cuadras de georef proyectadas a metros: {calle_norm: [(linea, rangos...), ...]}."""
+    out: dict[str, list[tuple]] = {}
+    for k, lista in cuadras.items():
+        for c in lista:
+            try:
+                linea = transform(proj, LineString(c["coords"]))
+            except Exception:  # noqa: BLE001
+                continue
+            if linea.length <= 0:
+                continue
+            out.setdefault(k, []).append(
+                (linea, c["ini_der"], c["fin_der"], c["ini_izq"], c["fin_izq"]))
+    return out
+
+
+def _numero_por_cuadra(cuadras: list[tuple], pt, max_dist_m: float):
+    """Altura interpolada dentro de la CUADRA donde cae la parcela, y su confianza.
+
+    Es lo que reemplaza a estirar el rango de la calle entera sobre todo su eje: una calle de
+    Merlo tiene 9 cuadras de mediana, así que el rango global daba un número cualquiera y la
+    confianza salía en 0,2. Acá el tramo mide ~100 m y su rango son ~100 números.
+
+    El lado decide la paridad: se usa el rango de la vereda donde cae la parcela y, si ese
+    lado no lo publica (`0`, el sentinela de georef), se cae al otro corrigiendo la paridad.
+    Vale la misma advertencia que el resto del módulo: cuál vereda es «derecha» depende del
+    sentido del tramo, así que lo garantizado es que los dos lados queden con paridades
+    distintas y consistentes, no que «derecha» sea un lado físico fijo.
+    """
+    mejor, dmin = None, None
+    for c in cuadras:
+        d = c[0].distance(pt)
+        if dmin is None or d < dmin:
+            mejor, dmin = c, d
+    if mejor is None or dmin > max_dist_m:
+        return None, None
+    linea, ini_der, fin_der, ini_izq, fin_izq = mejor
+    izquierda = _lado(linea, pt) > 0
+    ini, fin = (ini_izq, fin_izq) if izquierda else (ini_der, fin_der)
+    presta = False
+    if not (ini and fin):                      # ese lado no publica rango: se usa el otro
+        ini, fin = (ini_der, fin_der) if izquierda else (ini_izq, fin_izq)
+        presta = True
+    if not (ini and fin):
+        return None, None
+    frac = min(max(linea.project(pt) / linea.length, 0.0), 1.0)
+    n = int(round(ini + frac * (fin - ini)))
+    if presta:                                 # el rango prestado es de la otra vereda
+        n += 1
+    n = max(n, 1)
+    # Confianza: alta por construcción (el tramo es una cuadra), penalizada por la distancia
+    # al eje y por un rango de cuadra desmesurado (una «cuadra» de 1.000 números no es tal).
+    amplitud = abs(fin - ini)
+    conf = 0.8 * (1 - min(dmin / max(max_dist_m, 1.0), 1.0) * 0.5)
+    if amplitud > 400:
+        conf *= 0.7
+    if presta:
+        conf *= 0.9
+    return n, round(max(0.2, min(0.85, conf)), 2)
 
 
 def _vias_osm(bbox) -> list[tuple[str, LineString]]:
@@ -264,7 +336,22 @@ def run(input: DireccionARInput) -> DireccionAROutput:
     vias = _vias_osm(ancho)
     logger.info(f"direccion_ar: {len(vias)} vías de OSM, {len(oficial)} calles oficiales")
 
+    # Cuadras oficiales: el rango de altura de cada cuadra con su geometría. Es lo que hace
+    # que la interpolación valga algo — ver `georef_cuadras`. Best-effort: si el bulk no está
+    # y no se puede bajar, se sigue con el rango de la calle entera como hasta ahora.
+    cuadras_raw: dict = {}
+    if input.usar_cuadras:
+        try:
+            dep_ids = [d for d in (georef_cuadras.departamento_id(p) for p in partidos) if d]
+            cuadras_raw = georef_cuadras.cargar(dep_ids)
+            logger.info(f"direccion_ar: {sum(len(v) for v in cuadras_raw.values())} cuadras "
+                        f"oficiales en {len(cuadras_raw)} calles ({dep_ids})")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"direccion_ar: sin cuadras oficiales ({exc}); se usa el rango "
+                           "de la calle entera")
+
     proj = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32721", always_xy=True).transform
+    cuadras_m = _preparar_cuadras(cuadras_raw, proj) if cuadras_raw else {}
     # Un eje cosido por nombre (para interpolar la altura) y el índice de todos los tramos
     # (para saber qué calle le toca a cada parcela).
     tramos, nombres = [], []
@@ -282,7 +369,7 @@ def run(input: DireccionARInput) -> DireccionAROutput:
             ejes[nm] = max(ls, key=lambda x: x.length)
     arbol = STRtree(tramos)
 
-    res, con_calle, con_num, lejos = [], 0, 0, 0
+    res, con_calle, con_num, lejos, n_cuadra = [], 0, 0, 0, 0
     for pid, gj in filas:
         pt = transform(proj, shape(__import__("json").loads(gj)))
         i = arbol.nearest(pt)
@@ -292,10 +379,20 @@ def run(input: DireccionARInput) -> DireccionAROutput:
             continue
         nm = nombres[i]
         con_calle += 1
-        numero, conf = None, None
-        rango = _buscar_rango(normalizar_calle(nm), oficial)
+        numero, conf, metodo = None, None, _METODO
+        nm_norm = normalizar_calle(nm)
+        # 1º la CUADRA (rango de ~100 números sobre ~100 m). 2º, si esa calle no tiene
+        # cuadras publicadas, el rango de la calle entera, que es lo que había antes.
+        cu = cuadras_m.get(nm_norm)
+        if cu:
+            numero, conf = _numero_por_cuadra(cu, pt, input.max_dist_m)
+            if numero is not None:
+                metodo = _METODO_CUADRA
+                con_num += 1
+                n_cuadra += 1
+        rango = _buscar_rango(nm_norm, oficial)
         eje = ejes.get(nm)
-        if rango and eje is not None and eje.length > 0:
+        if numero is None and rango and eje is not None and eje.length > 0:
             _, ini, fin, izq_par = rango
             frac = min(max(eje.project(pt) / eje.length, 0.0), 1.0)
             n = ini + frac * (fin - ini)
@@ -310,12 +407,12 @@ def run(input: DireccionARInput) -> DireccionAROutput:
             # está bien asignada), y el rango largo diluye la interpolación.
             conf = round(max(0.15, min(0.6, (1 - d / input.max_dist_m) * 0.6
                                        * (1 if (fin - ini) < 3000 else 0.7))), 2)
-        res.append((pid, nm, numero, conf))
+        res.append((pid, nm, numero, conf, metodo))
 
     out = DireccionAROutput(
         ok=True, parcelas=len(filas), con_calle=con_calle, con_numero=con_num,
         sin_calle_cerca=lejos, calles_osm=len(por_nombre), calles_oficiales=len(oficial),
-        partidos=partidos)
+        con_numero_cuadra=n_cuadra, partidos=partidos)
     if input.dry_run:
         logger.info(f"direccion_ar (dry-run): {out.model_dump()}")
         return out
@@ -332,15 +429,30 @@ def run(input: DireccionARInput) -> DireccionAROutput:
                     calle = :calle,
                     direccion_source = :fuente,
                     direccion_confidence = 0.5,
-                    numero_estimado = COALESCE(:num, numero_estimado),
-                    numero_estimado_metodo = CASE WHEN :num IS NULL
-                        THEN numero_estimado_metodo ELSE :metodo END,
-                    numero_estimado_confianza = COALESCE(:conf, numero_estimado_confianza)
+                    -- ⚠ `numero_estimado` NO es de este agente: `NumeroEstimator` estima en
+                    -- la misma columna con los métodos `eje_*` (y en Brasil es el bueno, que
+                    -- interpola entre los números REALES del catastro). Sin esta guarda gana
+                    -- el último que corre y cada agente deshace al otro en silencio, que es
+                    -- justo el modo de falla que costó 75.656 estimaciones en Merlo. Acá se
+                    -- respeta lo suyo; el reset de aquel agente ya respeta lo de éste.
+                    numero_estimado = CASE
+                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                            THEN numero_estimado
+                        ELSE COALESCE(:num, numero_estimado) END,
+                    numero_estimado_metodo = CASE
+                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                            THEN numero_estimado_metodo
+                        WHEN :num IS NULL THEN numero_estimado_metodo
+                        ELSE :metodo END,
+                    numero_estimado_confianza = CASE
+                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                            THEN numero_estimado_confianza
+                        ELSE COALESCE(:conf, numero_estimado_confianza) END
                 WHERE parcela_id = CAST(:pid AS uuid)
                   AND COALESCE(direccion_source, '')
                       NOT IN {DIRECCION_FUENTES_PROTEGIDAS}
             """), [{"pid": p, "calle": c, "num": (str(n) if n is not None else None), "conf": cf,
-                    "fuente": _FUENTE, "metodo": _METODO} for p, c, n, cf in lote])
+                    "fuente": _FUENTE, "metodo": mt} for p, c, n, cf, mt in lote])
             escritas += len(lote)
             logger.info(f"direccion_ar: {escritas}/{len(res)} escritas")
     out.escritas = escritas
