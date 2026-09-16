@@ -64,11 +64,21 @@ MAX_DIST_EJE_M = 120.0
 DIST_ANCLA_BUENA_M = 80.0
 
 
-# Métodos de `numero_estimado` que valen como ANCLA y que este agente no puede pisar: son
-# alturas de un callejero OFICIAL, no una interpolación nuestra. Hoy sólo `arba_calles`
-# (`ARBACallesFetcher`), que en la provincia de Buenos Aires es lo único parecido a un
-# número real, porque ARBA no publica el domicilio de la parcela.
-_METODOS_ANCLA = ("arba_calles",)
+# Métodos de `numero_estimado` que este agente NO puede pisar.
+#
+# `arba_calles` (`ARBACallesFetcher`) son alturas de un callejero OFICIAL, no una
+# interpolación nuestra: en la provincia de Buenos Aires es lo único parecido a un número
+# real, porque ARBA no publica el domicilio de la parcela.
+#
+# ⚠ `georef_cuadra` (`DireccionAR`) también entra, y hace falta: interpola contra el rango
+# de CADA CUADRA, que mide **mediana 9-19 de error**, contra los `eje_*` de este agente,
+# que en PBA dependen de unas pocas anclas y extrapolan. Sin esta guarda el UPDATE final
+# los reemplazaba igual —el reset ya los respetaba, pero la parcela entra como target
+# porque no tiene `numero` real—: medido en Merlo el 16-sep-2026, una corrida cambió
+# **5.814 números de cuadra** por interpolaciones propias, 3.365 de ellas extrapolaciones
+# con confianza 0,13-0,25, y la cobertura del CSV BAJÓ de 60.521 a 60.198. Este agente
+# suma donde no hay nada; no reemplaza un método mejor.
+_METODOS_ANCLA = ("arba_calles", "georef_cuadra")
 
 
 class NumeroEstimatorInput(BaseModel):
