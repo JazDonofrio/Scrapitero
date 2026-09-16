@@ -51,7 +51,13 @@ DIRECCION_FUENTE_PROTEGIDA = "manual"
 # Merlo, las 165 direcciones que Google alcanzó a resolver antes de que se frenara el gasto
 # habrían pasado a decir `osm_georef`, o sea un dato peor firmado con otro origen.
 DIRECCION_FUENTES_PROTEGIDAS = ("('manual','catastro','catastro_interp','google_maps',"
-                                "'google_geocode','mapbox','bci_pdf','smartgis_vg')")
+                                "'google_geocode','mapbox','bci_pdf','smartgis_vg',"
+                                "'arba_carto')")
+# `arba_carto` va en la lista aunque hoy no aparezca en ninguna parcela: es el **domicilio
+# registral** que publica la ficha de la partida, o sea catastro, y jamás lo puede pisar una
+# inferencia por cercanía. Medido en Merlo el 16-sep-2026: de 76.113 parcelas consultadas a
+# `carto.arba.gov.ar`, **ninguna** trajo domicilio — el `getInfo` no lo expone para este
+# partido. Si algún día aparece (otro partido, otro endpoint), ya queda protegido.
 
 # Sellos de `uso_fuente` que NO pisa un fetcher de catastro al deducir el uso desde sus UF.
 # El catastro sabe CUÁNTAS unidades hay, pero no si alguna es comercio: eso lo saben las
