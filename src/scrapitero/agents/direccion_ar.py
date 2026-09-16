@@ -68,7 +68,8 @@ from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.direccion_norm import normalizar_calle, nucleo_calle
-from scrapitero.agents.precedencia import DIRECCION_FUENTE_PROTEGIDA
+from scrapitero.agents.precedencia import (DIRECCION_FUENTE_PROTEGIDA,
+                                           DIRECCION_FUENTES_PROTEGIDAS)
 from scrapitero.db.engine import get_engine
 
 _GEOREF = "https://apis.datos.gob.ar/georef/api"
@@ -244,8 +245,9 @@ def run(input: DireccionARInput) -> DireccionAROutput:
             SELECT parcela_id::text, ST_AsGeoJSON(ST_Centroid(geometry)) g
             FROM parcelas
             WHERE survey_id = CAST(:s AS uuid) AND geometry IS NOT NULL
-              AND COALESCE(direccion_source, '') <> :prot {cond}"""),
-            {"s": sid, "prot": DIRECCION_FUENTE_PROTEGIDA}).fetchall()
+              AND COALESCE(direccion_source, '')
+                  NOT IN {DIRECCION_FUENTES_PROTEGIDAS} {cond}"""),
+            {"s": sid}).fetchall()
 
     if not filas:
         return DireccionAROutput(ok=True, parcelas=0)
@@ -335,7 +337,8 @@ def run(input: DireccionARInput) -> DireccionAROutput:
                         THEN numero_estimado_metodo ELSE :metodo END,
                     numero_estimado_confianza = COALESCE(:conf, numero_estimado_confianza)
                 WHERE parcela_id = CAST(:pid AS uuid)
-                  AND COALESCE(direccion_source, '') <> '{DIRECCION_FUENTE_PROTEGIDA}'
+                  AND COALESCE(direccion_source, '')
+                      NOT IN {DIRECCION_FUENTES_PROTEGIDAS}
             """), [{"pid": p, "calle": c, "num": (str(n) if n is not None else None), "conf": cf,
                     "fuente": _FUENTE, "metodo": _METODO} for p, c, n, cf in lote])
             escritas += len(lote)

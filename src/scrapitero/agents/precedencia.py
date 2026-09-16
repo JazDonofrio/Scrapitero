@@ -44,6 +44,15 @@ UF_FUENTES_POI = "('overture','poi')"
 # Sello de `direccion_source` que nunca se pisa: la dirección corregida a mano.
 DIRECCION_FUENTE_PROTEGIDA = "manual"
 
+# Fuentes de dirección que NO puede pisar una inferencia por cercanía (`osm_georef`, que
+# elige la calle por el eje más próximo). Todas son mejores que eso: el catastro publica la
+# dirección, y lo geocodificado se pagó. Hace falta porque `DireccionAR` corrido sobre TODAS
+# las parcelas —y no sólo sobre las que no tienen calle— reescribía `calle` y el sello: en
+# Merlo, las 165 direcciones que Google alcanzó a resolver antes de que se frenara el gasto
+# habrían pasado a decir `osm_georef`, o sea un dato peor firmado con otro origen.
+DIRECCION_FUENTES_PROTEGIDAS = ("('manual','catastro','catastro_interp','google_maps',"
+                                "'google_geocode','mapbox','bci_pdf','smartgis_vg')")
+
 # Sellos de `uso_fuente` que NO pisa un fetcher de catastro al deducir el uso desde sus UF.
 # El catastro sabe CUÁNTAS unidades hay, pero no si alguna es comercio: eso lo saben las
 # fuentes de negocios. Un 'residencial' inferido de las UF nunca debe degradar el
