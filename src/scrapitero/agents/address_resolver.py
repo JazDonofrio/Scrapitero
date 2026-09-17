@@ -61,6 +61,23 @@ class AddressResolverInput(BaseModel):
     # 500 consultas caen casi todas en la misma calle (las parcelas se insertaron por cuadra),
     # así que la muestra mide una esquina del partido y no el partido.
     orden_aleatorio: bool = False
+    # MODO ANCLA: en vez de preguntarle a Google el número de CADA lote que falta, se le
+    # pregunta el de unos pocos repartidos a lo largo de cada calle y después
+    # `NumeroEstimator` interpola el resto entre ellos — que es lo que ya hace con las
+    # alturas de ARBA y con las cuadras de georef. La diferencia es de dos órdenes de
+    # magnitud: medido en Merlo el 17-sep-2026, numerar las 18.546 parcelas sin altura
+    # cuesta ~USD 93 preguntando una por una y **1.806 consultas** pidiendo una ancla cada
+    # 15 lotes — o sea entra en el tramo gratuito mensual de Google (10.000 llamadas por
+    # SKU) y sale sin gastar.
+    #
+    # Las anclas se reparten sobre el EJE de la calle (orden por componente principal de sus
+    # parcelas), no al azar: lo que decide el error de la interpolación es la distancia al
+    # ancla más cercana, así que tres anclas juntas en una punta no sirven de nada. Las
+    # calles de 1 o 2 parcelas se preguntan enteras: interpolar entre dos puntos no ahorra.
+    anclas_por_calle: bool = False
+    anclas_cada: int = 15          # 1 ancla cada N parcelas sin número
+    anclas_min: int = 3            # mínimo por calle (lo que `NumeroEstimator` exige)
+    anclas_max: int = 60           # tope por calle, para que una avenida no se coma el lote
     numero_conf_min: float = 0.4
     numero_metodos_excluidos: list = ["georef_osm"]
 
@@ -305,6 +322,81 @@ def _fetch_parcelas_sin_direccion(
         ]
 
 
+def _anclas_por_calle(
+    engine, region_id: str, survey_id: Optional[str], tope: int,
+    cada: int, minimo: int, maximo: int, conf_min: float, excluidos: Optional[list]
+) -> list[dict]:
+    """Elige, por calle, unas pocas parcelas repartidas a lo largo del eje para preguntarle
+    el número a Google y usarlas después como anclas de la interpolación.
+
+    El reparto es por **componente principal** de la nube de puntos de la calle: una calle es
+    aproximadamente recta a escala de partido, así que proyectar sobre su eje mayor y tomar
+    posiciones equiespaciadas deja las anclas separadas de punta a punta. Ordenar por lat o
+    lng a secas fallaría en las calles diagonales, que en el conurbano son muchas.
+    """
+    import numpy as np
+
+    cond_excl = ""
+    params: dict = {"region": region_id}
+    if excluidos is not None:
+        cond_excl = """ AND NOT (numero_estimado IS NOT NULL
+                                 AND COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 AND COALESCE(numero_estimado_metodo, '') <> ALL(:excl))"""
+        params["conf"] = conf_min
+        params["excl"] = list(excluidos or ["georef_osm"])
+    cond_survey = ""
+    if survey_id:
+        cond_survey = " AND survey_id = :survey_id"
+        params["survey_id"] = survey_id
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT parcela_id::text, centroid_lat, centroid_lng, calle
+            FROM parcelas
+            WHERE region_id = :region
+              AND centroid_lat IS NOT NULL AND centroid_lng IS NOT NULL
+              AND calle IS NOT NULL AND calle <> ''
+              AND (numero IS NULL OR numero = '' OR numero = '0')
+              {cond_excl}{cond_survey}
+        """), params).fetchall()
+
+    por_calle: dict = {}
+    for pid, la, lo, calle in rows:
+        por_calle.setdefault(calle, []).append((pid, float(la), float(lo)))
+
+    elegidas: list[dict] = []
+    for calle, lst in sorted(por_calle.items(), key=lambda kv: -len(kv[1])):
+        n = len(lst)
+        if n <= 2:                       # preguntar las dos sale igual que anclarlas
+            k = n
+            orden = lst
+        else:
+            k = max(minimo, min(maximo, round(n / max(cada, 1))))
+            k = min(k, n)
+            pts = np.array([[p[1], p[2]] for p in lst], dtype=float)
+            centrado = pts - pts.mean(axis=0)
+            # eje mayor de la nube = 1er autovector de la covarianza
+            try:
+                _, _, vt = np.linalg.svd(centrado, full_matrices=False)
+                t = centrado @ vt[0]
+            except Exception:  # noqa: BLE001
+                t = centrado[:, 0]
+            orden = [lst[i] for i in np.argsort(t)]
+        # posiciones equiespaciadas sobre el eje (incluye las dos puntas)
+        if k >= len(orden):
+            sel = orden
+        else:
+            paso = (len(orden) - 1) / (k - 1) if k > 1 else 0
+            sel = [orden[int(round(i * paso))] for i in range(k)]
+        for pid, la, lo in sel:
+            elegidas.append({"parcela_id": pid, "lat": la, "lng": lo,
+                             "calle_existente": calle})
+
+    logger.info(f"AddressResolver: modo ancla — {len(elegidas)} anclas en {len(por_calle)} "
+                f"calles (cubren {len(rows)} parcelas sin número)")
+    return elegidas[:tope]
+
+
 def _update_parcela_direccion(conn, parcela_id: str, addr: dict, preserve_calle: bool = False) -> None:
     """Actualiza los campos de dirección de una parcela.
 
@@ -371,11 +463,16 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
     engine = get_engine()
 
     try:
-        parcelas = _fetch_parcelas_sin_direccion(
+        parcelas = (_anclas_por_calle(
+            engine, input.region_id, input.survey_id, input.batch_size,
+            input.anclas_cada, input.anclas_min, input.anclas_max,
+            input.numero_conf_min,
+            input.numero_metodos_excluidos if input.saltear_con_numero_util else None)
+            if input.anclas_por_calle else _fetch_parcelas_sin_direccion(
             engine, input.region_id, input.survey_id, input.batch_size, input.fill_partial,
             input.saltear_con_numero_util, input.numero_conf_min,
             input.numero_metodos_excluidos, input.orden_aleatorio
-        )
+        ))
         logger.info(
             f"AddressResolver [{input.region_id}] lang={language}: "
             f"{len(parcelas)} parcelas a resolver"
