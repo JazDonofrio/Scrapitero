@@ -113,6 +113,14 @@ class IncidenciasInput(BaseModel):
     # justo las extrapolaciones (más allá del último ancla de la calle), que es donde el
     # estimador mide peor. MISMO valor que usa el export — si se cambia, cambiar los dos.
     numero_conf_min: float = 0.4
+    # Métodos de estimación que el export NO deja salir al CSV por más confianza que declaren:
+    # `georef_osm` interpola sobre el rango de la calle ENTERA y mide mediana 998 de error, con
+    # el 77,7% de los casos en la cuadra equivocada. Espejo de `_NUMERO_METODOS_EXCLUIDOS` en
+    # `web/app.py` — si se cambia allá, cambiar acá. ⚠ Sin esto el filtro de este agente miraba
+    # sólo la confianza y los dos criterios no cerraban: la parcela con un `georef_osm` de
+    # confianza ≥ 0,4 salía S/N del CSV **y** no generaba tarjeta, o sea nadie podía cargarle la
+    # altura porque nadie sabía que le faltaba. Medido en Merlo el 17-sep-2026: 717 parcelas.
+    numero_metodos_excluidos: list = ["georef_osm"]
     # Superficie construida mínima para reclamar UF a una parcela que declara 0 unidades. Por
     # debajo puede ser un galpón/garaje sin unidad propia. En VG con 30 m² salen 13 casos
     # (mínimo 54). Aplica a las DOS vías de evidencia: el área construida del catastro donde la
@@ -409,7 +417,8 @@ def _casos_altura(conn, survey_id: str) -> list[dict]:
     return casos
 
 
-def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
+def _casos_numero_faltante(conn, survey_id: str, conf_min: float,
+                           excluidos: list) -> list[dict]:
     """Parcelas cuya altura no se puede dar por buena: ni el catastro la trae ni la
     interpolación llegó a una estimación confiable.
 
@@ -450,8 +459,9 @@ def _casos_numero_faltante(conn, survey_id: str, conf_min: float) -> list[dict]:
           AND p.calle IS NOT NULL AND p.calle <> ''
           AND (p.numero IS NULL OR p.numero = '' OR p.numero = '0')
           AND (p.numero_estimado IS NULL
-               OR COALESCE(p.numero_estimado_confianza, 0) < :conf)
-    """), {"sid": survey_id, "conf": conf_min}).fetchall()
+               OR COALESCE(p.numero_estimado_confianza, 0) < :conf
+               OR COALESCE(p.numero_estimado_metodo, '') = ANY(:excl))
+    """), {"sid": survey_id, "conf": conf_min, "excl": list(excluidos)}).fetchall()
 
     casos = []
     for r in rows:
@@ -883,7 +893,8 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
                                      input.dup_dist_m)
                  + _casos_altura(conn, input.survey_id)
                  + _casos_uf_imposible(conn, input.survey_id, input.m2_por_uf_min)
-                 + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min)
+                 + _casos_numero_faltante(conn, input.survey_id, input.numero_conf_min,
+                                         input.numero_metodos_excluidos)
                  + _casos_uf_sin_declarar(conn, input.survey_id, input.area_construida_min)
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
                                     input.lejos_calle_m)
