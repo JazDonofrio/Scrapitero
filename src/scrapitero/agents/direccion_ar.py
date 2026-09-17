@@ -68,7 +68,8 @@ from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
 from scrapitero.agents import georef_cuadras
-from scrapitero.agents.direccion_norm import normalizar_calle, nucleo_calle
+from scrapitero.agents.direccion_norm import (_TITULO_VALORES, _VIA_VALORES,
+                                             normalizar_calle, nucleo_calle)
 from scrapitero.agents.precedencia import (DIRECCION_FUENTE_PROTEGIDA,
                                            DIRECCION_FUENTES_PROTEGIDAS)
 from scrapitero.db.engine import get_engine
@@ -121,6 +122,11 @@ class DireccionAROutput(BaseModel):
     calles_osm: int = 0
     calles_oficiales: int = 0
     con_numero_cuadra: int = 0     # cuántos salieron por cuadra (el resto, por calle entera)
+    # De los de arriba, los que sólo aparearon con el callejero oficial por ALIAS de nombre
+    # (otra abreviatura, una inicial de más, el nombre de pila omitido). Sin el alias esas
+    # parcelas caían al rango de la calle entera y el CSV las descartaba: ver `_cuadras_de`.
+    con_numero_cuadra_alias: int = 0
+    calles_apareadas_por_alias: list = []
     partidos: list[str] = []
     escritas: int = 0
     error: Optional[str] = None
@@ -197,6 +203,67 @@ def _preparar_cuadras(cuadras: dict[str, list[dict]], proj) -> dict[str, list[tu
             out.setdefault(k, []).append(
                 (linea, c["ini_der"], c["fin_der"], c["ini_izq"], c["fin_izq"]))
     return out
+
+
+# El callejero oficial y OSM escriben la MISMA calle distinto, y el apareo exacto por
+# `normalizar_calle` perdía la cuadra —o sea el número— de calles enteras. Medido en Merlo el
+# 17-sep-2026 contra el dump de cuadras: 10.990 parcelas sin número estaban en 303 calles que
+# SÍ tienen cuadras publicadas, con el rango de todas ellas utilizable. Tres formas de
+# escribir la misma vía, las tres reales:
+#   · otra abreviatura del título   — `alm brown` (OSM) vs `almte brown` (georef), 531 lotes
+#   · una inicial en el medio       — `leandro alem` vs `leandro n alem`, 445 lotes
+#   · el nombre de pila omitido     — `jose terry` vs `terry`, 329 lotes; `jose marmol`, que
+#                                     el dump escribe de TRES maneras (`marmol`, `j marmol`,
+#                                     `marmol j`) y son la misma calle
+# Sin esto la parcela caía al rango de la calle entera (`georef_osm`), que mide **mediana 998
+# de error** y encima el CSV lo descarta por método: quedaba S/N teniendo la cuadra publicada.
+#
+# El apareo es por CONJUNTO de tokens distintivos, no por texto: así el orden no importa
+# (`alberdi juan bautista`) y las tres grafías de Mármol colapsan en una sola entrada cuyas
+# cuadras se unen. Cuando ni así coincide se admite **contención** (un lado trae el nombre de
+# pila y el otro no) con dos guardas: el candidato tiene que ser **ÚNICO** —si el nombre está
+# contenido en varias calles distintas no identifica a ninguna, la ambigüedad es la señal— y
+# el conjunto más corto tiene que aportar al menos un token **propio** (ni tipo de vía ni
+# título), o `avenida` sola aparearía cualquier avenida. La guarda final es geométrica y ya
+# estaba: `_numero_por_cuadra` sólo acepta una cuadra a ≤ `max_dist_m`, así que un homónimo de
+# otro partido del dump no llega a escribir nada.
+def _clave_tokens(nm_norm: str) -> frozenset:
+    """Tokens distintivos del nombre: se caen las iniciales sueltas (`leandro n alem`)."""
+    return frozenset(t for t in nm_norm.split() if len(t) > 1)
+
+
+def _propio(tokens: frozenset) -> bool:
+    """¿El conjunto aporta algo más que un tipo de vía o un título?"""
+    return any(len(t) > 3 and t not in _VIA_VALORES and t not in _TITULO_VALORES
+               for t in tokens)
+
+
+def _indice_cuadras(cuadras_m: dict[str, list[tuple]]) -> dict[frozenset, list[tuple]]:
+    """{conjunto de tokens: cuadras}, uniendo las grafías que son la misma calle."""
+    idx: dict[frozenset, list[tuple]] = {}
+    for k, v in cuadras_m.items():
+        tk = _clave_tokens(k)
+        if tk:
+            idx.setdefault(tk, []).extend(v)
+    return idx
+
+
+def _cuadras_de(nm_norm: str, cuadras_m: dict, idx: dict) -> tuple[Optional[list], bool]:
+    """Cuadras oficiales de esa calle. → (cuadras, si hizo falta aparear por alias)."""
+    cu = cuadras_m.get(nm_norm)
+    if cu:
+        return cu, False
+    tk = _clave_tokens(nm_norm)
+    if not tk:
+        return None, False
+    cand = idx.get(tk)
+    if cand:
+        return cand, True
+    contenidos = [v for k, v in idx.items()
+                  if k != tk and (k < tk or tk < k) and _propio(k if k < tk else tk)]
+    if len(contenidos) == 1:
+        return contenidos[0], True
+    return None, False
 
 
 def _numero_por_cuadra(cuadras: list[tuple], pt, max_dist_m: float):
@@ -377,7 +444,9 @@ def run(input: DireccionARInput) -> DireccionAROutput:
             ejes[nm] = max(ls, key=lambda x: x.length)
     arbol = STRtree(tramos)
 
-    res, con_calle, con_num, lejos, n_cuadra = [], 0, 0, 0, 0
+    idx_cuadras = _indice_cuadras(cuadras_m) if cuadras_m else {}
+    calles_alias: set = set()
+    res, con_calle, con_num, lejos, n_cuadra, n_alias = [], 0, 0, 0, 0, 0
     for pid, gj, gpj in filas:
         pt = transform(proj, shape(__import__("json").loads(gj)))
         # El lote se BUSCA por su polígono (su frente toca la calle aunque su centro esté
@@ -399,13 +468,16 @@ def run(input: DireccionARInput) -> DireccionAROutput:
         nm_norm = normalizar_calle(nm)
         # 1º la CUADRA (rango de ~100 números sobre ~100 m). 2º, si esa calle no tiene
         # cuadras publicadas, el rango de la calle entera, que es lo que había antes.
-        cu = cuadras_m.get(nm_norm)
+        cu, por_alias = _cuadras_de(nm_norm, cuadras_m, idx_cuadras)
         if cu:
             numero, conf = _numero_por_cuadra(cu, pt, input.max_dist_m)
             if numero is not None:
                 metodo = _METODO_CUADRA
                 con_num += 1
                 n_cuadra += 1
+                if por_alias:
+                    n_alias += 1
+                    calles_alias.add(nm)
         rango = _buscar_rango(nm_norm, oficial)
         eje = ejes.get(nm)
         if numero is None and rango and eje is not None and eje.length > 0:
@@ -428,7 +500,8 @@ def run(input: DireccionARInput) -> DireccionAROutput:
     out = DireccionAROutput(
         ok=True, parcelas=len(filas), con_calle=con_calle, con_numero=con_num,
         sin_calle_cerca=lejos, calles_osm=len(por_nombre), calles_oficiales=len(oficial),
-        con_numero_cuadra=n_cuadra, partidos=partidos)
+        con_numero_cuadra=n_cuadra, con_numero_cuadra_alias=n_alias,
+        calles_apareadas_por_alias=sorted(calles_alias)[:60], partidos=partidos)
     if input.dry_run:
         logger.info(f"direccion_ar (dry-run): {out.model_dump()}")
         return out
@@ -453,20 +526,42 @@ def run(input: DireccionARInput) -> DireccionAROutput:
                     -- el último que corre y cada agente deshace al otro en silencio, que es
                     -- justo el modo de falla que costó 75.656 estimaciones en Merlo. Acá se
                     -- respeta lo suyo; el reset de aquel agente ya respeta lo de éste.
+                    --
+                    -- ⚠ Con UNA excepción, que es lo contrario de aquel modo de falla: la
+                    -- **extrapolación** (`eje_*_extrap`) que no llega al piso de confianza del
+                    -- CSV (`_NUMERO_CONF_MIN`=0,4 en `web/app.py`) no es un número que haya que
+                    -- proteger — el export ya la descarta, así que la parcela sale `S/N` igual.
+                    -- Ahí la cuadra, que mide **mediana 9-19**, entra donde efectivamente no
+                    -- había nada utilizable. Medido en Merlo el 17-sep-2026: de 3.385
+                    -- extrapolaciones bajo el piso, **2.075** tienen cuadra con confianza
+                    -- suficiente. Sólo la reemplaza `georef_cuadra`: el rango de la calle
+                    -- entera (`georef_osm`) es peor que la extrapolación y no la toca.
                     numero_estimado = CASE
-                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
-                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
+                        WHEN (COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                           AND NOT (numero_estimado_metodo LIKE '%\\_extrap' ESCAPE '\\'
+                                    AND COALESCE(numero_estimado_confianza, 0) < 0.4
+                                    AND CAST(:metodo AS text) = 'georef_cuadra'
+                                    AND CAST(:num AS text) IS NOT NULL)
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles')
                             THEN numero_estimado
                         ELSE COALESCE(:num, numero_estimado) END,
                     numero_estimado_metodo = CASE
-                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
-                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
+                        WHEN (COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                           AND NOT (numero_estimado_metodo LIKE '%\\_extrap' ESCAPE '\\'
+                                    AND COALESCE(numero_estimado_confianza, 0) < 0.4
+                                    AND CAST(:metodo AS text) = 'georef_cuadra'
+                                    AND CAST(:num AS text) IS NOT NULL)
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles')
                             THEN numero_estimado_metodo
                         WHEN :num IS NULL THEN numero_estimado_metodo
                         ELSE :metodo END,
                     numero_estimado_confianza = CASE
-                        WHEN COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
-                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles'
+                        WHEN (COALESCE(numero_estimado_metodo, '') LIKE 'eje\\_%' ESCAPE '\\'
+                           AND NOT (numero_estimado_metodo LIKE '%\\_extrap' ESCAPE '\\'
+                                    AND COALESCE(numero_estimado_confianza, 0) < 0.4
+                                    AND CAST(:metodo AS text) = 'georef_cuadra'
+                                    AND CAST(:num AS text) IS NOT NULL)
+                          OR COALESCE(numero_estimado_metodo, '') = 'arba_calles')
                             THEN numero_estimado_confianza
                         ELSE COALESCE(:conf, numero_estimado_confianza) END
                 WHERE parcela_id = CAST(:pid AS uuid)
