@@ -43,6 +43,26 @@ class AddressResolverInput(BaseModel):
     fill_partial: bool = True              # también rellenar parcelas con calle pero sin numero
     # Paso 0: reverse contra el catastro (gratis, autoritativo) antes de IBGE/Google.
     usar_catastro: bool = True
+    # No pedirle a Google la dirección de una parcela que YA sale al entregable con número.
+    #
+    # ⚠ Esto es plata. El filtro de abajo busca `numero IS NULL`, y en la provincia de Buenos
+    # Aires eso es CASI TODO el relevamiento: ARBA no publica el domicilio del lote, así que
+    # `parcelas.numero` queda vacío incluso donde el número ya lo puso una fuente gratuita en
+    # `numero_estimado` (el callejero oficial de georef, las alturas de ARBA). Medido en Merlo
+    # el 17-sep-2026: 94.370 parcelas entraban al filtro y 74.060 de ellas **ya tenían número
+    # utilizable**, así que un `batch_size` de 500 se habría gastado entero en preguntar lo que
+    # ya sabíamos. Con el corte, la muestra cae sobre las 20.480 que de verdad faltan.
+    #
+    # El criterio es el MISMO del export (`_NUMERO_CONF_MIN` y `_NUMERO_METODOS_EXCLUIDOS` en
+    # `web/app.py`): si el CSV va a sacar ese número, no hay nada que preguntar. En `False`
+    # vuelve el barrido completo, que sirve para contrastar una estimación contra Google.
+    saltear_con_numero_util: bool = True
+    # Para MEDIR antes de gastar: sin esto el `LIMIT` sigue el orden físico de la tabla y las
+    # 500 consultas caen casi todas en la misma calle (las parcelas se insertaron por cuadra),
+    # así que la muestra mide una esquina del partido y no el partido.
+    orden_aleatorio: bool = False
+    numero_conf_min: float = 0.4
+    numero_metodos_excluidos: list = ["georef_osm"]
 
 
 class AddressResolverOutput(BaseModel):
@@ -232,7 +252,9 @@ def _resolve_from_logradouros(engine, lat: float, lng: float, region_id: str) ->
 # ── Consulta y actualización en DB ────────────────────────────────────────────
 
 def _fetch_parcelas_sin_direccion(
-    engine, region_id: str, survey_id: Optional[str], batch_size: int, fill_partial: bool
+    engine, region_id: str, survey_id: Optional[str], batch_size: int, fill_partial: bool,
+    saltear_util: bool = True, conf_min: float = 0.4, excluidos: Optional[list] = None,
+    aleatorio: bool = False
 ) -> list[dict]:
     """Devuelve parcelas con coordenadas pero sin calle o sin número.
 
@@ -255,9 +277,19 @@ def _fetch_parcelas_sin_direccion(
         else:
             base += " AND (calle IS NULL OR calle = '')"
 
+        if saltear_util:
+            # La estimación gratuita que el export ya da por buena hace innecesaria la consulta.
+            base += """ AND NOT (numero_estimado IS NOT NULL
+                                 AND COALESCE(numero_estimado_confianza, 0) >= :conf
+                                 AND COALESCE(numero_estimado_metodo, '') <> ALL(:excl))"""
+            params["conf"] = conf_min
+            params["excl"] = list(excluidos or ["georef_osm"])
+
         if survey_id:
             base += " AND survey_id = :survey_id"
             params["survey_id"] = survey_id
+        if aleatorio:
+            base += " ORDER BY random()"
         base += " LIMIT :batch"
         params["batch"] = batch_size
 
@@ -340,7 +372,9 @@ def run(input: AddressResolverInput) -> AddressResolverOutput:
 
     try:
         parcelas = _fetch_parcelas_sin_direccion(
-            engine, input.region_id, input.survey_id, input.batch_size, input.fill_partial
+            engine, input.region_id, input.survey_id, input.batch_size, input.fill_partial,
+            input.saltear_con_numero_util, input.numero_conf_min,
+            input.numero_metodos_excluidos, input.orden_aleatorio
         )
         logger.info(
             f"AddressResolver [{input.region_id}] lang={language}: "
