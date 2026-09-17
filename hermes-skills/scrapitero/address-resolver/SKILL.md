@@ -1,7 +1,7 @@
 ---
 name: address-resolver
 description: "Resuelve direcciones faltantes o incompletas en parcelas de cualquier país usando Google Maps Geocoding API. Rellena calle y/o número a partir de las coordenadas. Funciona para Argentina, Brasil y cualquier otra zona. El idioma de respuesta se detecta automáticamente del region_id."
-version: 2.1.0
+version: 2.2.0
 author: Scrapitero
 platforms: [linux]
 metadata:
@@ -34,6 +34,23 @@ Para Brasil, intenta primero interpolación IBGE (gratis) antes de llamar a Goog
 ## Requisito
 La variable `GOOGLE_MAPS_API_KEY` debe estar en `/opt/scrapitero/.env`.
 Costo: USD 0.005 por llamada (Google SKU: Geocoding).
+
+## ⚠ Modo ancla: comprar anclas, no lotes
+Preguntarle el número a Google lote por lote es pagar por algo que la calle ya contiene: las
+alturas crecen ordenadas sobre el eje. Con `anclas_por_calle` se pide **una parcela cada 15**
+(mín. 3, tope 60), repartidas sobre el eje de la calle, y `numero-estimator` interpola el resto.
+
+Medido en Merlo (17-sep-2026): **1.806 consultas en vez de 18.546** para las mismas parcelas —
+entra en el tramo gratuito mensual de Google (10.000 por SKU) en vez de costar ~USD 93.
+Validado contra un test independiente de parcelas interpoladas que no fueron ancla: **mediana 10
+· p90 89 · 85% ≤50**. Se itera: cada ronda numera, y las que quedan piden anclas nuevas
+(1.806 → 862 → 664). Las parcelas **sin calle** van aparte con `fill_partial:false`, porque sin
+calle no hay eje donde interpolar.
+
+```bash
+python3 -m scrapitero.rpc.address_resolver <<< '{"region_id":"<R>","survey_id":"<S>","anclas_por_calle":true,"batch_size":2000}'
+python3 -m scrapitero.rpc.numero_estimator  <<< '{"region_id":"<R>","survey_id":"<S>"}'
+```
 
 ## ⚠ En Argentina, correr `direccion-ar` ANTES
 Fuera de Brasil este agente no tiene capa gratuita: va derecho a Google. En PBA la calle y el
