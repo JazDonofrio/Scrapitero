@@ -1,7 +1,7 @@
 ---
 name: address-resolver
 description: "Resuelve direcciones faltantes o incompletas en parcelas de cualquier país usando Google Maps Geocoding API. Rellena calle y/o número a partir de las coordenadas. Funciona para Argentina, Brasil y cualquier otra zona. El idioma de respuesta se detecta automáticamente del region_id."
-version: 2.0.0
+version: 2.1.0
 author: Scrapitero
 platforms: [linux]
 metadata:
@@ -34,6 +34,20 @@ Para Brasil, intenta primero interpolación IBGE (gratis) antes de llamar a Goog
 ## Requisito
 La variable `GOOGLE_MAPS_API_KEY` debe estar en `/opt/scrapitero/.env`.
 Costo: USD 0.005 por llamada (Google SKU: Geocoding).
+
+## ⚠ En Argentina, correr `direccion-ar` ANTES
+Fuera de Brasil este agente no tiene capa gratuita: va derecho a Google. En PBA la calle y el
+número los da `direccion-ar` sin costo, y este agente queda para lo que esa fuente no cubre.
+
+**No pregunta lo que una fuente gratuita ya contestó** (`saltear_con_numero_util`, default on):
+el selector busca `numero IS NULL`, y en PBA eso es casi todo el relevamiento porque ARBA no
+publica el domicilio del lote — el número gratuito vive en `numero_estimado`. Medido en Merlo:
+94.370 parcelas entraban al filtro y **74.060 ya tenían número utilizable**, así que una muestra
+de 500 consultas se gastaba entera preguntando lo ya sabido. Para medir antes de gastar, usar
+`batch_size` chico + `orden_aleatorio` (sin eso el `LIMIT` sigue el orden físico de la tabla y
+la muestra sale toda de una cuadra). Medido así en Merlo con 500 consultas (USD 2,50): 497
+resueltas, números coherentes en el espacio (vecinos a <60 m difieren 18 de mediana, 3% pasa
+de 100).
 
 ## Comando
 ```bash
