@@ -493,6 +493,11 @@ def _parse_bci(text: str) -> dict:
             # Lo usa `_comercios_reales` para no contar como negocios distintos los
             # ambientes que usa un mismo dueño.
             reg_m = re.search(r'REGIME DE UTILIZACAO\s+([A-ZÀ-Ú]+)', blk, re.I)
+            # Dónde está la construcción en el lote. Vocabulario de VAZ049: FRENTE 642 ·
+            # FUNDOS 359 · `SUP. DE FRENTE` 14 · `SUPL. DE FUNDOS` 14 (superpuesta: arriba de
+            # otra) · sin dato 85. Lo usa la regla de avenida del final de `_parse_bci`.
+            sit_m = re.search(r'SITUACAO\s+(FRENTE|FUNDOS|SUPL?\.?\s*DE\s+(?:FRENTE|FUNDOS))',
+                              blk, re.I)
             try:
                 area_v = float(area_u.replace(",", "."))
             except ValueError:
@@ -505,6 +510,8 @@ def _parse_bci(text: str) -> dict:
                 "tipologia": " ".join(tip_m.group(1).split()).upper() if tip_m else None,
                 "disposicion": disp_m.group(1).upper() if disp_m else None,
                 "regime": reg_m.group(1).upper() if reg_m else None,
+                "situacao": (("SUPERPOSTA" if sit_m.group(1).upper().startswith("SUP")
+                              else sit_m.group(1).upper()) if sit_m else None),
                 # Etiqueta canónica (servicios/religioso/etc. → comercial) para que la
                 # expansión del CSV cuente la unidad como comercio, no como vivienda.
                 "uso": _CAT_USO_LABEL.get(uso_cat) if uso_cat else None,
@@ -692,21 +699,25 @@ def _parse_bci(text: str) -> dict:
         if sec_m and not re.match(r'^IDENTIFICA', line, re.I):
             r["contribuyente_secundario"] = sec_m.group(1).strip()[:200]
 
-    # ── Lote mixto sobre AVENIDA: es UN comercio ───────────────────────────────
-    # La ficha declara una casa y una construcción comercial en el mismo lote, y la
-    # calle es una avenida. Contado por el BCI sale 1 vivienda + 1 comercio; el cliente
-    # lo cuenta como UN comercio: la casa es el fondo o el piso del negocio que da a la
-    # avenida. Va acá al final porque la calle de la ficha se lee después de las UF.
+    # ── Lote mixto sobre AVENIDA: la casa del FRENTE es el local ──────────────────
+    # La ficha declara una casa y una construcción comercial en el mismo lote, y la calle es
+    # una avenida. **El criterio de conteo es 1 vivienda + 1 comercio** (Jaz, 15-sep-2026:
+    # «casa más comercio se cuenta 1 para residencia y 1 para comercio»), así que la casa
+    # sólo se descarta cuando no es un hogar aparte: cuando es la construcción del FRENTE,
+    # la que da a la avenida y en la calle se ve como el negocio. La del FUNDOS o la que
+    # está encima (`SUP. DE FRENTE`, `SUPL. DE FUNDOS`) es otra casa y cuenta. Va acá al
+    # final porque la calle de la ficha se lee después de las UF.
     #
     # Medido contra la revisión en Google Maps del cliente (DETALLE COMPARACION.xlsx,
-    # columna GOOGLE, VAZ049, 14-sep-2026). De 38 lotes mixtos cotejados, el cliente anota
-    # UNA sola cosa en 34 — la que da a la calle:
-    #   · sobre AVENIDA (20): sólo comercio 16 · sólo casa 3 · las dos 1
-    #   · sobre RUA     (18): sólo comercio 8  · sólo casa 7 · las dos 3
-    # En avenida es regla; en rua es una moneda al aire y no se toca. Caso tipo:
-    # PEDRO PEDROSSIAN 447, CASA 236 m² + SALA 29 m² al frente → el cliente ve 1 comercio.
-    # Resultado sobre 243 direcciones cotejadas: arregla 13, rompe 2 (COUTO MAGALHAES 520,
-    # donde el cliente sí ve las dos, y PEDRO PEDROSSIAN 78, donde ve sólo la casa).
+    # columna GOOGLE, VAZ049). De 38 lotes mixtos cotejados el cliente anota UNA sola cosa
+    # en 34; sobre AVENIDA (20): sólo comercio 16 · sólo casa 3 · las dos 1. El 14-sep eso
+    # se leyó como convención («el cliente cuenta UN comercio») y la regla descartaba la
+    # casa siempre. **No era convención:** de los 27 lotes que tocaba, en 16 la casa está al
+    # FUNDOS o arriba del local, adonde la revisión desde la calle no llega — el mismo punto
+    # ciego de las vilas (COUTO MAGALHAES 520, casa de 91 m² al fondo, el cliente sí la ve).
+    # Con la casa del FRENTE el cliente acierta: de 10 cotejados, en 8 no ve casa aparte
+    # (caso tipo PEDRO PEDROSSIAN 447, CASA 236 m² al frente + SALA 29 m²); en PEDRO
+    # PEDROSSIAN 78 y 385 sí la ve.
     #
     # ⚠ Las VILAS quedan afuera por `uf_vivienda == 1`: se mira cuántas viviendas QUEDARON
     # después de `_viviendas_reales`, no cuántas construcciones declara la ficha. Las 10
@@ -717,9 +728,14 @@ def _parse_bci(text: str) -> dict:
     # dejaba afuera a la casa que creció (paso 2.a de `_viviendas_reales`): declara 3 o más
     # construcciones pero es UNA vivienda. PEDRO PEDROSSIAN 424 —lote de 8.095 m² sobre la
     # avenida, 7 construcciones, Receita `COMÉRCIO EM GERAL, IMOBILIÁRIA`— seguía saliendo
-    # mixto. Mirando el resultado final: arregla FILINTO MÜLLER 488 y COUTO MAGALHAES 535
-    # (el cliente ve sólo comercio), no rompe ninguna.
-    if (r["unidades"]
+    # mixto. Mirando el resultado final arreglaba FILINTO MÜLLER 488 y COUTO MAGALHAES 535
+    # (el cliente ve sólo comercio); desde el 15-sep 488 vuelve a 1 + 1, porque sus cinco
+    # casas están al FUNDOS.
+    casas = [u for u in r["unidades"]
+             if (u.get("uso") or "residencial") == "residencial"
+             and (u.get("tipologia") or "") not in _TIPOLOGIA_NO_HABITABLE]
+    casa = max(casas, key=lambda u: u.get("area_m2") or 0) if casas else None
+    if (casa is not None and casa.get("situacao") == "FRENTE"
             and r["uf_vivienda"] == 1 and r["uf_comercio"] >= 1
             and re.match(r"AVENIDA\b", (r["calle"] or "").upper())):
         for u in r["unidades"]:
@@ -888,6 +904,9 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
         #     (ago-2026). Va con `cadastur` porque protege lo mismo: que el BCI no borre
         #     "acá hay un hotel" al re-parsear.
         #   - `shopping_min` → piso de UF=1 de ParcelaCategoria para un SHOPPING.
+        #   - `regla_hoteles` → el lote del hotel es especial (0 UF) o pensão según la tabla
+        #     del cliente (HotelReglas, sep-2026). Sin esto el re-parseo le devolvía al Slaviero
+        #     Slim el "baldío" de su ficha vieja y al Amazon su única unidad del BCI.
         # ⚠ Esta lista está COPIADA a mano y ya quedó corta: `precedencia.py` protege además
         # `overture`/`poi` (conteo real de comercios) y este UPDATE los pisa. No se unificó
         # acá porque la constante compartida incluye `'bci'` y el parser se auto-bloquearía
@@ -896,7 +915,7 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
         # parcela, el BCI no debe devolverla a vacante/residencial.
         conn.execute(text("""
             UPDATE parcelas SET
-                uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
+                uso_principal               = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google','regla_hoteles')
                                               THEN uso_principal
                                               -- UF sellada a mano y uso no: el uso sale de la UF
                                               -- sellada, no del parser. Si no, el BCI deja
@@ -911,17 +930,17 @@ def _update_parcela(parcela_id: str, d: dict) -> None:
                                                        WHEN uf_vivienda > 0 THEN 'residencial'
                                                        ELSE COALESCE(:uso, uso_principal) END
                                               ELSE COALESCE(:uso, uso_principal) END,
-                uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google')
+                uso_fuente                  = CASE WHEN uso_fuente IN ('manual','cadastur','hotel_min','google','regla_hoteles')
                                               THEN uso_fuente
                                                    WHEN :uso IS NOT NULL THEN 'bci'
                                                    ELSE uso_fuente END,
-                uf_vivienda                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
+                uf_vivienda                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min','regla_hoteles')
                                               THEN uf_vivienda ELSE :uf_viv END,
-                uf_comercio                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
+                uf_comercio                 = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min','regla_hoteles')
                                               THEN uf_comercio ELSE :uf_com END,
-                uf_fuente                   = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
+                uf_fuente                   = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min','regla_hoteles')
                                               THEN uf_fuente ELSE 'bci' END,
-                unidades_funcionales_estimadas = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min')
+                unidades_funcionales_estimadas = CASE WHEN uf_fuente IN ('manual','cadastur','hotel_min','google','shopping_min','regla_hoteles')
                                               THEN unidades_funcionales_estimadas
                                               ELSE COALESCE(:uf_tot, unidades_funcionales_estimadas) END,
                 area_m2_construida          = COALESCE(:area, area_m2_construida),
