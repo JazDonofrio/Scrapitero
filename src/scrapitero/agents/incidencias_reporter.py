@@ -23,6 +23,9 @@ Tipos que genera hoy:
     catastro donde la publican (BCI: la contradicción está dentro del propio dato, sin
     satélite), y la **huella de los footprints** donde no la publican (ARBA la deja en NULL, así
     que fuera de Brasil el caso era invisible).
+  - `censo_viviendas`: la ficha del catastro declara una cantidad de viviendas y el censo 2022
+    cuenta otra en el mismo lote. Es el único control independiente del dato más grande del
+    relevamiento y el que destapa las vilas (kitnets al fondo que la ficha no declara).
   - `poi_numero_ajeno`: el comercio está parado en una parcela cuyo número no es el que él mismo
     declara, y a pocos metros hay otra que sí lo lleva. Los casos con evidencia dura los mueve
     solo `OverturePlacesFetcher`; acá quedan los ambiguos (esquinas y número contiguo).
@@ -81,6 +84,10 @@ _PRIORIDAD = {
     # Sin número la parcela no aparea contra el relevamiento anterior ni entra al CSV de
     # operadora, pero se resuelve mirando el frente: importante, no urgente.
     "numero_faltante": 2,
+    # La ficha dice una cantidad de viviendas y el censo 2022 otra. Son UF que faltan (o sobran)
+    # en el entregable y es la ÚNICA fuente independiente que cuenta viviendas, pero pide mirar
+    # el lote: va con la asistencia, no arriba de todo.
+    "censo_viviendas": 2,
     "altura_mas_alta": 3,
     # El POI declara el número de otra parcela. Va último a propósito: son los casos que la
     # guarda automática NO se anima a mover, y la lectura de los 11 primeros (Malvinas,
@@ -136,6 +143,10 @@ class IncidenciasInput(BaseModel):
     # que el fetcher ya movió solo, y si fuera más angosto habría casos que no ve nadie.
     poi_numero_max_m: float = 60.0
     poi_salto_min: int = 300
+    # Diferencia mínima entre la ficha y el censo para levantar la tarjeta. En 1 el ruido manda
+    # (un punto del censo que cayó en el lote de al lado); en 2, en VAZ049 salen 35 casos con
+    # 162 unidades en juego.
+    censo_dif_min: int = 2
 
 
 class IncidenciasOutput(BaseModel):
@@ -761,6 +772,81 @@ def _casos_uf_sin_declarar(conn, survey_id: str, area_min: float) -> list[dict]:
     return casos
 
 
+def _casos_censo_viviendas(conn, region_id: str, survey_id: str, dif_min: int) -> list[dict]:
+    """La ficha del catastro dice una cantidad de viviendas y el censo 2022 dice otra.
+
+    Es el control que le faltaba al dato más grande del relevamiento. La cantidad de unidades de
+    cada lote sale de UNA sola fuente —la ficha del BCI, que cuenta inscrições y puede tener
+    décadas— y hasta ahora nada la contrastaba: los errores sólo aparecían cuando un humano
+    miraba el lote. El censo 2022 es la única fuente independiente que cuenta viviendas una por
+    una, con la coordenada tomada en la puerta (`censo_domicilios`, mig. 069) y con el
+    complemento que anotó el censista, que es lo que delata la vila: «QUITINETE CASA 7»,
+    «BLOCO A APARTAMENTO 3», «FUNDOS».
+
+    Medido en VAZ049 (18-sep-2026), sobre 491 lotes sin contar hoteles ni especiales: 192
+    coinciden con el censo, 51 difieren en 1, **35 difieren en 2 o más** (162 unidades en juego)
+    y 213 no tienen ningún domicilio del censo atado. Los peores son lotes donde declaramos 0 y
+    el censo ve 24 (un bloque de departamentos en Filinto Müller) o 11 kitnets.
+
+    **No corrige nada**: levanta la tarjeta con las dos cifras y el detalle de los complementos,
+    y el operador decide. Por eso ignora los lotes que ya tienen la UF corregida a mano
+    (`uf_fuente='manual'`) y los especiales —hotel o shopping, donde el censo cuenta cuartos, no
+    viviendas—. `dif_min` en 2 deja afuera el ruido de ±1, que suele ser un punto del censo que
+    cayó en el lote de al lado.
+    """
+    ambiguos = _ccas_ambiguos(conn, survey_id)
+    rows = conn.execute(text("""
+        WITH censo AS (
+            SELECT parcela_id, count(*) AS dom,
+                   array_agg(DISTINCT COALESCE(complemento, 'sin complemento')) AS complementos
+            FROM censo_domicilios
+            WHERE region_id = :rid AND parcela_id IS NOT NULL
+            GROUP BY parcela_id
+        )
+        SELECT p.parcela_id::text, p.calle, p.numero, p.cca_code, p.uf_vivienda, p.uf_comercio,
+               p.uf_fuente, p.uso_principal, p.centroid_lat, p.centroid_lng, p.numero_estimado,
+               c.dom, c.complementos
+        FROM parcelas p
+        JOIN censo c ON c.parcela_id = p.parcela_id
+        WHERE p.survey_id = :sid
+          AND COALESCE(p.uf_fuente, '') <> 'manual'
+          AND COALESCE(p.uso_principal, '') <> 'equipamiento'
+          AND abs(COALESCE(p.uf_vivienda, 0) - c.dom) >= :dmin
+    """), {"rid": region_id, "sid": survey_id, "dmin": dif_min}).fetchall()
+
+    casos = []
+    for (pid, calle, numero, cca, uf_v, uf_c, uf_fuente, uso, lat, lng,
+         num_est, dom, complementos) in rows:
+        uf_v, dom = int(uf_v or 0), int(dom)
+        dir_txt = _direccion(calle, numero, num_est)
+        compl = [c for c in sorted(complementos or []) if c and c != "sin complemento"]
+        detalle_compl = ("; ".join(compl[:6]) + (f" y {len(compl) - 6} más" if len(compl) > 6 else "")
+                         if compl else "sin complemento anotado")
+        falta = dom > uf_v
+        casos.append({
+            "tipo": "censo_viviendas",
+            "clave": _clave_parcela("censo_viviendas", cca, pid, ambiguos),
+            "titulo": (f"🧾 {dir_txt} — el censo ve {dom} vivienda(s) y la ficha "
+                       f"{uf_v}"),
+            "detalle": (f"La ficha del catastro declara {uf_v} vivienda(s) (fuente «{uf_fuente or 's/d'}») "
+                        f"y el censo 2022 registró {dom} en este lote: {detalle_compl}. "
+                        + ("Suele ser una vila o kitnets al fondo que la ficha no declara."
+                           if falta else
+                           "Puede que la ficha cuente inscrições o unidades superpuestas que ya no existen.")
+                        + " Mirá el lote y corregí la cantidad si corresponde."),
+            "lat": float(lat) if lat is not None else None,
+            "lng": float(lng) if lng is not None else None,
+            "parcela_id": pid,
+            "hotel_cnpj": None,
+            "datos": {
+                "direccion": dir_txt, "cca_code": cca, "numero_estimado": num_est or None,
+                "uf_vivienda": uf_v, "uf_comercio": int(uf_c or 0), "uf_fuente": uf_fuente,
+                "uso_principal": uso, "censo_domicilios": dom, "diferencia": dom - uf_v,
+                "complementos_censo": compl[:12],
+            },
+        })
+    return casos
+
 def _casos_geocoding(conn, survey_id: str, region_id: str,
                      lejos_calle_m: float = 150.0) -> list[dict]:
     """Direcciones del relevamiento anterior cuya ubicación no es de fiar.
@@ -899,7 +985,9 @@ def run(input: IncidenciasInput) -> IncidenciasOutput:
                  + _casos_geocoding(conn, input.survey_id, input.region_id,
                                     input.lejos_calle_m)
                  + _casos_poi_numero_ajeno(conn, input.region_id, input.survey_id,
-                                           input.poi_numero_max_m, input.poi_salto_min))
+                                           input.poi_numero_max_m, input.poi_salto_min)
+                 + _casos_censo_viviendas(conn, input.region_id, input.survey_id,
+                                          input.censo_dif_min))
 
     por_tipo: dict[str, int] = {}
     for c in casos:
