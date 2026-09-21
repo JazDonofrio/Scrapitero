@@ -337,7 +337,14 @@ def _tipo_cliente(uso: str, uf_v: int, uf_c: int) -> str:
 
     El cliente no tiene código para "mixto": la parcela mixta se resuelve por el uso que
     manda en unidades, que es el criterio con el que ellos cuentan HPs.
+
+    `equipamiento` es el especial de su tabla (hotel, shopping, escuela, órgano público…) y
+    va primero: un hotel conserva sus habitaciones como HP (decisión de Jaz, 18-sep-2026, y
+    así las cuenta la base del operador: 123 HP en el Amazon Aeroporto, 379 en el shopping),
+    pero sigue siendo `E`. Antes salía `C` porque las unidades estaban en `uf_comercio`.
     """
+    if uso == "equipamiento":
+        return "E"
     if uso in ("vacante", "baldio"):
         return "E"
     if uso == "comercial":
@@ -646,7 +653,7 @@ _FONDO_POR_DEFECTO = 25.0
 _FONDO_MIN, _FONDO_MAX = 12.0, 30.0
 
 
-def _resumen_uf(uf_v: int, uf_c: int, pisos_txt: str) -> str:
+def _resumen_uf(uf_v: int, uf_c: int, pisos_txt: str, uf_e: int = 0) -> str:
     """El texto legible que pidió Jaz: cuántas viviendas, cuántos comercios y cuántos pisos.
 
     El código del cliente (`198R-2`) es exacto pero cifrado, y **oculta la cantidad cuando
@@ -659,6 +666,8 @@ def _resumen_uf(uf_v: int, uf_c: int, pisos_txt: str) -> str:
         partes.append(f"{uf_v}V")
     if uf_c:
         partes.append(f"{uf_c}C")
+    if uf_e:
+        partes.append(f"{uf_e}E")    # unidades de un especial: habitaciones, locales del shopping
     return " ".join(partes) if partes else "VAZIO"
 
 
@@ -1507,7 +1516,8 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
             # Sin los pisos: en el MDU ya los muestra `QTD_ANDARES`, que es campo visible
             # del bloque del cliente. `RESUMO` sólo agrega lo que a él le falta, el
             # reparto entre viviendas y comercios.
-            "RESUMO": _resumen_uf(rec["uf_v"], rec["uf_c"], ""),
+            "RESUMO": (_resumen_uf(0, 0, "", uf_e=rec["uf_v"] + rec["uf_c"]) if tp_b == "E"
+                       else _resumen_uf(rec["uf_v"], rec["uf_c"], "")),
             "PISOS": _texto_pisos(pisos),
             "BLOCO": "UNICO",
             "ESTABELECIMENTO": "",
@@ -1522,15 +1532,19 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
         _escalar()
         return "MDU"
 
+    # Especial SIN unidades (baldío, escuela, iglesia): sin pisos ni cantidad, como siempre.
+    # Especial CON unidades (un hotel chico): es un edificio con sus HP, lleva las dos cosas.
+    e_vacio = tp_b == "E" and (rec.get("baldio") or not (rec["uf_v"] + rec["uf_c"]))
     ref.add_auto_attribs({
         "N_C1_3_TP_QT": _etiqueta(num, tp_b, qt_b, rec.get("baldio", False)),
         # El lote vacío no lleva pisos: no hay nada construido que contar.
-        "QTD_ANDARES": "" if tp_b == "E" else pisos,
+        "QTD_ANDARES": "" if e_vacio else pisos,
         # La línea legible. Se arma con las UF **de este bloque**, no las de la parcela:
         # en una parcela mixta el bloque `R` dice sus viviendas y el `C` sus comercios.
         "RESUMO": _resumen_uf(qt_b if tp_b == "R" else 0,
-                              qt_b if tp_b == "C" else 0, ""),
-        "PISOS": "" if tp_b == "E" else _texto_pisos(pisos),
+                              qt_b if tp_b == "C" else 0, "",
+                              uf_e=0 if e_vacio or tp_b != "E" else qt_b),
+        "PISOS": "" if e_vacio else _texto_pisos(pisos),
         "N": num or "S/N",
         # Corte en límite de palabra: `[:32]` partía "…QD 4 LO" a mitad de palabra.
         "C1": _recortar(rec["complemento"] or "", 48),
@@ -2570,7 +2584,14 @@ def run(input: EntregaInput) -> EntregaOutput:
             "pisos": pisos_texto(pisos or pisos_sat), "uf_v": uf_v, "uf_c": uf_c,
             # Baldío = el municipio no le declara NADA construido. Es lo que separa el
             # `VAZ` del `<número>E`; ver `_etiqueta`.
-            "baldio": not (area_c or 0),
+            # Salvo que el operador lo haya etiquetado a mano como especial: la ficha puede
+            # ser anterior al edificio (el Slaviero Slim, 8 pisos, figura baldío en el BCI)
+            # o no existir (el shopping es una parcela agregada a mano), y un HOTEL o un
+            # SHOPPING rotulado `VAZ` le dice al cliente que ahí no hay nada. Lo mismo un lote
+            # que `HotelReglas` selló especial con un hotel vinculado (`hotel_tipo`).
+            "baldio": not (area_c or 0) and not (
+                uso == "equipamiento" and ((tipo_manual and tipo_manual != "LOTE VAZIO")
+                                           or hotel_tipo)),
             "calle": _nombre_calle(calle) if calle else "", "punto": (cx, cy),
         })
         hp_total += uf_v + uf_c
@@ -2920,7 +2941,8 @@ def run(input: EntregaInput) -> EntregaOutput:
                     # El renglón más largo de esta ficha, para que entre en el lote.
                     if rec["es_mdu"]:
                         lineas = [str(rec["uf_v"] + rec["uf_c"]), rec["pisos"],
-                                  _resumen_uf(rec["uf_v"], rec["uf_c"], ""),
+                                  (_resumen_uf(0, 0, "", uf_e=rec["uf_v"] + rec["uf_c"])
+                                   if tp_b == "E" else _resumen_uf(rec["uf_v"], rec["uf_c"], "")),
                                   _texto_pisos(rec["pisos"])]
                     else:
                         # Los TRES renglones que se van a dibujar: el que mida más manda
@@ -2928,7 +2950,9 @@ def run(input: EntregaInput) -> EntregaOutput:
                         # corta y el renglón más largo terminaba fuera del lote.
                         # Los DOS renglones que se dibujan: rótulo y pisos.
                         lineas = [_etiqueta(rec["num"], tp_b, qt_b),
-                                  "" if tp_b == "E" else _texto_pisos(rec["pisos"])]
+                                  "" if tp_b == "E" and (rec.get("baldio")
+                                                         or not (rec["uf_v"] + rec["uf_c"]))
+                                  else _texto_pisos(rec["pisos"])]
                     # **Todas las letras del mismo tamaño**, el de la plantilla del
                     # cliente. Llegué a achicar el texto en los lotes angostos para que
                     # entrara —bajaba los renglones pisados de 128 a 76— pero un plano con

@@ -25,13 +25,29 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from loguru import logger
 from sqlalchemy import text
 from starlette.background import BackgroundTask
+from starlette.middleware.gzip import GZipMiddleware
 
 from scrapitero.agents.logradouro_br import (clasificar_complemento, descomponer_logradouro,
                                              partes_unidad)
+from scrapitero.agents.nombre_inmueble import componer_nombre
 from scrapitero.agents.pisos import sobre_planta_baja
 from scrapitero.db.engine import get_engine
 
 app = FastAPI(title="AI Mapping")
+
+# El JSON del mapa es lo más grande que sirve esta app y comprime ~10×: el relevamiento de
+# Merlo son **64 MB** de `/parcelas` (92.980 parcelas y todavía bajando), que sin comprimir
+# tardan medio minuto en una conexión doméstica — es literalmente «la web está lenta».
+# Comprimido son 4,7 MB. El piso de 1 KB deja afuera las respuestas chicas, donde el CPU de
+# comprimir cuesta más que los bytes que ahorra. Se aplica a todo el tráfico, no sólo al
+# mapa: el HTML del dashboard y los CSV de export también viajan comprimidos.
+#
+# ⚠ `compresslevel=4`, no el 9 que trae Starlette por default. Medido sobre esos 64 MB:
+# nivel 9 da 4,27 MB en **1,03 s** de CPU y nivel 4 da 4,67 MB en **0,33 s** — el 9 cobra
+# 0,7 s de latencia por cada pedido a cambio de un 9% de bytes. En una respuesta de este
+# tamaño el nivel alto empeora lo que vino a arreglar.
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=4)
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # FOS (Factor de Ocupación del Suelo): fracción máxima del terreno que puede ocupar
@@ -995,6 +1011,13 @@ async def survey_parcelas(survey_id: str, lang: Optional[str] = None) -> list[di
         # La taxonomía se guarda en portugués (contrato del cliente brasilero) pero se
         # muestra en el idioma que eligió quien mira, y si no eligió, el del relevamiento.
         pais = _country_de_survey(conn, survey_id)
+        # El planner ve una consulta de 35 columnas sobre decenas de miles de filas, la
+        # estima cara y manda a compilar con LLVM. Medido sobre Merlo (92.980 parcelas):
+        # **1,45 s compilando** para una ejecución de ~1 s — la compilación cuesta más que
+        # el trabajo. Acá no hay expresiones que optimizar (son columnas crudas y tres
+        # subconsultas ya indexadas), así que el JIT es puro overhead: apagándolo la
+        # consulta pasa de 1,6 s a 1,0 s. `LOCAL` lo limita a esta transacción.
+        conn.execute(text("SET LOCAL jit = off"))
         rows = conn.execute(text("""
             SELECT p.centroid_lat, p.centroid_lng,
                    p.uso_principal, p.uf_vivienda, p.uf_comercio,
@@ -1886,15 +1909,17 @@ def _descartar_hotel(conn, hotel_id: str, tipo: str) -> tuple[bool, object]:
                 uf_comercio = 0,
                 unidades_funcionales_estimadas = COALESCE(uf_vivienda, 0),
                 uf_fuente = NULL,
-                uso_principal = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
-                                     ELSE uso_principal END,
-                uso_fuente = CASE WHEN uso_fuente IN ('cadastur','hotel_min') THEN NULL
-                                  ELSE uso_fuente END
+                uso_principal = CASE WHEN uso_fuente IN ('cadastur','hotel_min','regla_hoteles')
+                                     THEN NULL ELSE uso_principal END,
+                uso_fuente = CASE WHEN uso_fuente IN ('cadastur','hotel_min','regla_hoteles')
+                                  THEN NULL ELSE uso_fuente END
             WHERE parcela_id = CAST(:p AS uuid)
-              AND uf_fuente IN ('cadastur','hotel_min')
+              AND uf_fuente IN ('cadastur','hotel_min','regla_hoteles')
               AND NOT EXISTS (SELECT 1 FROM hoteles h
                                WHERE h.parcela_id = CAST(:p AS uuid) AND NOT h.cerrado_def)
         """), {"p": parcela_id})
+        # "No es hotel, es una escuela": el especial que sí está ahí cuenta 1.
+        _especial_cuenta_uno(conn, parcela_id, tipo)
     return True, parcela_id
 
 
@@ -2222,6 +2247,33 @@ def _guardar_direccion_manual(conn, parcela_id: str, campos: dict, nota: Optiona
 _USOS_VALIDOS = ("residencial", "comercial", "mixto", "industrial", "equipamiento", "vacante")
 
 
+def _especial_cuenta_uno(conn, parcela_id: str, tipo_ed: str, autor: str = "operador") -> int:
+    """Un especial que EXISTE cuenta 1 unidad (Jaz, 18-sep-2026: "si en tal ubicación hay una
+    iglesia, es especial 1 unidad"). Se aplica al etiquetar a mano un tipo E —escuela, iglesia,
+    órgano público, estacionamiento…— sobre un lote que quedó en 0 UF: sin esto la iglesia no
+    aparecía en ningún total ni en el CSV de operadora, y el excel del cliente sí la cuenta.
+    No toca un lote que ya tiene UF (una casa con un registro especial sigue siendo casa, caso
+    SINTEP; un hotel trae sus habitaciones) ni el LOTE VAZIO, que es un baldío. La unidad va en
+    `uf_comercio` con el uso `equipamiento`, que es lo que la hace E en el plano y los CSV."""
+    if _TIPO_CATEGORIA.get(tipo_ed) != "E" or tipo_ed == "LOTE VAZIO":
+        return 0
+    uf = conn.execute(text("SELECT COALESCE(uf_vivienda,0) + COALESCE(uf_comercio,0) FROM parcelas "
+                           "WHERE parcela_id = CAST(:p AS uuid)"), {"p": parcela_id}).scalar()
+    if uf is None or uf > 0:
+        return 0
+    conn.execute(text("""
+        UPDATE parcelas SET uf_vivienda = 0, uf_comercio = 1, unidades_funcionales_estimadas = 1,
+               uf_fuente = 'manual'
+        WHERE parcela_id = CAST(:p AS uuid)"""), {"p": parcela_id})
+    conn.execute(text("""
+        INSERT INTO parcela_uf_manual (parcela_id, uf_vivienda, uf_comercio, autor)
+        VALUES (CAST(:p AS uuid), 0, 1, :a)
+        ON CONFLICT (parcela_id) DO UPDATE SET uf_vivienda = 0, uf_comercio = 1, autor = :a,
+            actualizado_at = now()"""), {"p": parcela_id, "a": autor})
+    _guardar_uso_manual(conn, parcela_id, "equipamiento", f"{tipo_ed}: especial, 1 unidad")
+    return 1
+
+
 def _guardar_uso_manual(conn, parcela_id: str, uso: str, nota: Optional[str]) -> int:
     """Fija el uso de una parcela a mano y lo respalda en `parcela_uso_manual`.
 
@@ -2464,6 +2516,7 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                 ON CONFLICT (parcela_id) DO UPDATE SET
                     tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
             """), {"p": parcela_id, "t": tipo_ed, "cat": _TIPO_CATEGORIA[tipo_ed]})
+            _especial_cuenta_uno(conn, parcela_id, tipo_ed)
 
         elif accion == "uf":
             if not parcela_id:
@@ -2647,6 +2700,8 @@ async def resolver_incidencia(incidencia_id: str, request: Request) -> JSONRespo
                         tipo_edificacion = :t, categoria = :cat, actualizado_at = now()
                 """), {"p": parcela_id, "t": tipo_ed, "cat": _TIPO_CATEGORIA[tipo_ed]})
                 aplicados += 1
+                if v.get("uf_vivienda") in (None, "") and v.get("uf_comercio") in (None, ""):
+                    _especial_cuenta_uno(conn, parcela_id, tipo_ed)
 
             if v.get("uf_vivienda") not in (None, "") or v.get("uf_comercio") not in (None, ""):
                 try:
@@ -3274,7 +3329,21 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 (SELECT ptm.tipo_edificacion FROM parcela_tipo_manual ptm
                     WHERE ptm.parcela_id = parcelas.parcela_id) AS tipo_manual,
                 numero_estimado, numero_estimado_metodo, numero_estimado_confianza,
-                huella_m2                                       -- mig. 058, ver r[43] abajo
+                huella_m2,                                      -- mig. 058, ver r[43] abajo
+                -- r[44]: negocios que se ven hoy en el lote (censo 2022 + Overture, mig. 067)
+                ARRAY(SELECT eo.nombre FROM establecimientos_observados eo
+                       WHERE eo.parcela_id = parcelas.parcela_id
+                       ORDER BY (eo.fuente <> 'overture'), eo.nombre) AS observados,
+                -- r[45]: nota de revisión del cotejo contra la referencia del cliente (mig. 068)
+                (SELECT prn.nota FROM parcela_revision_nota prn
+                  WHERE prn.region_id = parcelas.region_id AND prn.cca_code = parcelas.cca_code) AS revision,
+                -- r[46]: incidencias PENDIENTES del lote. Ninguna exportación miraba el panel, así
+                -- que un lote con una tarjeta sin resolver salía al CSV con su valor actual y nadie
+                -- se enteraba. Acá viajan los tipos pendientes para que quien arma la entrega sepa
+                -- qué está sin revisar (el CSV del cliente no lleva columnas nuestras: su layout es
+                -- contrato, así que el aviso vive en el CSV interno).
+                (SELECT string_agg(DISTINCT i.tipo, ', ' ORDER BY i.tipo) FROM incidencias i
+                  WHERE i.parcela_id = parcelas.parcela_id AND i.estado = 'pendiente') AS incidencias
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -3307,6 +3376,10 @@ async def export_csv(survey_id: str) -> StreamingResponse:
         w.writerow([])
         w.writerow([
             "Dirección", "Unidad", "Código Unidad", "Uso", "UF Vivienda", "UF Comercio",
+            # Unidades de un especial de la tabla del cliente (hotel: habitaciones; shopping:
+            # locales). En la base van en `uf_comercio` —así suman en todos los totales— y el
+            # lote se reconoce por `uso_principal = 'equipamiento'` (Jaz, 18-sep-2026).
+            "UF Especial",
             "Total UF", "UF Fuente", "Uso Fuente",
             "Bairro", "Municipio", "CEP",
             "Inscripción", "Setor-Quadra-Lote",
@@ -3323,15 +3396,23 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             # Número inferido para las parcelas que el catastro dejó sin altura. Va en columnas
             # PROPIAS y no se mezcla con la dirección: es una inferencia, no dato del municipio.
             "Número estimado", "Número est. método", "Número est. confianza",
+            # Para mirar a ojo: dato con respaldo que la referencia del cliente contradice (cotejo)
+            # y las dudas que marca `HotelReglas` (prefijo «[hoteles]»).
+            "Revisión",
+            # Tarjetas del panel de incidencias que siguen sin resolver en este lote.
+            "Incidencias pendientes",
         ])
 
         def _fila(r, direccion, unidad, codigo, uso, uf_v, uf_c, total, area_con):
             """Arma una fila del CSV. `unidad`/`codigo`/`uso`/UF/`area_con` pueden venir
             de una unidad del BCI (fila expandida) o de la parcela (fila normal)."""
+            uf_e = 0
+            if r[8] == "equipamiento":          # especial: sus unidades no son comercios
+                uf_e, uf_v, uf_c = (uf_v or 0) + (uf_c or 0), 0, 0
             return [
                 direccion or "(sin dirección)",
                 unidad, codigo,
-                uso or "", uf_v or 0, uf_c or 0,
+                uso or "", uf_v or 0, uf_c or 0, uf_e,
                 total or 0, r[20] or "", r[21] or "",
                 r[5] or "", r[6] or "", r[7] or "",
                 r[0] or "", r[1] or "",
@@ -3350,8 +3431,10 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 r[28] or "", r[29] or "", r[30] or "",
                 r[31] or "", r[32] or "",
                 r[35] or "", r[36] or "",
-                # DSC_NOME_DO_IMOVEL = nombre(s) del comercio/hotel de la parcela (hoteles + comercios)
-                " | ".join(x for x in (r[37], r[22]) if x),
+                # DSC_NOME_DO_IMOVEL = lo que se ve hoy en el lote: hoteles + comercios + censo y
+                # Overture. Misma composición que el CSV de operadora (`componer_nombre`).
+                componer_nombre([*(r[37] or "").split(" | "), *(r[22] or "").split(" | "),
+                                 *(r[44] or [])]),
                 # DSC_LOGRADOURO_NO = número de la dirección
                 r[3] or "",
                 # Tipo de edificación unificado (parcela-level): uso=r[8], uf_viv=r[9],
@@ -3362,6 +3445,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                                       uf_c=r[10], huella=r[43]), pais),
                 r[40] or "", r[41] or "",
                 f"{r[42]:.2f}" if r[42] is not None else "",
+                r[45] or "",
+                r[46] or "",
             ]
 
         # Letra secuencial (A, B, C…) para direcciones repetidas sin complemento propio.
@@ -3381,10 +3466,27 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             # suyas (método y confianza).
             num_ef = (r[3] or "").strip()
             if (num_ef in ("", "0") and (r[42] or 0) >= _NUMERO_CONF_MIN
+                    and str(r[41] or "") not in _NUMERO_METODOS_EXCLUIDOS
                     and str(r[40] or "") not in ("", "0")):
                 num_ef = f"({r[40]})"
             direccion = " ".join(s for s in (r[2], num_ef, comp_ef) if s).strip()
+            uf_v, uf_c = r[9] or 0, r[10] or 0
             unidades = unidades_por_parcela.get(r[34])
+            # ⚠ **Las filas por unidad sólo valen si SUMAN la UF de la parcela.** Las unidades
+            # son las construcciones que declaró el BCI, pero la UF puede venir de otro lado y
+            # entonces manda sobre ellas: un sello manual (`uf_fuente='manual'`), las
+            # habitaciones de Cadastur, el mínimo de hotel. Abrirlas igual devolvía la ficha
+            # cruda y borraba la corrección. Medido en VAZ049 el 15-sep-2026: 19 parcelas no
+            # sumaban — JAIME BENEVIDES 190 (sellada 1 viv + 0 com) salía 1 + 1, PEDRO
+            # PEDROSSIAN 100 (8 comercios) salía con 2, y los tres hoteles de Cadastur perdían
+            # 224 habitaciones (72→1, 38→1, 117→1). Si no suman, va la fila de la parcela.
+            if unidades and (
+                    sum(1 for u in unidades
+                        if not (u["uso"] or "").lower().startswith("comerc")
+                        and (u["uso"] or "").lower() != "anexo") != uf_v
+                    or sum(1 for u in unidades
+                           if (u["uso"] or "").lower().startswith("comerc")) != uf_c):
+                unidades = None
             if unidades:
                 # Edificio/lote con varias unidades: una fila por unidad (sin conteo).
                 for u in unidades:
@@ -3405,7 +3507,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                         0 if es_anexo else 1,
                         u["area_m2"] or r[13]))
             else:
-                w.writerow(_fila(r, direccion, "", "", r[8], r[9], r[10], r[11], r[13]))
+                # Total = vivienda + comercio. `unidades_funcionales_estimadas` guarda el conteo
+                # crudo de construcciones y no suma: los 57 baldíos de VAZ049 salían con 1.
+                w.writerow(_fila(r, direccion, "", "", r[8], uf_v, uf_c, uf_v + uf_c, r[13]))
         yield buf.getvalue()
 
     return StreamingResponse(
@@ -3718,28 +3822,46 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                             ELSE 'S/N' END AS numero,
                        complemento, barrio, municipio, estado_provincia,
                        codigo_postal, COALESCE(uf_vivienda, 0), COALESCE(uf_comercio, 0),
-                       -- Nombre del comercio de la parcela (para DSC_NOME_DO_IMOVEL): hoteles +
-                       -- comercios (Google) + establecimiento agrupado + shoppings (POI espacial).
-                       NULLIF(TRIM(BOTH ' |' FROM CONCAT_WS(' | ',
-                         (SELECT string_agg(h.nombre, ' | ' ORDER BY h.nombre) FROM hoteles h
+                       -- Nombre del inmueble (DSC_NOME_DO_IMOVEL), en dos grupos que compone
+                       -- `nombre_inmueble.componer_nombre` (ver el loop de abajo). ACTUALES: lo
+                       -- que una fuente ve HOY en el lote — hoteles abiertos, comercios, negocios
+                       -- del censo 2022 y de Overture (`establecimientos_observados`, mig. 067) y
+                       -- shoppings. TITULAR: el nombre del grupo de lotes (`establecimientos`),
+                       -- que es el DUEÑO —«JOSE PEDROSO DE ARRUDA»— y no el negocio; entra sólo
+                       -- si no hay ningún nombre actual, igual que el complemento de la ficha.
+                       ARRAY(SELECT x.n FROM (
+                           SELECT h.nombre AS n, 1 AS o FROM hoteles h
                             WHERE h.parcela_id = parcelas.parcela_id
-                              AND h.nombre IS NOT NULL AND NOT h.cerrado_def),
-                         (SELECT string_agg(co.nombre, ' | ' ORDER BY co.nombre) FROM comercios co
-                            WHERE co.parcela_id = parcelas.parcela_id AND co.nombre IS NOT NULL),
-                         (SELECT est.nombre FROM establecimientos est
-                            WHERE est.establecimiento_id = parcelas.establecimiento_id),
-                         (SELECT string_agg(poi.nombre, ' | ' ORDER BY poi.nombre)
-                            FROM establecimientos_poi poi
+                              AND h.nombre IS NOT NULL AND NOT h.cerrado_def
+                           UNION ALL
+                           SELECT co.nombre, 2 FROM comercios co
+                            WHERE co.parcela_id = parcelas.parcela_id AND co.nombre IS NOT NULL
+                           UNION ALL
+                           SELECT eo.nombre, CASE eo.fuente WHEN 'overture' THEN 3 ELSE 4 END
+                             FROM establecimientos_observados eo
+                            WHERE eo.parcela_id = parcelas.parcela_id
+                           UNION ALL
+                           SELECT poi.nombre, 5 FROM establecimientos_poi poi
                             WHERE poi.region_id = parcelas.region_id AND poi.nombre IS NOT NULL
                               AND parcelas.geometry IS NOT NULL
                               AND ST_Contains(parcelas.geometry,
-                                    ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326)))
-                       )), '') AS nome_imovel,
+                                    ST_SetSRID(ST_MakePoint(poi.lng, poi.lat), 4326))
+                       ) x ORDER BY x.o, x.n) AS nombres_actuales,
+                       (SELECT est.nombre FROM establecimientos est
+                         WHERE est.establecimiento_id = parcelas.establecimiento_id) AS titular,
                        -- UNICO / MULTIPLO: lo sabe el BCI (unidades de la inscrição). Es el
                        -- `COD_TIPO_EDIFICACAO` del layout.
                        (SELECT count(*) FROM parcela_unidades u
                           WHERE u.parcela_id = parcelas.parcela_id) AS n_unidades,
-                       centroid_lat, centroid_lng
+                       centroid_lat, centroid_lng,
+                       -- Especial de la tabla del cliente: sus unidades salen con el tipo
+                       -- (HOTEL, SHOPPING), como en la base del operador, no como COMERCIO.
+                       CASE WHEN uso_principal = 'equipamiento' THEN COALESCE(
+                           (SELECT t.tipo_edificacion FROM parcela_tipo_manual t
+                             WHERE t.parcela_id = parcelas.parcela_id),
+                           (SELECT 'H:' || COALESCE(h.tipo, '') FROM hoteles h
+                             WHERE h.parcela_id = parcelas.parcela_id AND NOT h.cerrado_def
+                             ORDER BY h.habitaciones DESC NULLS LAST LIMIT 1)) END AS tipo_especial
                 FROM parcelas
                 WHERE survey_id = CAST(:sid AS uuid) AND calle IS NOT NULL
                 ORDER BY calle,
@@ -3854,8 +3976,8 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
             w = csv.writer(buf, delimiter=";")
             w.writerow(header)
             yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-            for (calle, numero, compl, barrio, muni, est, cep, uv, uc, nome, n_unid,
-                 c_lat, c_lng) in parc:
+            for (calle, numero, compl, barrio, muni, est, cep, uv, uc, nombres_actuales,
+                 titular, n_unid, c_lat, c_lng, tipo_esp) in parc:
                 # El `complemento` del BCI mezcla cuatro cosas y sólo una es dirección:
                 # unidad ("QUADRA 04 LOTE 13"), nombre del inmueble ("DROGASIL"), nota
                 # registral ("MAT.57499") y referencia ("ESQUINA COM A RUA X"). Sin separar,
@@ -3863,15 +3985,21 @@ async def export_csv_operadora(survey_id: str, celula_id: str = "") -> Streaming
                 # El nombre pasa a su columna propia; el resto no va al layout de operadora
                 # (el valor crudo queda intacto en `parcelas.complemento` y en el CSV completo).
                 unidad, nombre_compl = clasificar_complemento(compl)
-                if nombre_compl:
-                    # Dedupe: el nombre suele venir por partida doble (el hotel ya está en
-                    # `hoteles` y además rotulado en el complemento del BCI).
-                    ya = {p.strip().upper() for p in (nome or "").split("|")}
-                    if nombre_compl.upper() not in ya:
-                        nome = " | ".join(x for x in (nome, nombre_compl) if x)
+                # ⚠ El nombre del complemento es el negocio de CUANDO SE REGISTRÓ el lote, no el
+                # de hoy, y salía tal cual. Detectado por el operador el 16-sep-2026: Ponce de
+                # Arruda 962 decía «ESTACIONAMENTO AEROPARKING» y ahí está la locadora Loca10.
+                # Medido en VAZ049: 10 de 36 nombres comparables ya no estaban, y uno salía
+                # aunque la ficha dijera «ASSADO NA BRASA (FECHADO)». Ahora manda lo que se ve
+                # hoy; el complemento y el titular son respaldo (ver `componer_nombre`).
+                nome = componer_nombre(nombres_actuales or [], (nombre_compl, titular))
                 # Una fila por UNIDAD: uf_vivienda → RESIDENCIAL, uf_comercio → COMERCIO.
                 # Sin UF (vacante) → 1 fila para no perder la dirección.
                 unidades = [TIPO_VIV] * int(uv) + [TIPO_COM] * int(uc)
+                if tipo_esp and unidades:
+                    # Especial con unidades (hotel, shopping): todas con su tipo.
+                    etiqueta = (_hotel_tipo_label(tipo_esp[2:]) if tipo_esp.startswith("H:")
+                                else tipo_esp)
+                    unidades = [etiqueta] * len(unidades)
                 if not unidades:
                     unidades = [""]
                 # Descomposición de la vía, para las columnas que el layout pide por separado.
