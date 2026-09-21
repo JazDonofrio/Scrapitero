@@ -30,6 +30,7 @@ from scrapitero.agents import (
     bci_parser,
     country_fetcher,
     establecimiento_agrupador,
+    establecimientos_observados,
     footprint_fetcher,
     hotel_fetcher,
     hotel_habitaciones_llm,
@@ -172,6 +173,13 @@ def run(input: VGRunnerInput) -> VGRunnerOutput:
          None, True),
         ("parcela_categoria", parcela_categoria.run,
          lambda s: parcela_categoria.ParcelaCategoriaInput(region_id=input.region_id),
+         None, True),
+        # Qué negocio está HOY en cada lote (censo 2022 + Overture, gratis). Sólo da el nombre
+        # del inmueble de los entregables —el complemento del BCI trae el de cuando se registró
+        # el lote— y no toca ninguna cantidad. Opcional/best-effort.
+        ("establecimientos_observados", establecimientos_observados.run,
+         lambda s: establecimientos_observados.ObservadosInput(
+             region_id=input.region_id, survey_id=input.survey_id),
          None, True),
         # Barrios cerrados / condomínios desde OSM → marca parcelas.es_country (capa 🏘 Country).
         ("country_fetcher", country_fetcher.run,
