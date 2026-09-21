@@ -529,6 +529,7 @@ var I18N_PT = {
   'Clonar: crea un relevamiento nuevo y vacío con la misma zona, para empezar de cero (el original queda intacto)':
     'Clonar: cria um levantamento novo e vazio com a mesma zona, para começar do zero (o original fica intacto)',
   '{n} parcelas': '{n} lotes',
+  'los números de UF aparecen al acercar el zoom': 'os números de UF aparecem ao aproximar o zoom',
   'Relevamiento parcial: cubre una sub-zona de la región':
     'Levantamento parcial: cobre uma sub-zona da região',
   'sub-zona': 'sub-zona',

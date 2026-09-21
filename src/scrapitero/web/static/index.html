@@ -3276,6 +3276,47 @@ async function renderRelevamientoAnterior(map, baselineId, paneName, zoneStr, si
            total: d.puntos.length, distintas: grupos.length, enZona, enZonaDistintas };
 }
 
+/* ── Etiquetas de UF sobre el mapa (el número al costado del círculo) ─────────
+   El tooltip permanente de Leaflet crea un nodo del DOM por parcela y los mantiene todos
+   posicionados en cada pan/zoom. Medido en un navegador real sobre el relevamiento de
+   Merlo (92.980 parcelas): pintar con las etiquetas tarda **126 segundos** y sin ellas
+   **2**. Sesenta y tres veces, y durante esos dos minutos la pestaña queda congelada —
+   es lo que se ve como "la web está lenta".
+
+   No se sacan: se dibujan donde SIRVEN. Con 93.000 puntos en pantalla los números se
+   superponen unos sobre otros y no se lee ninguno, así que la etiqueta sólo aporta
+   cuando hay pocas a la vista. Entonces se etiqueta lo que entra en el viewport, y sólo
+   si son pocas; al acercar el zoom aparecen solas.
+
+   ⚠ Por debajo del tope el comportamiento es **idéntico al de antes**: Várzea Grande
+   tiene 567 parcelas, se etiquetan todas de una y no se engancha ningún listener. */
+const UF_LABELS_MAX = 1500;
+
+function _ponerEtiquetaUF(m) {
+  if (m.getTooltip()) return;
+  m.bindTooltip(String(m._ufTotal), {
+    permanent: true, direction: 'right', offset: [7, 0], className: 'uf-label',
+  });
+}
+
+// Etiqueta las parcelas del viewport, si son pocas; si no, no etiqueta ninguna.
+// Devuelve cuántas quedaron visibles.
+function refrescarEtiquetasUF(map) {
+  const ms = map._ufMarkers;
+  if (!ms || !ms.length) return 0;
+  const b = map.getBounds();
+  const dentro = [];
+  for (const m of ms) if (b.contains(m.getLatLng())) dentro.push(m);
+  // Se compara contra el tope ANTES de tocar el DOM: si el viewport tiene medio
+  // relevamiento adentro, etiquetar y desetiquetar sería el mismo trabajo que evitamos.
+  const mostrar = dentro.length <= UF_LABELS_MAX ? new Set(dentro) : new Set();
+  for (const m of ms) {
+    if (mostrar.has(m)) _ponerEtiquetaUF(m);
+    else if (m.getTooltip()) m.unbindTooltip();
+  }
+  return mostrar.size;
+}
+
 async function loadParcelasMap(sid) {
   // Capturar referencia al mapa ANTES del await
   const map = maps[sid];
@@ -3309,6 +3350,7 @@ async function loadParcelasMap(sid) {
   const tipoCounts = {};
   const tipoColor = {};
   const markers = [];
+  const ufMarkers = [];   // los que llevan número de UF al costado
   const byPid = {};
   let nuevoUF = 0;   // UF total (viv+com) del relevamiento nuevo, para comparar en la leyenda
 
@@ -3436,13 +3478,11 @@ async function loadParcelasMap(sid) {
                 // y dejaba los botones de abajo (comentar, 📌 marcar) fuera de la pantalla.
                 {maxWidth: 260, maxHeight: 360});
     if (p.parcela_id) byPid[p.parcela_id] = m;
-    // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay)
-    if (p.uf_total > 0) {
-      m.bindTooltip(String(p.uf_total), {
-        permanent: true, direction: 'right', offset: [7, 0],
-        className: 'uf-label',
-      });
-    }
+    // Label permanente con la cantidad de UF totales, al lado del círculo (solo si hay).
+    // Se ANOTA acá y se dibuja después: con muchas parcelas se etiqueta sólo lo que entra
+    // en el viewport (ver `refrescarEtiquetasUF`), porque el tooltip permanente es lo más
+    // caro que hace este mapa.
+    if (p.uf_total > 0) { m._ufTotal = p.uf_total; ufMarkers.push(m); }
     m.addTo(map);
     markers.push(m);
 
@@ -3461,6 +3501,21 @@ async function loadParcelasMap(sid) {
   activeMarkers[sid] = markers;
   parcelaMarkers[sid] = byPid;
 
+  // Números de UF: pocos ⇒ todos de una (camino de siempre, sin listeners); muchos ⇒ sólo
+  // los del viewport, recalculados al mover el mapa. El handler anterior se desengancha
+  // porque `loadParcelasMap` se llama de nuevo en cada repintado.
+  if (map._ufHandler) { map.off('moveend', map._ufHandler); delete map._ufHandler; }
+  map._ufMarkers = ufMarkers;
+  let ufDiferidas = false;
+  if (ufMarkers.length <= UF_LABELS_MAX) {
+    ufMarkers.forEach(_ponerEtiquetaUF);
+  } else {
+    ufDiferidas = true;
+    map._ufHandler = () => refrescarEtiquetasUF(map);
+    map.on('moveend', map._ufHandler);
+    refrescarEtiquetasUF(map);
+  }
+
   // Registrar/actualizar las capas de ítems críticos como overlays toggleables del mapa.
   if (map._layersCtl) {
     const prev = criticalLayers[sid] || {};
@@ -3476,7 +3531,13 @@ async function loadParcelasMap(sid) {
 
   // Contador visible en el mapa
   const cntEl = document.getElementById('mcount-' + sid);
-  if (cntEl) { cntEl.textContent = t('{n} parcelas', {n: markers.length}); cntEl.style.display = 'block'; }
+  if (cntEl) {
+    // Sin esta aclaración el operador ve el mapa sin números y lo lee como un dato que
+    // falta, no como una decisión de legibilidad.
+    cntEl.textContent = t('{n} parcelas', {n: markers.length})
+      + (ufDiferidas ? ' · ' + t('los números de UF aparecen al acercar el zoom') : '');
+    cntEl.style.display = 'block';
+  }
 
   // Leyenda (referencias): con comparativa activa va por estado (nueva/cambió/igual);
   // si no, por tipo de edificación de la taxonomía del cliente con su conteo.
