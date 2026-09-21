@@ -1,6 +1,6 @@
 ---
 name: vg-pipeline-runner
-description: "Pipeline VG completo en UNA sola llamada determinista: SmartGIS → BCI (con parseo inline) → BCIParser → EstablecimientoAgrupador. Registra cada paso en surveys.notes, honra el stop del operador y marca completed al final. Preferir SIEMPRE sobre orquestar los pasos VG uno por uno."
+description: "Pipeline VG completo en UNA sola llamada determinista: SmartGIS → BCI (con parseo inline) → BCIParser → EstablecimientoAgrupador → shoppings y categorías → establecimientos observados (censo 2022 + Overture, incluidos los domicilios) → hoteles (que aplican solas las reglas de ubicación y de especial) → footprints y altura. Registra cada paso en surveys.notes, honra el stop del operador y marca completed al final. Preferir SIEMPRE sobre orquestar los pasos VG uno por uno."
 version: 1.0.0
 author: Scrapitero
 platforms: [linux]
@@ -37,7 +37,7 @@ python3 -m scrapitero.rpc.vg_pipeline_runner <<< '{"region_id":"<REGION_ID>","su
 ```json
 {
   "ok": true,
-  "pasos_ejecutados": ["smartgis_fetcher", "varzea_bci_fetcher", "bci_parser", "establecimiento_agrupador"],
+  "pasos_ejecutados": ["smartgis_fetcher", "varzea_bci_fetcher", "bci_parser", "establecimiento_agrupador", "establecimientos_observados", "hotel_fetcher", "footprint_fetcher"],
   "resumen": {"varzea_bci_fetcher": {"pdfs_descargados": 47, "parcelas_parseadas": 47}},
   "parcial": false,
   "siguiente": null,
@@ -59,8 +59,19 @@ python3 -m scrapitero.rpc.vg_pipeline_runner <<< '{"region_id":"<REGION_ID>","su
 1. `smartgis-fetcher` (re-corre mientras devuelva parcial — acumula cobertura)
 2. `varzea-bci-fetcher` (parseo inline: uso/UF/dirección a DB con cada PDF; re-corre mientras parcial)
 3. `bci-parser` (red de seguridad idempotente)
-4. `establecimiento-agrupador`
-5. Marca `completado` + `surveys.status='completed'`
+4. `scope-calles-filter` (sólo en modo actualización por calle+rango) y `establecimiento-agrupador`
+5. `shopping-fetcher` (OSM; Google es pago y se corre aparte) y `parcela-categoria`
+6. `establecimientos-observados`: qué negocio se ve HOY en cada lote (censo 2022 + Overture) y
+   los **domicilios del censo**, que son el control independiente del conteo de viviendas
+7. `country-fetcher` (barrios cerrados) y `hotel-fetcher`, que al final aplica solo
+   **`hotel-reglas`**: ubica el hotel por consenso de pines y deja el lote como especial con sus
+   habitaciones (o PENSÃO si es una pousada con kitnets)
+8. `hotel-habitaciones-llm` (opcional, pago por hotel) y las capas de revisión:
+   `footprint-fetcher` y `altura-fetcher`
+9. Marca `completado` + `surveys.status='completed'`
+
+**No incluye `incidencias-reporter`**: correlo después de terminar, para dejarle al operador la
+lista de lo que hay que mirar (incluida la diferencia entre la ficha y el censo).
 
 Cada paso queda registrado en `surveys.notes.pasos` (la web lo muestra en vivo).
 Los sub-agentes ya notifican su propio avance por Telegram.

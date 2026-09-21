@@ -65,6 +65,11 @@ python3 -m scrapitero.rpc.bci_parser <<< '{"region_id":"<REGION_ID>","batch_size
 | `batch_size` | 0 (todas) | Limitar cantidad |
 
 ## Notas
+- 🔒 **Sellos que el re-parseo NO pisa** (`manual`, `cadastur`, `hotel_min`, `google`,
+  `shopping_min`, `regla_hoteles`): son UF que el BCI no puede reconstruir. `regla_hoteles` es el
+  lote de un hotel resuelto por `hotel-reglas` (especial con sus habitaciones, o pensão); sin esa
+  guarda, un re-parseo le devolvía al Slaviero Slim el "baldío" de su ficha vieja y al Amazon
+  Aeroporto su única unidad del catastro.
 - ⚠️ **`pdf_dir` debe coincidir con el de VGBCIFetcher.** Si el parser reporta "PDFs
   faltantes" pero el fetcher dijo que ya existían, es casi siempre un desajuste de
   `pdf_dir` (el fetcher descargó en otra carpeta — p.ej. el CWD del container Hermes). El

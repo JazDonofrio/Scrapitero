@@ -15,6 +15,18 @@ metadata:
 Genera una planilla CSV con el reporte completo del relevamiento y la envía como archivo por Telegram.
 El archivo se abre directamente en Google Sheets al subirlo a Google Drive.
 
+## ⚠️ No confundir con el CSV por lote de la web
+Esta skill arma el **reporte resumen** (totales, cobertura, top calles). El **CSV por lote** —una
+fila por unidad, con la dirección, la UF y el detalle de cada parcela— sale de la web
+(`/api/surveys/{survey_id}/export/csv`) y es el que usa el operador. Ese archivo lleva además
+tres columnas que conviene mirar antes de entregar:
+
+| Columna | Qué trae |
+|---------|----------|
+| `UF Especial` | las unidades de un lote especial: habitaciones del hotel, locales del shopping, 1 para una escuela o una iglesia |
+| `Revisión` | dato con respaldo que la referencia del cliente contradice, y las dudas que marca `hotel-reglas` (prefijo `[hoteles]`) |
+| `Incidencias pendientes` | los tipos del panel que siguen **sin resolver** en ese lote — ninguna exportación los filtra, así que el lote sale igual |
+
 ## Cuándo usar
 - "mandame la planilla del relevamiento"
 - "quiero bajar el CSV"

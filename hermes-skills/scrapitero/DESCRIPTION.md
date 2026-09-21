@@ -68,6 +68,20 @@ PYTHONPATH y credenciales DB ya están configuradas en el entorno. Usar `<<<` (h
 | `onr-sigef-fetcher` | Predios rurales SIGEF/INCRA (cualquier área de Brasil) |
 | `onr-carto-identify` | Identificar qué cartório registra un punto (CNS + nombre). Para VG siempre devuelve CNS=063446 |
 
+### Control de calidad y revisión humana
+
+| Skill | Cuándo usarla |
+|-------|---------------|
+| `incidencias-reporter` | **Al terminar de relevar una zona.** Deja en el panel todo lo que tiene que mirar un humano: construcción no declarada, UF imposible o sin declarar, **diferencia entre la ficha del catastro y el censo 2022**, falta de número, ubicación dudosa, hoteles sin habitaciones |
+| `establecimientos-observados` | Brasil. Qué negocio se ve HOY en cada lote (censo 2022 + Overture) y los domicilios del censo, que son el control del conteo de viviendas. Corre antes de `incidencias-reporter` |
+
+### Hoteles y hospedaje
+
+| Skill | Cuándo usarla |
+|-------|---------------|
+| `hotel-fetcher` | Traer los hoteles de la zona (Cadastur, Receita, OSM) y dejarlos en su parcela. En Brasil aplica solo `hotel-reglas` |
+| `hotel-reglas` | Medir en seco qué haría con los hoteles de una zona, o re-aplicar las reglas después de cargar hoteles a mano |
+
 ### Enriquecimiento
 
 | Skill | Cuándo usarla |
@@ -93,6 +107,7 @@ PYTHONPATH y credenciales DB ya están configuradas en el entorno. Usar `<<<` (h
 | `relevamiento-reporter` | Usuario pide reporte o resumen del relevamiento |
 | `relevamiento-csv` | Usuario pide planilla, Excel, CSV, Google Sheets o Google Drive |
 | `relevamiento-pdf` | Usuario pide exportar o recibir el reporte en PDF |
+| `dxf-entrega` | Usuario pide el plano en el formato de la operadora brasilera (bloques SDU/MDU sobre el mapa base municipal) |
 
 ---
 
