@@ -71,6 +71,7 @@ _ETIQUETAS = {
     "bci": "Boletín de cadastro inmobiliario (BCI) del municipio",
     "cadastur": "Padrón federal de turismo (Cadastur)",
     "hotel_min": "Hotel confirmado, sin cantidad de habitaciones",
+    "regla_hoteles": "Hotel o pensão según la tabla del cliente (hotel = especial con sus habitaciones)",
     "shopping_min": "Shopping identificado, sin cantidad de locales",
     "poi": "Comercios relevados (Overture Maps y OpenStreetMap)",
     "overture": "Comercios relevados (Overture Maps)",

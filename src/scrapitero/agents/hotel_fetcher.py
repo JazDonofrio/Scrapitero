@@ -93,6 +93,7 @@ class HotelFetcherOutput(BaseModel):
     total_uf_comercio: int = 0
     sin_habitaciones: int = 0        # abiertos sin habitaciones → asistencia humana
     cadastur_enriquecidos: int = 0   # fichas de Cadastur que tomaron la altura de Receita
+    reglas: dict = {}                # resumen de `HotelReglas` (sólo Brasil)
 
 
 def _norm(s: Optional[str]) -> str:
@@ -1354,6 +1355,24 @@ def run(input: HotelFetcherInput) -> HotelFetcherOutput:
             "sin cantidad de habitaciones (Cadastur caído / sin dato).\n"
             "Hay que conseguirlas (llamando al hotel) y cargarlas a mano acá:\n"
             f"{link}")
+
+    # Reglas de hoteles (sólo Brasil): ubicar por consenso de pines lo que el pin fiscal no
+    # vinculó o vinculó mal, y clasificar según la tabla del cliente (hotel = especial, 0 UF;
+    # pensão = residencial). Va acá y no como paso aparte del runner para que el botón 🏨 deje
+    # el mismo resultado que el pipeline: si no, cada corrida suelta del fetcher volvía a cargar
+    # las habitaciones como comercio. Best-effort: si falla, queda lo de arriba.
+    if input.set_uf and input.survey_id:
+        try:
+            from scrapitero.agents import hotel_reglas
+            r = hotel_reglas.run(hotel_reglas.HotelReglasInput(
+                region_id=input.region_id, survey_id=input.survey_id))
+            out.reglas = {"omitido": r.omitido} if r.omitido else {
+                "vinculados": len(r.vinculados), "desvinculados": len(r.desvinculados),
+                "especiales": len(r.especiales), "pensoes": len(r.pensoes),
+                "lotes_marcados": len(r.marcas), "error": r.error}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"HotelFetcher: HotelReglas falló ({e!r}) — quedan las UF por habitación")
+            out.reglas = {"error": repr(e)}
 
     logger.info(f"HotelFetcher {input.region_id}: zona={out.hoteles_en_zona} "
                 f"por_fuente={out.por_fuente} fallidas={out.fuentes_fallidas} "

@@ -33,8 +33,11 @@ from __future__ import annotations
 #                   le daba a un piso la protección de un conteo oficial, con lo que ninguna
 #                   fuente mejor podía corregirlo. Mismo modo de falla que 'overture' → 'poi'
 #   shopping_min  → piso de UF=1 que pone ParcelaCategoria a un shopping
+#   regla_hoteles → `HotelReglas` (sep-2026, sólo Brasil): el lote del hotel es ESPECIAL (con sus habitaciones) o
+#                   PENSÃO (residencial) según la tabla del cliente. Un 0/0 que el BCI o un conteo
+#                   de POI no deben rellenar: el hotel no se cuenta por habitaciones ni por locales
 UF_FUENTES_PROTEGIDAS = ("('manual','google','overture','poi','cadastur','hotel_min',"
-                         "'shopping_min')")
+                         "'shopping_min','regla_hoteles')")
 
 # Sellos que `_agregar_uf` SÍ puede reescribir aunque estén protegidos: los suyos. Sin esto
 # el agente se auto-bloquea con el sello que él mismo dejó y no puede refrescar su conteo en
@@ -72,5 +75,6 @@ DIRECCION_FUENTES_PROTEGIDAS = ("('manual','catastro','catastro_interp','google_
 #   cadastur     → hotel con habitaciones exactas
 #   hotel_min    → hotel confirmado sin conteo de habitaciones (ver arriba). El USO igual es
 #                  firme: que no sepamos cuántos cuartos tiene no cambia que ahí hay un hotel
+#   regla_hoteles → `HotelReglas`: 'equipamiento' (hotel = especial) o 'residencial' (pensão)
 USO_FUENTES_PROTEGIDAS = ("('manual','overture','poi','google','clasificador',"
-                          "'bci','cadastur','hotel_min')")
+                          "'bci','cadastur','hotel_min','regla_hoteles')")
