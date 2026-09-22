@@ -104,6 +104,9 @@ _BCI_USO_RE = r'\bUSO\s+(' + "|".join(
     sorted(_BCI_USO_CAT, key=len, reverse=True)) + r')\b'
 # Etiqueta canónica de uso por unidad (lo que se guarda en parcela_unidades.uso y usa el
 # CSV expandido). Servicios/religioso/ensino/público quedan como 'comercial'.
+# Techo del número de puerta que se copia de la ficha. Ver la guarda en el parseo del CEP.
+_NUMERO_MAX_PLAUSIBLE = 20000
+
 _CAT_USO_LABEL = {"vivienda": "residencial", "comercio": "comercial",
                   "industrial": "industrial"}
 
@@ -600,7 +603,21 @@ def _parse_bci(text: str) -> dict:
             # Número de puerta = último token numérico antes del CEP
             num_m = re.search(r'\s(\d{1,5})\s*$', before)
             if num_m:
-                r["numero"] = num_m.group(1)
+                # **Guarda de número imposible.** La ficha puede imprimir un centinela en el
+                # lugar del número: Rua São Bernardo `51000`, en una calle cuyos 13 lotes van
+                # del 12 al 400 (cca 101203, VAZ049). Copiado tal cual salía al entregable como
+                # `51000C`, y la dirección no existe. Por encima de `_NUMERO_MAX_PLAUSIBLE` no
+                # se copia: la parcela queda sin número —que es lo que el municipio realmente
+                # declara— y `IncidenciasReporter` la levanta como `numero_faltante`.
+                # El tope es holgado a propósito: el número más alto de Várzea Grande es 1.096
+                # y en el conurbano bonaerense hay alturas de 5 dígitos, así que sólo corta lo
+                # que no puede ser una puerta.
+                if int(num_m.group(1)) <= _NUMERO_MAX_PLAUSIBLE:
+                    r["numero"] = num_m.group(1)
+                else:
+                    logger.warning(
+                        f"BCIParser: número {num_m.group(1)} descartado por imposible "
+                        f"(> {_NUMERO_MAX_PLAUSIBLE}) en «{before}»; la parcela queda S/N")
                 logradouro_raw = before[:num_m.start()].strip()
             else:
                 logradouro_raw = before

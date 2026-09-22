@@ -22,6 +22,15 @@ metadata:
 - **Mapa base del municipio** (`QUADRA`, `MEIOFIO`) desde `mapa_base_cliente`, y los nombres de
   calle apoyados sobre el eje real de OSM.
 
+## Vivienda y especial en el mismo lote
+Un lote puede llevar **dos fichas**: la `R` con sus pisos y la `E` detrás, hacia el fondo
+(`uf_especial`, mig. 070) — la casa adelante y la escuela o el gimnasio atrás. Es la convención del
+propio cliente: en su DWG hay 56 lotes con dos fichas adentro, 54 de ellas una detrás de la otra
+(mediana 14,9 m sobre el eje largo del lote, 0,4 m sobre el frente) y las 56 con el mismo número.
+Si el especial tiene número propio va en `especial_numero` y la ficha sale con ése. La ficha `E` no
+lleva pisos: los pisos son de la vivienda. **Un hotel o un shopping NO usa `uf_especial`**: ésos son
+el lote entero (`uso_principal='equipamiento'`).
+
 ## Los tipos, y el especial
 `R` residencial, `C` comercial, `E` especial, y `VAZ` para el baldío, que tiene capa propia.
 
@@ -62,5 +71,11 @@ python3 -m scrapitero.rpc.dxf_entrega <<< '{"survey_id":"<SURVEY_ID>","celula_id
 - **El plano de una zona puede estar fijado a mano.** Cuando existe un DXF fijado, la web sirve
   ese archivo y no el generado: para pasarle los cambios de la base hay que sincronizarlo, no
   regenerarlo, o se pierden las fichas movidas por el cliente.
+- ⚠️ **Regenerar el plano de Várzea pisa la geometría del cliente.** El fijado tiene sus manzanas y
+  sus lotes (`QUADRA` 108 + `DIV` 504); una generación de cero dibuja 293 y 544 — 185 manzanas y 40
+  lotes propios ENCIMA de los suyos. El plano entregado se parcha ficha por ficha, nunca se
+  reemplaza por el generado.
+- La descarga del entregable sale con `Cache-Control: no-store`: la URL es siempre la misma y el
+  archivo cambia abajo, así que sin eso otra máquina se baja la versión vieja de su caché.
 - Sin los ejes de calle de OSM (`ejes_calle`, clave `OSM_<region_id>`) los nombres se ubican por
   deducción y quedan en la calle equivocada, sin avisar.

@@ -15,9 +15,9 @@ Estructura del dibujo — todo en **capas separadas** para que el proyectista pr
 apague lo que necesite:
 
     PARCELAS          polilínea cerrada del lote (el polígono del catastro)
-    UF_VIVIENDA       texto con las unidades de vivienda        ← el dato pedido
-    UF_COMERCIO       texto con las unidades de comercio
-    DIRECCION         calle + número (con el estimado, regla del cliente)
+    UF_VIVIENDA       rótulo del cliente de las viviendas: `350R`, `25R-2`  ← el dato pedido
+    UF_COMERCIO       ídem de los comercios (`350C`) y de los especiales (`350E-8`)
+    DIRECCION         el número solo, cuando las capas de UF están apagadas y nadie más lo dice
     TIPO_EDIFICACION  etiqueta de la taxonomía del cliente
     DATOS             bloque con TODOS los atributos, invisible en pantalla pero
                       consultable desde la ventana de propiedades de AutoCAD
@@ -104,6 +104,7 @@ class DXFOutput(BaseModel):
     parcelas: int = 0
     uf_vivienda_total: int = 0
     uf_comercio_total: int = 0
+    uf_especial_total: int = 0
     epsg: Optional[int] = None
     error: Optional[str] = None
 
@@ -158,7 +159,11 @@ def _consultar(survey_id: str, solo_con_uf: bool,
                 -- `DXFEntrega` para `QTD_ANDARES`, que es un campo VISIBLE de la ficha MDU
                 -- y que el cliente llena en sus 12 fichas de ejemplo (valores de 2 a 9).
                 (SELECT a.pisos_satelital FROM parcela_altura a
-                   WHERE a.parcela_id = parcelas.parcela_id LIMIT 1) AS pisos_satelital
+                   WHERE a.parcela_id = parcelas.parcela_id LIMIT 1) AS pisos_satelital,
+                -- El especial que CONVIVE con otro uso en el lote (mig. 070): la escuela
+                -- detrás de la casa. El hotel y el shopping no salen por acá — ésos son el
+                -- lote entero (`uso_principal='equipamiento'`).
+                COALESCE(uf_especial, 0) AS uf_especial, especial_tipo, especial_numero
             FROM parcelas
             WHERE survey_id = :sid AND geometry IS NOT NULL {filtro_uf}
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -183,6 +188,29 @@ def _pais_de_survey(survey_id: str) -> Optional[str]:
             SELECT r.country_code FROM surveys s JOIN regions r ON s.region_id = r.region_id
             WHERE s.survey_id = :sid
         """), {"sid": survey_id}).scalar()
+
+
+def _sumar(total_v: int, total_c: int, total_e: int, uso, uf_v, uf_c) -> tuple[int, int, int]:
+    """Acumula la UF de una parcela con el criterio del entregable: una fila por unidad.
+
+    El especial (`uso_principal='equipamiento'`) tiene sus unidades en `uf_comercio` —las
+    habitaciones del hotel, los locales del shopping— pero el cliente las cuenta en su
+    propia categoría `E`, no como comercio. Misma separación que el CSV y el plano.
+    """
+    if uso == "equipamiento":
+        return total_v, total_c, total_e + (uf_v or 0) + (uf_c or 0)
+    return total_v + (uf_v or 0), total_c + (uf_c or 0), total_e
+
+
+def _etiqueta_cliente(numero: str, tp: str, cantidad: int) -> str:
+    """Rótulo con la nomenclatura del cliente, igual que el `N_C1_3_TP_QT` del plano.
+
+    Número + tipo (`R` residencial, `C` comercial, `E` especial) y, sólo si hay más de una
+    unidad, `-cantidad`: `350R`, `25R-2`, `S/NC`. El número estimado ya viene entre
+    paréntesis de quien llama, que es la marca con la que el cliente distingue el dato
+    del catastro del deducido.
+    """
+    return f"{numero}{tp}" + (f"-{cantidad}" if cantidad > 1 else "")
 
 
 def _tipo_label(uso, uf_v, area, descripcion, hotel_tipo, manual, uf_c=0, huella=None) -> str:
@@ -258,7 +286,7 @@ def run(input: DXFInput) -> DXFOutput:
     # parte cara del loop (el tipo reusa `_tipo_edificacion` de la web).
     solo_geometria = not (capas & _CAPAS_POR_PARCELA)
 
-    rows, region_nombre, (est_uf_v, est_uf_c) = _consultar(
+    rows, region_nombre, _ = _consultar(
         input.survey_id, input.solo_con_uf, input.max_parcelas)
     if region_nombre is None:
         return DXFOutput(ok=False, error=f"Survey no encontrado: {input.survey_id}")
@@ -302,14 +330,21 @@ def run(input: DXFInput) -> DXFOutput:
     msp = doc.modelspace()
 
     h = input.text_height
-    total_v = total_c = 0
+    # Se cuenta UNA FILA POR UNIDAD, el mismo criterio del CSV de operadora y del plano de
+    # entrega, para que los tres digan el mismo número: este archivo es la herramienta con la
+    # que se controla el entregable y contando distinto no sirve para controlarlo (22-sep-2026).
+    # Antes agrupaba por establecimiento —la entidad contaba por su miembro más desarrollado,
+    # como los KPIs de la web— y en VAZ049 daba 380/1.164 contra los 1.660 del entregable.
+    # El especial (hotel, shopping, escuela) va aparte: sus unidades viven en `uf_comercio`
+    # pero el cliente las cuenta en su propia categoría.
+    total_v = total_c = total_e = 0
     dibujadas = 0
 
     for row, geom in zip(rows, geoms):
         (_, calle, numero, complemento, barrio, cep, uf_v, uf_c, uf_fuente, uso,
          cca, area_t, area_c, pisos, num_est, num_est_conf, _categoria, descripcion,
          establecimiento_id, est_tipo, est_nombre, tipo_manual, hotel_tipo, huella,
-         _pisos_sat) = row
+         _pisos_sat, uf_e, _esp_tipo, esp_num) = row
 
         anillos = _anillos(geom)
         if not anillos:
@@ -322,9 +357,7 @@ def run(input: DXFInput) -> DXFOutput:
                 )
 
         if solo_geometria:
-            if establecimiento_id is None:
-                total_v += uf_v or 0
-                total_c += uf_c or 0
+            total_v, total_c, total_e = _sumar(total_v, total_c, total_e, uso, uf_v, uf_c)
             dibujadas += 1
             continue
 
@@ -347,16 +380,30 @@ def run(input: DXFInput) -> DXFOutput:
         # **Sólo el número**, no la calle: el nombre se repite en toda la cuadra (es
         # ruido) y no entra en un lote de 10 m de frente. La dirección completa viaja
         # igual en el bloque de atributos, que es donde se consulta.
+        #
+        # La UF se rotula con la NOMENCLATURA DEL CLIENTE, la misma del plano de entrega
+        # (`350R`, `25R-2`, `S/NC`): antes decía «1 VIV» / «2 COM», y abierto en la misma
+        # sesión de AutoCAD que el plano parecía un relevamiento dibujado encima del otro
+        # —el número por un lado, «1 VIV» y «RESIDÊNCIA» por el otro (reportado 22-sep-2026).
+        # Un lote especial (hotel, shopping, escuela) sale `E` como en el plano.
+        tp_v = "E" if uso == "equipamiento" else "R"
+        tp_c = "E" if uso == "equipamiento" else "C"
+        etiqueta = num or "S/N"
         lineas = []
         if num:
             lineas.append((num, "DIRECCION", h * 0.8))
         if uf_v:
-            lineas.append((f"{uf_v} VIV", "UF_VIVIENDA", h))
+            lineas.append((_etiqueta_cliente(etiqueta, tp_v, uf_v), "UF_VIVIENDA", h))
         if uf_c:
-            lineas.append((f"{uf_c} COM", "UF_COMERCIO", h))
+            lineas.append((_etiqueta_cliente(etiqueta, tp_c, uf_c), "UF_COMERCIO", h))
         if tipo:
             lineas.append((tipo, "TIPO_EDIFICACION", h * 0.7))
         lineas = [linea for linea in lineas if linea[1] in capas]
+        # El número ya va DENTRO del rótulo de UF: repetirlo arriba es la línea de más que
+        # hacía ver dos relevamientos. Si las capas de UF están apagadas, la de dirección
+        # vuelve a ser la única que lo dice y se mantiene.
+        if any(linea[1] in ("UF_VIVIENDA", "UF_COMERCIO") for linea in lineas):
+            lineas = [linea for linea in lineas if linea[1] != "DIRECCION"]
 
         # Los lotes de VG son angostos y muy desiguales: con una altura fija los rótulos
         # de los chicos se pisan entre sí y con los del vecino. Se escala al ancho real
@@ -406,21 +453,8 @@ def run(input: DXFInput) -> DXFOutput:
             ref = msp.add_blockref(_BLOQUE, (cx, cy), dxfattribs={"layer": "DATOS"})
             ref.add_auto_attribs(atributos)
 
-        # El total NO suma las parcelas agrupadas en un establecimiento: la entidad
-        # cuenta una vez (por su miembro más desarrollado) y se agrega aparte, abajo.
-        # El rótulo de la parcela sí muestra su propia UF — es el dato de esa parcela.
-        if establecimiento_id is None:
-            total_v += uf_v or 0
-            total_c += uf_c or 0
+        total_v, total_c, total_e = _sumar(total_v, total_c, total_e, uso, uf_v, uf_c)
         dibujadas += 1
-
-    # Cada establecimiento aporta la UF de su miembro más desarrollado (ya calculada en
-    # la tabla `establecimientos`), en lugar de la suma de las parcelas que lo componen.
-    # Sólo aplica al export completo: con `max_parcelas` el recorte no tiene por qué
-    # contener todos los miembros, así que el total sería peor que la suma cruda.
-    if not input.max_parcelas:
-        total_v += est_uf_v
-        total_c += est_uf_c
 
     # Metadatos en el propio dibujo: sin esto, un DXF sin CRS declarado es incalzable
     # contra los planos del cliente y nadie puede auditar con qué salió.
@@ -431,6 +465,8 @@ def run(input: DXFInput) -> DXFOutput:
             f"{datetime.now():%Y-%m-%d %H:%M} | CRS {geo.nombre_crs(epsg)} "
             f"(EPSG:{epsg}) | unidades: metros | "
             f"{dibujadas} parcelas | {total_v} UF vivienda | {total_c} UF comercio | "
+            f"{total_e} UF especial | {total_v + total_c + total_e} UF total "
+            f"(una fila por unidad, igual que el CSV y el plano) | "
             f"numero entre parentesis = estimado (el municipio no lo declaro)")
     msp.add_text(nota, dxfattribs={"layer": "_METADATOS", "height": h}) \
        .set_placement((mx, my - h * 4))
@@ -451,7 +487,8 @@ def run(input: DXFInput) -> DXFOutput:
     doc.saveas(out)
 
     logger.info(f"DXFExport {input.survey_id}: {dibujadas} parcelas, "
-                f"{total_v} UF viv / {total_c} UF com, EPSG:{epsg} → {out}")
+                f"{total_v} UF viv / {total_c} UF com / {total_e} UF esp, EPSG:{epsg} → {out}")
 
     return DXFOutput(ok=True, dxf_path=str(out), parcelas=dibujadas,
-                     uf_vivienda_total=total_v, uf_comercio_total=total_c, epsg=epsg)
+                     uf_vivienda_total=total_v, uf_comercio_total=total_c,
+                     uf_especial_total=total_e, epsg=epsg)

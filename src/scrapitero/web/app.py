@@ -3343,7 +3343,10 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 -- qué está sin revisar (el CSV del cliente no lleva columnas nuestras: su layout es
                 -- contrato, así que el aviso vive en el CSV interno).
                 (SELECT string_agg(DISTINCT i.tipo, ', ' ORDER BY i.tipo) FROM incidencias i
-                  WHERE i.parcela_id = parcelas.parcela_id AND i.estado = 'pendiente') AS incidencias
+                  WHERE i.parcela_id = parcelas.parcela_id AND i.estado = 'pendiente') AS incidencias,
+                -- Especial que CONVIVE con otro uso en el lote (mig. 070): la escuela detrás de
+                -- la casa. El hotel y el shopping NO salen por acá: ésos son el lote entero.
+                COALESCE(uf_especial, 0) AS uf_especial, especial_tipo
             FROM parcelas
             WHERE survey_id = :sid
             ORDER BY calle NULLS LAST, numero NULLS LAST
@@ -3378,7 +3381,9 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             "Dirección", "Unidad", "Código Unidad", "Uso", "UF Vivienda", "UF Comercio",
             # Unidades de un especial de la tabla del cliente (hotel: habitaciones; shopping:
             # locales). En la base van en `uf_comercio` —así suman en todos los totales— y el
-            # lote se reconoce por `uso_principal = 'equipamiento'` (Jaz, 18-sep-2026).
+            # lote se reconoce por `uso_principal = 'equipamiento'` (Jaz, 18-sep-2026). Y el
+            # especial que CONVIVE con otro uso —la escuela detrás de la casa— va en
+            # `uf_especial` (mig. 070): ahí la vivienda sigue contando en su columna.
             "UF Especial",
             "Total UF", "UF Fuente", "Uso Fuente",
             "Bairro", "Municipio", "CEP",
@@ -3409,11 +3414,15 @@ async def export_csv(survey_id: str) -> StreamingResponse:
             uf_e = 0
             if r[8] == "equipamiento":          # especial: sus unidades no son comercios
                 uf_e, uf_v, uf_c = (uf_v or 0) + (uf_c or 0), 0, 0
+            elif r[47]:
+                # Casa + especial en el mismo lote: la vivienda queda como está y el especial
+                # suma en su columna, con su etiqueta en «Tipo de edificación» si la tiene.
+                uf_e = r[47]
             return [
                 direccion or "(sin dirección)",
                 unidad, codigo,
                 uso or "", uf_v or 0, uf_c or 0, uf_e,
-                total or 0, r[20] or "", r[21] or "",
+                (total or 0) + (uf_e if r[8] != "equipamiento" else 0), r[20] or "", r[21] or "",
                 r[5] or "", r[6] or "", r[7] or "",
                 r[0] or "", r[1] or "",
                 f"{r[12]:.2f}" if r[12] else "",
@@ -3442,7 +3451,8 @@ async def export_csv(survey_id: str) -> StreamingResponse:
                 # uf_com=r[10], huella satelital=r[43]
                 _tipo_localizado(
                     _tipo_edificacion(r[8], r[9], r[13], r[36], r[38], r[39],
-                                      uf_c=r[10], huella=r[43]), pais),
+                                      uf_c=r[10], huella=r[43]), pais)
+                + (f" + {_tipo_localizado(r[48], pais)}" if r[47] and r[48] else ""),
                 r[40] or "", r[41] or "",
                 f"{r[42]:.2f}" if r[42] is not None else "",
                 r[45] or "",
@@ -4267,6 +4277,7 @@ async def export_procedencia_pdf(survey_id: str):
 
     return FileResponse(
         destino, media_type="application/pdf", filename=nombre,
+        headers={"Cache-Control": "no-store"},
         background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
     )
 
@@ -4328,7 +4339,12 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
         shutil.rmtree(tmpdir, ignore_errors=True)
         logger.warning(f"DXF fijado a mano para {survey_id}: se sirve {fijado} "
                        f"en vez de generarlo. Borrar el archivo para volver al pipeline.")
-        return FileResponse(str(fijado), media_type="image/vnd.dxf", filename=nombre)
+        # `no-store`: la URL de descarga es SIEMPRE la misma y el archivo cambia abajo (el
+        # fijado se parcha, no se regenera). Sin esta cabecera el navegador aplica caché
+        # heurística sobre `Last-Modified` y otra máquina se baja la versión vieja sin
+        # pedirla de nuevo — reportado por Jaz el 22-sep-2026.
+        return FileResponse(str(fijado), media_type="image/vnd.dxf", filename=nombre,
+                            headers={"Cache-Control": "no-store"})
 
     # Pedir capas es pedir el dibujo interno, aunque el país tenga plano: el diálogo de
     # descarga ofrece los dos formatos y el entregable no tiene capas elegibles.
@@ -4357,6 +4373,7 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
 
     return FileResponse(
         destino, media_type="image/vnd.dxf", filename=nombre,
+        headers={"Cache-Control": "no-store"},
         background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
     )
 

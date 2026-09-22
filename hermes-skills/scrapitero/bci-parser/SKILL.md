@@ -79,6 +79,15 @@ python3 -m scrapitero.rpc.bci_parser <<< '{"region_id":"<REGION_ID>","batch_size
 - 📁 **Carpeta por ciudad:** lee de `pdf_dir/<ciudad>/reporte_{codigo}.pdf`, la misma
   subcarpeta donde VGBCIFetcher guarda (la ciudad se resuelve sola desde `region_id`). Pasá
   el mismo `pdf_dir` **base** que al fetcher; ambos le anexan la ciudad automáticamente.
+- 🔢 **Número imposible = `S/N`.** La ficha puede imprimir un centinela en el lugar del número
+  (Rua São Bernardo `51000`, en una calle cuyos 13 lotes van del 12 al 400). Por encima de 20.000 no
+  se copia: la parcela queda sin número —lo que el municipio realmente declara— y la levanta
+  `IncidenciasReporter` como `numero_faltante`. El tope es holgado a propósito: el número más alto de
+  Várzea es 1.096, pero en el conurbano hay alturas de 5 dígitos.
+- 🛣️ **El nombre de calle del BCI trae basura adentro**: el tipo de vía (`RUA - AV PRES ARTHUR
+  BERNARDES`, que además dice RUA de una avenida) y el `S/N` pegado al final. Una misma calle termina
+  con dos grafías y el entregable sale con dos nombres distintos para la misma cuadra. Se normaliza a
+  la grafía que usan la mayoría de los lotes de esa calle, con el tipo FUERA del nombre.
 - No usa LLM — extrae datos con regex sobre el texto del PDF
 - Compatible con PDFs `Predial` (con construcción) y `Territorial` (terreno vacante)
 - Detecta TIPOLOGIA: CASA, APARTAMENTO, SALA, LOJA, etc.

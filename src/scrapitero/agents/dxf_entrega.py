@@ -376,6 +376,34 @@ def _etiqueta(num: str, tp: str, qt: int, baldio: bool = False) -> str:
     return f"{base}-{qt}" if qt > 1 else base
 
 
+def _puntos_para_n(geom, tr, calles: list[LineString], n: int) -> list:
+    """`n` puntos de inserción dentro del lote, del más cercano a la calle al más lejano.
+
+    Generaliza `_puntos_para_dos` para el lote que lleva tres fichas (local + vivienda +
+    especial). Se corta el lote en `n` fajas perpendiculares a su lado LARGO —el fondo— y se
+    toma un punto representativo de cada faja: así las fichas quedan una detrás de la otra,
+    que es como las ubica el cliente en su propio plano (medido sobre sus 56 lotes con dos
+    fichas: 14,9 m de separación sobre el eje largo y 0,4 m sobre el frente).
+    """
+    if n <= 2:
+        return _puntos_para_dos(geom, tr, calles)
+    minx, miny, maxx, maxy = geom.bounds
+    horizontal = maxx - minx >= maxy - miny
+    puntos = []
+    for k in range(n):
+        a = (minx + (maxx - minx) * k / n, miny + (maxy - miny) * k / n)[0 if horizontal else 1]
+        b = (minx + (maxx - minx) * (k + 1) / n, miny + (maxy - miny) * (k + 1) / n)[0 if horizontal else 1]
+        caja = box(a, miny, b, maxy) if horizontal else box(minx, a, maxx, b)
+        parte = geom.intersection(caja)
+        if parte.is_empty or parte.area <= 0:
+            return []
+        rp = parte.representative_point()
+        puntos.append(tr.transform(rp.x, rp.y))
+    if not calles:
+        return puntos
+    return sorted(puntos, key=lambda xy: min(c.distance(Point(*xy)) for c in calles))
+
+
 def _puntos_para_dos(geom, tr, calles: list[LineString]) -> list:
     """Dos puntos de inserción dentro del lote, el primero el más cercano a la calle.
 
@@ -1484,7 +1512,7 @@ def _ubicar_grupo(celda: Polygon, u, n, largo: float, altura: float,
 
 
 def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
-                  celula_id: str, escala: float = 1.0) -> str:
+                  celula_id: str, escala: float = 1.0, num_b: Optional[str] = None) -> str:
     """Dibuja un bloque `SDU`/`MDU` con todos sus atributos. Devuelve cuál dibujó."""
     es_mdu = rec["es_mdu"]
     sufijo = {"R": "RES", "C": "COM", "E": "ESP"}[tp_b]
@@ -1496,7 +1524,7 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
     # Cada bloque lleva SU coordenada: son puntos distintos del mismo lote.
     utm_txt = f"{int(round(punto[0]))},{int(round(punto[1]))}"
     pisos = rec["pisos"]
-    num, cep, codlog = rec["num"], rec["cep"], rec["codlog"]
+    num, cep, codlog = num_b or rec["num"], rec["cep"], rec["codlog"]
 
     def _escalar():
         if escala >= 0.999:
@@ -1534,17 +1562,22 @@ def _emitir_ficha(msp, rec: dict, tp_b: str, qt_b: int, punto, rot: float,
 
     # Especial SIN unidades (baldío, escuela, iglesia): sin pisos ni cantidad, como siempre.
     # Especial CON unidades (un hotel chico): es un edificio con sus HP, lleva las dos cosas.
-    e_vacio = tp_b == "E" and (rec.get("baldio") or not (rec["uf_v"] + rec["uf_c"]))
+    e_vacio = tp_b == "E" and (rec.get("baldio")
+                               or not (rec["uf_v"] + rec["uf_c"] + (rec.get("uf_e") or 0)))
+    # El especial que CONVIVE con otro uso (mig. 070) no lleva pisos: los pisos son de la
+    # vivienda, que tiene su propia ficha. Las 35 fichas `E` del cliente tampoco los llevan.
+    e_convive = (tp_b == "E" and (rec.get("uf_e") or 0) > 0
+                 and (rec["uf_v"] + rec["uf_c"]) > 0)
     ref.add_auto_attribs({
         "N_C1_3_TP_QT": _etiqueta(num, tp_b, qt_b, rec.get("baldio", False)),
         # El lote vacío no lleva pisos: no hay nada construido que contar.
-        "QTD_ANDARES": "" if e_vacio else pisos,
+        "QTD_ANDARES": "" if e_vacio or e_convive else pisos,
         # La línea legible. Se arma con las UF **de este bloque**, no las de la parcela:
         # en una parcela mixta el bloque `R` dice sus viviendas y el `C` sus comercios.
         "RESUMO": _resumen_uf(qt_b if tp_b == "R" else 0,
                               qt_b if tp_b == "C" else 0, "",
                               uf_e=0 if e_vacio or tp_b != "E" else qt_b),
-        "PISOS": "" if e_vacio else _texto_pisos(pisos),
+        "PISOS": "" if e_vacio or e_convive else _texto_pisos(pisos),
         "N": num or "S/N",
         # Corte en límite de palabra: `[:32]` partía "…QD 4 LO" a mitad de palabra.
         "C1": _recortar(rec["complemento"] or "", 48),
@@ -2480,7 +2513,7 @@ def run(input: EntregaInput) -> EntregaOutput:
         (_, calle, numero, complemento, barrio, cep, uf_v, uf_c, _uf_fuente, uso,
          cca, _area_t, area_c, pisos, num_est, num_est_conf, _categoria, descripcion,
          _est_id, _est_tipo, _est_nombre, tipo_manual, hotel_tipo, huella,
-         pisos_sat) = row
+         pisos_sat, uf_e, _esp_tipo, esp_num) = row
 
         if not isinstance(geom, (Polygon, MultiPolygon)) or geom.is_empty:
             continue
@@ -2533,15 +2566,21 @@ def run(input: EntregaInput) -> EntregaOutput:
         # Sólo se parte a nivel SDU. La ficha MDU describe UN edificio (trae `HP_TOTAL` y
         # `QTD_ANDARES`, no `TP`), y partir en dos fichas un edificio de 72 habitaciones
         # sería peor que dejarlo entero: el tipo del MDU sigue viajando en la capa.
-        bloques = [(tp, qt, (cx, cy))]
-        if not es_mdu and tp != "E" and uf_v > 0 and uf_c > 0:
-            puntos = _puntos_para_dos(geom, tr, calles_geom)
-            if puntos:      # sin dos puntos utilizables se deja el bloque único
-                bloques = [("C", uf_c, puntos[0]), ("R", uf_v, puntos[1])]
-        elif not es_mdu and tp != "E" and uf_v > 0 and uf_c > 0:
-            # Sin dos puntos utilizables igual se separan: van en el MISMO lote, el
-            # comercio adelante y la vivienda al fondo, que es como están en la calle.
-            bloques = [("C", uf_c, (cx, cy)), ("R", uf_v, (cx, cy))]
+        # `uf_especial` (mig. 070) es el especial que CONVIVE con otro uso: la escuela detrás
+        # de la casa. Va como ficha `E` propia, al fondo del lote y con su número si tiene otro
+        # (criterio de Jaz, 22-sep-2026; el cliente hace lo mismo con el local y la vivienda).
+        # El hotel y el shopping NO pasan por acá: son el lote entero y su `tp` ya es `E`.
+        uf_esp = int(uf_e or 0) if uso != "equipamiento" else 0
+        partes = [(t, q) for t, q in (("C", uf_c), ("R", uf_v), ("E", uf_esp)) if q > 0]
+        bloques = [(tp, qt, (cx, cy), None)]
+        if not es_mdu and tp != "E" and len(partes) > 1:
+            puntos = _puntos_para_n(geom, tr, calles_geom, len(partes))
+            # Sin puntos utilizables igual se separan en el mismo punto: es preferible que el
+            # rótulo quede apretado a perder el desglose.
+            if not puntos:
+                puntos = [(cx, cy)] * len(partes)
+            bloques = [(t, q, puntos[k], esp_num if t == "E" else None)
+                       for k, (t, q) in enumerate(partes)]
 
         # Lo que es de la PARCELA y no del bloque se cuenta una sola vez: el CEP para el
         # rótulo de calle y la guarda de CODLOG, que mide parcelas sin código, no bloques.
@@ -2582,6 +2621,7 @@ def run(input: EntregaInput) -> EntregaOutput:
             "manzana": i_mz,
             "num": num, "complemento": complemento, "cep": cep_num, "codlog": codlog,
             "pisos": pisos_texto(pisos or pisos_sat), "uf_v": uf_v, "uf_c": uf_c,
+            "uf_e": uf_esp,
             # Baldío = el municipio no le declara NADA construido. Es lo que separa el
             # `VAZ` del `<número>E`; ver `_etiqueta`.
             # Salvo que el operador lo haya etiquetado a mano como especial: la ficha puede
@@ -2594,7 +2634,7 @@ def run(input: EntregaInput) -> EntregaOutput:
                                            or hotel_tipo)),
             "calle": _nombre_calle(calle) if calle else "", "punto": (cx, cy),
         })
-        hp_total += uf_v + uf_c
+        hp_total += uf_v + uf_c + uf_esp
 
     # 3.b. Contador por parcela — los bloques `HCSDU` / `HCMDU` del cliente.
     #
@@ -2929,7 +2969,7 @@ def run(input: EntregaInput) -> EntregaOutput:
                                           if celda is None else (0.0, 0.0)), rot
                 franjas = (_partir_celda(celda, (nx, ny), len(bloques))
                            if celda is not None else [])
-                for i_b, (tp_b, qt_b, _pt) in enumerate(bloques):
+                for i_b, (tp_b, qt_b, _pt, num_b) in enumerate(bloques):
                     # Los bloques de una parcela mixta se reparten el frente en partes
                     # iguales, cada uno centrado en la suya.
                     # Los dos inmuebles del mismo terreno, acomodados dentro de su
@@ -2949,8 +2989,9 @@ def run(input: EntregaInput) -> EntregaOutput:
                         # el ancho de la pieza. Sin el de pisos acá, la pieza se medía
                         # corta y el renglón más largo terminaba fuera del lote.
                         # Los DOS renglones que se dibujan: rótulo y pisos.
-                        lineas = [_etiqueta(rec["num"], tp_b, qt_b),
+                        lineas = [_etiqueta(num_b or rec["num"], tp_b, qt_b),
                                   "" if tp_b == "E" and (rec.get("baldio")
+                                                         or (rec.get("uf_e") or 0) > 0
                                                          or not (rec["uf_v"] + rec["uf_c"]))
                                   else _texto_pisos(rec["pisos"])]
                     # **Todas las letras del mismo tamaño**, el de la plantilla del
@@ -3020,7 +3061,7 @@ def run(input: EntregaInput) -> EntregaOutput:
                                                rec.get("calle") or "?",
                                                rec.get("num") or "?"))
                     tipo = _emitir_ficha(msp, rec, tp_b, qt_b, punto, rot_texto,
-                                         input.celula_id, escala)
+                                         input.celula_id, escala, num_b)
                     if tipo == "MDU":
                         n_mdu += 1
                     else:
@@ -3098,8 +3139,9 @@ def run(input: EntregaInput) -> EntregaOutput:
     # punto de la parcela: perder el inmueble sería peor que colocarlo sin fila.
     for rec in sueltas:
         rot = _rotacion_a_calle(Point(*rec["punto"]), calles_geom)
-        for tp_b, qt_b, punto in rec["bloques"]:
-            tipo = _emitir_ficha(msp, rec, tp_b, qt_b, punto, rot, input.celula_id)
+        for tp_b, qt_b, punto, num_b in rec["bloques"]:
+            tipo = _emitir_ficha(msp, rec, tp_b, qt_b, punto, rot, input.celula_id,
+                                 num_b=num_b)
             if tipo == "MDU":
                 n_mdu += 1
             else:

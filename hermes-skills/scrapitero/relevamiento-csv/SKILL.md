@@ -23,7 +23,7 @@ tres columnas que conviene mirar antes de entregar:
 
 | Columna | Qué trae |
 |---------|----------|
-| `UF Especial` | las unidades de un lote especial: habitaciones del hotel, locales del shopping, 1 para una escuela o una iglesia |
+| `UF Especial` | las unidades de un lote especial: habitaciones del hotel, locales del shopping, 1 para una escuela o una iglesia. Si el especial CONVIVE con otro uso (la escuela detrás de la casa, `uf_especial` de la mig. 070) suma acá **sin** vaciar `UF Vivienda`, y `Tipo de edificación` sale como `RESIDÊNCIA + ESCOLA PARTICULAR` |
 | `Revisión` | dato con respaldo que la referencia del cliente contradice, y las dudas que marca `hotel-reglas` (prefijo `[hoteles]`) |
 | `Incidencias pendientes` | los tipos del panel que siguen **sin resolver** en ese lote — ninguna exportación los filtra, así que el lote sale igual |
 
