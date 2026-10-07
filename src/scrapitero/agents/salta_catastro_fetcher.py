@@ -201,11 +201,21 @@ def _get_latest_survey(region_id: str) -> Optional[str]:
     return row[0] if row else None
 
 
-def _find_existing(conn, region_id: str, nomenclatura: str) -> Optional[str]:
+def _find_existing(conn, survey_id: str, nomenclatura: str,
+                   lat: float, lng: float) -> Optional[str]:
+    """La identidad de una parcela al re-correr es survey + nomenclatura + CENTROIDE.
+
+    Antes era región + nomenclatura, y fallaba de dos formas (Rosario de Lerma, oct-2026):
+    un survey nuevo de la misma región actualizaba las filas del survey VIEJO en vez de
+    insertar las suyas (quedó con 334 de 6.114 parcelas), y dos polígonos que comparten
+    nomenclatura se pisaban entre sí (23 lotes perdidos en la primera corrida). Mismo
+    criterio que ARBA (ver CLAUDE.md, «la identidad de una parcela al re-correr»)."""
     row = conn.execute(text("""
         SELECT parcela_id::text FROM parcelas
-        WHERE region_id = :rid AND nomenclatura_catastral = :nom
-    """), {"rid": region_id, "nom": nomenclatura}).fetchone()
+        WHERE survey_id = :sid AND nomenclatura_catastral = :nom
+          AND centroid_lat BETWEEN :lat - 0.00005 AND :lat + 0.00005
+          AND centroid_lng BETWEEN :lng - 0.00005 AND :lng + 0.00005
+    """), {"sid": survey_id, "nom": nomenclatura, "lat": lat, "lng": lng}).fetchone()
     return row[0] if row else None
 
 
@@ -362,7 +372,7 @@ def _upsert(
     """Devuelve 'inserted' | 'updated'."""
     geom_wkt = geom.wkt
 
-    existing_id = _find_existing(conn, region_id, nomenclatura)
+    existing_id = _find_existing(conn, survey_id, nomenclatura, lat, lng)
     if existing_id:
         conn.execute(text("""
             UPDATE parcelas SET
