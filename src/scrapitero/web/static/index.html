@@ -1999,6 +1999,9 @@ function renderCard(s) {
             <a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/procedencia-pdf" download
                style="text-decoration:none"
                title="${tAttr('Descargar la ficha de procedencia: de dónde sale cada dato del relevamiento, con qué cobertura y de qué fecha es cada fuente. Se genera en el momento, así que hay que volver a descargarla si el relevamiento cambia.')}">${t('⬇ Procedencia (PDF)')}</a>
+            ${OPERADOR ? `<a class="btn btn-sm btn-outline" href="/api/surveys/${sid}/export/constancia-pdf" download
+               style="text-decoration:none"
+               title="${tAttr('Descargar la constancia de relevamiento para facturar: nombre, zona, manzanas y lotes relevados y fecha. Sólo la ve el operador.')}">${t('⬇ Constancia (PDF)')}</a>` : ''}
             ${OPERADOR ? `<button class="btn btn-sm btn-outline"
                onclick="runFootprints('${sid}', this)"
                title="${tAttr('Traer footprints de edificios (Google Open Buildings, fallback OSM) para revisar visualmente contra lo que dice el catastro — capa aparte, no toca el relevamiento.')}">${t('🏗️ Footprints (revisión)')}</button>
@@ -2590,7 +2593,26 @@ function dxfCapas() {
   ];
 }
 
-function descargarDxf(sid) {
+// Opciones del operador para el DXF (8-oct-2026): sistema de coordenadas y perfil de
+// nomenclatura. «Automático» y «Estándar BL (Brasil)» son los de siempre: con ellos la URL
+// es la misma de antes y el archivo no cambia.
+let DXF_OPCIONES = null;
+async function dxfOpciones(forzar) {
+  if (!DXF_OPCIONES || forzar) {
+    DXF_OPCIONES = await fetch('/api/dxf/opciones').then(r => r.json()).catch(() => null);
+  }
+  return DXF_OPCIONES || { crs: [], perfiles: [] };
+}
+function dxfPrefs(sid) {
+  try { return JSON.parse(localStorage.getItem('dxf-prefs-' + sid) || '{}'); } catch (e) { return {}; }
+}
+function dxfGuardarPrefs(sid, prefs) {
+  try { localStorage.setItem('dxf-prefs-' + sid, JSON.stringify(prefs)); } catch (e) { /* sin storage */ }
+}
+const DXF_SELECT = 'width:100%;padding:.35rem .5rem;border:1px solid hsl(var(--border));border-radius:.5rem;'
+  + 'background:hsl(var(--bg));color:hsl(var(--fg))';
+
+async function descargarDxf(sid) {
   document.getElementById('dxf-dialog')?.remove();
   const dlg = document.createElement('dialog');
   dlg.id = 'dxf-dialog';
@@ -2598,6 +2620,8 @@ function descargarDxf(sid) {
     + 'border:1px solid hsl(var(--border));border-radius:.75rem;'
     + 'background:hsl(var(--card));color:hsl(var(--fg))';
   const plano = SURVEY_PLANO[sid] || null;
+  const op = OPERADOR ? await dxfOpciones() : null;
+  const prefs = OPERADOR ? dxfPrefs(sid) : {};
   const filas = dxfCapas().map(([capa, label]) => `
     <label style="display:flex;gap:.5rem;align-items:center;margin:.35rem 0;cursor:pointer">
       <input type="checkbox" class="dxf-capa" value="${capa}" checked> ${escHtml(label)}
@@ -2609,6 +2633,21 @@ function descargarDxf(sid) {
     ${plano.pide_celula ? `<input type="text" class="dxf-celula" placeholder="${tAttr('ID de célula (p.ej. VAZ049), opcional')}"
       style="margin:0 0 .5rem 1.6rem;width:calc(100% - 1.6rem);padding:.35rem .5rem;border:1px solid hsl(var(--border));border-radius:.5rem;background:hsl(var(--bg));color:hsl(var(--fg))">` : ''}
     <label style="${radio}"><input type="radio" name="dxf-formato" value="capas"> ${t('Por capas: elegís qué va en el archivo')}</label>` : '';
+  const opciones = op ? `
+    <hr style="border:0;border-top:1px solid hsl(var(--border));margin:.75rem 0">
+    <label style="display:block;font-size:.8rem;font-weight:600;margin:.25rem 0">${t('Sistema de coordenadas')}</label>
+    <select class="dxf-epsg" style="${DXF_SELECT}">
+      <option value="">${t('Automático (el del cliente del país)')}</option>
+      ${op.crs.map(c => `<option value="${c.epsg}" ${String(prefs.epsg) === String(c.epsg) ? 'selected' : ''}>${escHtml(c.nombre)} — EPSG:${c.epsg}</option>`).join('')}
+    </select>
+    <label style="display:block;font-size:.8rem;font-weight:600;margin:.6rem 0 .25rem">${t('Nomenclatura')}</label>
+    <div style="display:flex;gap:.4rem">
+      <select class="dxf-perfil" style="${DXF_SELECT}">
+        ${op.perfiles.map(p => `<option value="${p.perfil_id ?? ''}" ${String(prefs.perfil_id ?? '') === String(p.perfil_id ?? '') ? 'selected' : ''}>${escHtml(p.nombre)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn btn-xs btn-outline dxf-editar-perfiles" title="${tAttr('Crear o modificar perfiles de nomenclatura')}">✎</button>
+    </div>
+    <div class="dxf-ejemplo" style="margin-top:.35rem;font-size:.72rem;color:hsl(var(--muted-fg))"></div>` : '';
   dlg.innerHTML = `
     <h3 style="margin:0 0 .75rem">${t('⬇ DXF (AutoCAD)')}</h3>
     ${formato}
@@ -2624,6 +2663,7 @@ function descargarDxf(sid) {
       <input type="checkbox" class="dxf-solo-uf"> ${t('Sólo parcelas con UF')}
     </label>
     </div>
+    ${opciones}
     <p style="margin:.75rem 0 0;font-size:.72rem;color:hsl(var(--muted-fg))">${t('En zonas grandes puede tardar unos minutos en generarse.')}</p>
     <p class="dxf-error" style="margin:.5rem 0 0;font-size:.78rem;color:var(--danger-fg)" hidden></p>
     <div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem">
@@ -2640,21 +2680,170 @@ function descargarDxf(sid) {
   dlg.querySelectorAll('input[name="dxf-formato"]').forEach(r => {
     r.onchange = () => { dlg.querySelector('.dxf-capas-box').hidden = esEntrega(); };
   });
-  dlg.querySelector('.dxf-descargar').onclick = () => {
+  const err = dlg.querySelector('.dxf-error');
+  const ejemplo = () => {
+    const box = dlg.querySelector('.dxf-ejemplo'); if (!box || !op) return;
+    const pid = dlg.querySelector('.dxf-perfil').value;
+    const p = op.perfiles.find(x => String(x.perfil_id ?? '') === pid);
+    box.textContent = p ? t('Ejemplo') + ': ' + dxfEjemploPerfil(p.config) : '';
+  };
+  if (op) {
+    dlg.querySelector('.dxf-perfil').onchange = ejemplo;
+    ejemplo();
+    dlg.querySelector('.dxf-editar-perfiles').onclick = () =>
+      editarPerfilesDxf(dlg.querySelector('.dxf-perfil').value, async (pidNuevo) => {
+        const o = await dxfOpciones(true);
+        const sel = dlg.querySelector('.dxf-perfil');
+        sel.innerHTML = o.perfiles.map(p => `<option value="${p.perfil_id ?? ''}">${escHtml(p.nombre)}</option>`).join('');
+        sel.value = pidNuevo ?? '';
+        op.perfiles = o.perfiles; ejemplo();
+      });
+  }
+  dlg.querySelector('.dxf-descargar').onclick = async () => {
+    let url;
     if (esEntrega()) {
       const celula = dlg.querySelector('.dxf-celula')?.value.trim() || '';
-      dlg.close();
-      window.location = `/api/surveys/${sid}/export/dxf?celula_id=${encodeURIComponent(celula)}`;
-      return;
+      url = `/api/surveys/${sid}/export/dxf?celula_id=${encodeURIComponent(celula)}`;
+    } else {
+      const capas = [...dlg.querySelectorAll('.dxf-capa:checked')].map(cb => cb.value);
+      if (!capas.length) { err.textContent = t('Elegí al menos una capa.'); err.hidden = false; return; }
+      const soloUf = dlg.querySelector('.dxf-solo-uf').checked;
+      url = `/api/surveys/${sid}/export/dxf?capas=${encodeURIComponent(capas.join(','))}`
+        + (soloUf ? '&solo_con_uf=true' : '');
     }
-    const capas = [...dlg.querySelectorAll('.dxf-capa:checked')].map(cb => cb.value);
-    const err = dlg.querySelector('.dxf-error');
-    if (!capas.length) { err.textContent = t('Elegí al menos una capa.'); err.hidden = false; return; }
-    const soloUf = dlg.querySelector('.dxf-solo-uf').checked;
-    dlg.close();
-    window.location = `/api/surveys/${sid}/export/dxf?capas=${encodeURIComponent(capas.join(','))}`
-      + (soloUf ? '&solo_con_uf=true' : '');
+    const epsg = op ? dlg.querySelector('.dxf-epsg').value : '';
+    const pid = op ? dlg.querySelector('.dxf-perfil').value : '';
+    if (op) dxfGuardarPrefs(sid, { epsg, perfil_id: pid });
+    if (!epsg && !pid) { dlg.close(); window.location = url; return; }
+    // Con opciones se baja por fetch: si el servidor rechaza (p.ej. sistema de coordenadas
+    // sobre un plano fijado), el error se muestra acá en vez de abrir una página con JSON.
+    url += (epsg ? `&epsg=${epsg}` : '') + (pid ? `&perfil_id=${pid}` : '');
+    const btn = dlg.querySelector('.dxf-descargar');
+    const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ ' + t('generando…');
+    err.hidden = true;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || ('HTTP ' + r.status));
+      }
+      const blob = await r.blob();
+      const cd = r.headers.get('content-disposition') || '';
+      const m = cd.match(/filename="?([^"]+)"?/);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = m ? m[1] : 'relevamiento.dxf';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      dlg.close();
+    } catch (e) {
+      err.textContent = '⚠ ' + e.message; err.hidden = false;
+      btn.disabled = false; btn.textContent = t0;
+    }
   };
+  dlg.showModal();
+}
+
+const DXF_TIPOS = [['vivienda', 'Vivienda'], ['comercio', 'Comercio'], ['especial', 'Especial'], ['baldio', 'Baldío']];
+function dxfEjemploPerfil(c) {
+  if (!c) return '';
+  return `350${c.vivienda.rotulo} · 25${c.vivienda.rotulo}-2 · S/N${c.comercio.rotulo} · 60${c.especial.rotulo} · ${c.baldio.rotulo}`
+    + `  |  2${c.vivienda.resumen} 1${c.comercio.resumen} · ${c.baldio.resumen}`;
+}
+
+// Editor de perfiles de nomenclatura. El estándar BL no se edita: se duplica y se modifica
+// la copia, que queda guardada con el nombre que le ponga el operador.
+async function editarPerfilesDxf(pidInicial, alCerrar) {
+  document.getElementById('dxf-perfiles')?.remove();
+  const op = await dxfOpciones(true);
+  const dlg = document.createElement('dialog');
+  dlg.id = 'dxf-perfiles';
+  dlg.style.cssText = 'max-width:40rem;width:calc(100% - 32px);padding:1.25rem;'
+    + 'border:1px solid hsl(var(--border));border-radius:.75rem;'
+    + 'background:hsl(var(--card));color:hsl(var(--fg))';
+  const inp = 'width:100%;padding:.25rem .4rem;border:1px solid hsl(var(--border));border-radius:.4rem;'
+    + 'background:hsl(var(--bg));color:hsl(var(--fg));font-size:.8rem';
+  dlg.innerHTML = `
+    <h3 style="margin:0 0 .5rem">${t('Perfiles de nomenclatura del DXF')}</h3>
+    <p style="margin:0 0 .75rem;font-size:.78rem;color:hsl(var(--muted-fg))">${t('Cómo se rotula y en qué capa va cada tipo. El estándar de Brasil no se modifica: duplicalo y cambiá la copia.')}</p>
+    <div style="display:flex;gap:.4rem;margin-bottom:.6rem">
+      <select class="pf-sel" style="${inp};flex:1"></select>
+      <button type="button" class="btn btn-xs btn-outline pf-duplicar">${t('Duplicar')}</button>
+      <button type="button" class="btn btn-xs btn-outline pf-borrar" style="color:var(--danger-fg)">${t('Borrar')}</button>
+    </div>
+    <label style="display:block;font-size:.78rem;font-weight:600;margin-bottom:.2rem">${t('Nombre')}</label>
+    <input class="pf-nombre" style="${inp};margin-bottom:.6rem">
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:.78rem">
+      <thead><tr style="text-align:left;color:hsl(var(--muted-fg))">
+        <th style="padding:.2rem">${t('Tipo')}</th><th style="padding:.2rem">${t('Letra en el rótulo')}</th>
+        <th style="padding:.2rem">${t('En el resumen')}</th><th style="padding:.2rem">${t('Capa (casa)')}</th>
+        <th style="padding:.2rem">${t('Capa (edificio)')}</th></tr></thead>
+      <tbody>${DXF_TIPOS.map(([k, label]) => `<tr>
+        <td style="padding:.2rem;font-weight:600">${t(label)}</td>
+        <td style="padding:.2rem"><input class="pf-in" data-t="${k}" data-k="rotulo" style="${inp}"></td>
+        <td style="padding:.2rem"><input class="pf-in" data-t="${k}" data-k="resumen" style="${inp}"></td>
+        <td style="padding:.2rem"><input class="pf-in" data-t="${k}" data-k="capa_casa" style="${inp}"></td>
+        <td style="padding:.2rem">${k === 'baldio' ? '' : `<input class="pf-in" data-t="${k}" data-k="capa_edificio" style="${inp}">`}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    <div class="pf-ejemplo" style="margin-top:.5rem;font-size:.75rem;color:hsl(var(--muted-fg))"></div>
+    <p class="pf-error" style="margin:.5rem 0 0;font-size:.78rem;color:var(--danger-fg)" hidden></p>
+    <div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem">
+      <button type="button" class="btn btn-sm btn-ghost pf-cerrar">${t('Cerrar')}</button>
+      <button type="button" class="btn btn-sm btn-green pf-guardar">${t('Guardar perfil')}</button>
+    </div>`;
+  document.body.appendChild(dlg);
+  let perfiles = op.perfiles;
+  let actual = null;            // perfil mostrado; perfil_id null = BL o uno nuevo sin guardar
+  let elegido = pidInicial || null;
+  const sel = dlg.querySelector('.pf-sel');
+  const err = dlg.querySelector('.pf-error');
+  const leer = () => {
+    const c = JSON.parse(JSON.stringify(actual.config));
+    dlg.querySelectorAll('.pf-in').forEach(i => { c[i.dataset.t][i.dataset.k] = i.value.trim(); });
+    return c;
+  };
+  const pintar = () => {
+    sel.innerHTML = perfiles.map((p, i) => `<option value="${i}">${escHtml(p.nombre)}${p.fijo ? ' 🔒' : ''}</option>`).join('');
+    sel.value = String(perfiles.indexOf(actual));
+    dlg.querySelector('.pf-nombre').value = actual.nombre;
+    dlg.querySelectorAll('.pf-in').forEach(i => {
+      i.value = actual.config[i.dataset.t][i.dataset.k] || ''; i.disabled = !!actual.fijo;
+    });
+    dlg.querySelector('.pf-nombre').disabled = !!actual.fijo;
+    dlg.querySelector('.pf-guardar').disabled = !!actual.fijo;
+    dlg.querySelector('.pf-borrar').disabled = !!actual.fijo || !actual.perfil_id;
+    dlg.querySelector('.pf-ejemplo').textContent = t('Ejemplo') + ': ' + dxfEjemploPerfil(actual.config);
+    err.hidden = true;
+  };
+  actual = perfiles.find(p => String(p.perfil_id ?? '') === String(elegido ?? '')) || perfiles[0];
+  pintar();
+  sel.onchange = () => { actual = perfiles[+sel.value]; pintar(); };
+  dlg.querySelectorAll('.pf-in').forEach(i => i.oninput = () => {
+    dlg.querySelector('.pf-ejemplo').textContent = t('Ejemplo') + ': ' + dxfEjemploPerfil(leer());
+  });
+  dlg.querySelector('.pf-duplicar').onclick = () => {
+    const copia = { perfil_id: null, nombre: actual.nombre + ' (copia)', config: leer(), fijo: false };
+    perfiles = [...perfiles, copia]; actual = copia; pintar();
+    dlg.querySelector('.pf-nombre').focus(); dlg.querySelector('.pf-nombre').select();
+  };
+  dlg.querySelector('.pf-guardar').onclick = async () => {
+    const body = { perfil_id: actual.perfil_id, nombre: dlg.querySelector('.pf-nombre').value.trim(), config: leer() };
+    const r = await fetch('/api/dxf/perfiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+    if (!r.ok) { err.textContent = '⚠ ' + (r.error || t('No se pudo guardar')); err.hidden = false; return; }
+    const o = await dxfOpciones(true);
+    perfiles = o.perfiles; actual = perfiles.find(p => p.perfil_id === r.perfil_id) || perfiles[0];
+    elegido = actual.perfil_id; pintar();
+  };
+  dlg.querySelector('.pf-borrar').onclick = async () => {
+    if (!actual.perfil_id || !confirm(t('¿Borrar el perfil?') + ' ' + actual.nombre)) return;
+    await fetch(`/api/dxf/perfiles/${actual.perfil_id}`, { method: 'DELETE' });
+    const o = await dxfOpciones(true);
+    perfiles = o.perfiles; actual = perfiles[0]; elegido = null; pintar();
+  };
+  dlg.querySelector('.pf-cerrar').onclick = () => dlg.close();
+  dlg.addEventListener('close', () => { dlg.remove(); if (alCerrar) alCerrar(actual?.perfil_id ?? null); });
   dlg.showModal();
 }
 

@@ -4282,9 +4282,131 @@ async def export_procedencia_pdf(survey_id: str):
     )
 
 
+@app.get("/api/surveys/{survey_id}/export/constancia-pdf")
+async def export_constancia_pdf(survey_id: str, request: Request):
+    """Constancia de relevamiento: nombre, zona, manzanas y lotes relevados y fecha, en una
+    hoja para mandar con la factura. Es del operador: el cliente no la descarga (con auth
+    activa se rechaza el rol 'cliente'). Se genera al pedirla, como la de procedencia."""
+    if getattr(request.state, "role", None) == "cliente":
+        return JSONResponse({"error": "Requiere rol operador"}, status_code=403)
+    with get_engine().connect() as conn:
+        meta = conn.execute(text("""
+            SELECT r.name, COALESCE(s.finished_at, s.started_at)
+            FROM surveys s JOIN regions r ON s.region_id = r.region_id
+            WHERE s.survey_id = :sid
+        """), {"sid": survey_id}).fetchone()
+    if not meta:
+        return JSONResponse({"error": "Survey no encontrado"}, status_code=404)
+
+    fecha = meta[1].strftime("%Y-%m-%d") if meta[1] else ""
+    tmpdir = tempfile.mkdtemp(prefix="const_")
+    nombre = f"constancia_{meta[0]}_{fecha}.pdf".replace(" ", "_").replace("/", "-")
+    destino = os.path.join(tmpdir, nombre)
+
+    from scrapitero.agents.constancia_pdf import ConstanciaInput
+    from scrapitero.agents.constancia_pdf import run as run_const
+
+    def _job() -> dict:
+        _thread_job_id.value = survey_id
+        return run_const(ConstanciaInput(survey_id=survey_id, output_path=destino)).model_dump()
+
+    data = await asyncio.to_thread(_job)
+    if not data.get("ok"):
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return JSONResponse({"error": data.get("error") or "No se pudo generar la constancia"},
+                            status_code=422)
+
+    return FileResponse(
+        destino, media_type="application/pdf", filename=nombre,
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
+_EPSG_DXF_ELEGIBLES = {
+    **{22170 + f: f"POSGAR 98 / Argentina faja {f} (PGA98.Argentina-{f})" for f in range(1, 8)},
+    **{32700 + z: f"WGS 84 / UTM {z}S (UTM84-{z}S)" for z in range(18, 26)},
+    **{31960 + z: f"SIRGAS 2000 / UTM {z}S" for z in range(18, 26)},
+}
+
+
+@app.get("/api/dxf/opciones")
+async def dxf_opciones() -> JSONResponse:
+    """Lo que el operador elige al bajar un DXF: sistema de coordenadas y perfil de
+    nomenclatura. «Automático» y «Estándar BL» son los de siempre y no tocan el archivo."""
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(
+            "SELECT perfil_id, nombre, config FROM dxf_nomenclatura_perfil ORDER BY nombre")).fetchall()
+    from scrapitero.agents.dxf_nomenclatura import NOMBRE_BL, PERFIL_BL
+    return JSONResponse({
+        "crs": [{"epsg": k, "nombre": v} for k, v in sorted(_EPSG_DXF_ELEGIBLES.items())],
+        "perfiles": [{"perfil_id": None, "nombre": NOMBRE_BL, "config": PERFIL_BL, "fijo": True}]
+                    + [{"perfil_id": r[0], "nombre": r[1], "config": r[2], "fijo": False} for r in rows],
+    })
+
+
+@app.post("/api/dxf/perfiles")
+async def guardar_perfil_dxf(request: Request) -> JSONResponse:
+    """Crea o actualiza (por `perfil_id`) un perfil de nomenclatura. Sólo operador (middleware)."""
+    body = await request.json()
+    nombre = str(body.get("nombre") or "").strip()
+    from scrapitero.agents.dxf_nomenclatura import NOMBRE_BL, validar
+    if not nombre or len(nombre) > 80:
+        return JSONResponse({"ok": False, "error": "Poné un nombre al perfil"}, status_code=422)
+    if nombre.lower() == NOMBRE_BL.lower():
+        return JSONResponse({"ok": False, "error": "Ese nombre es el del estándar de Brasil, "
+                                                   "que no se modifica"}, status_code=422)
+    config, err = validar(body.get("config") or {})
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=422)
+    pid = body.get("perfil_id")
+    try:
+        with get_engine().begin() as conn:
+            if pid:
+                r = conn.execute(text("""UPDATE dxf_nomenclatura_perfil
+                    SET nombre=:n, config=CAST(:c AS jsonb), actualizado_at=now()
+                    WHERE perfil_id=:p RETURNING perfil_id"""),
+                    {"n": nombre, "c": json.dumps(config), "p": int(pid)}).fetchone()
+            else:
+                r = conn.execute(text("""INSERT INTO dxf_nomenclatura_perfil (nombre, config)
+                    VALUES (:n, CAST(:c AS jsonb)) RETURNING perfil_id"""),
+                    {"n": nombre, "c": json.dumps(config)}).fetchone()
+    except Exception as e:
+        if "unique" in str(e).lower():
+            return JSONResponse({"ok": False, "error": f"Ya hay un perfil «{nombre}»"}, status_code=409)
+        raise
+    if not r:
+        return JSONResponse({"ok": False, "error": "Perfil no encontrado"}, status_code=404)
+    return JSONResponse({"ok": True, "perfil_id": r[0], "config": config})
+
+
+@app.delete("/api/dxf/perfiles/{perfil_id}")
+async def borrar_perfil_dxf(perfil_id: int) -> JSONResponse:
+    with get_engine().begin() as conn:
+        n = conn.execute(text("DELETE FROM dxf_nomenclatura_perfil WHERE perfil_id=:p"),
+                         {"p": perfil_id}).rowcount
+    return JSONResponse({"ok": bool(n)}, status_code=200 if n else 404)
+
+
+def _aplicar_perfil_dxf(origen: str, destino: str, perfil_id: Optional[int]) -> Optional[str]:
+    """Copia `origen` a `destino` aplicando el perfil de nomenclatura. Devuelve error o None."""
+    with get_engine().connect() as conn:
+        row = conn.execute(text("SELECT config FROM dxf_nomenclatura_perfil WHERE perfil_id=:p"),
+                           {"p": perfil_id}).fetchone()
+    if not row:
+        return "Perfil de nomenclatura no encontrado"
+    import ezdxf
+    from scrapitero.agents.dxf_nomenclatura import aplicar
+    doc = ezdxf.readfile(origen)
+    aplicar(doc, row[0])
+    doc.saveas(destino)
+    return None
+
+
 @app.get("/api/surveys/{survey_id}/export/dxf")
-async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
-                     dxfversion: str = "", capas: str = "", solo_con_uf: bool = False):
+async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codlog_csv: str = "",
+                     dxfversion: str = "", capas: str = "", solo_con_uf: bool = False,
+                     epsg: Optional[int] = None, perfil_id: Optional[int] = None):
     """DXF (AutoCAD) del relevamiento, **en el formato que espera el cliente del país**.
 
     Si su perfil define un estándar de planos (`plano` en `_EXPORT_PERFILES_CLIENTE`, hoy
@@ -4309,7 +4431,15 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     Se genera on-the-fly (no se cachea: el relevamiento cambia con cada paso del
     pipeline y una corrida sobre 567 parcelas tarda ~2 s) en un temporal que se borra
     cuando termina de servirse.
+    `epsg` y `perfil_id` los elige el operador (Jaz, 8-oct-2026): el sistema de coordenadas
+    (de `_EPSG_DXF_ELEGIBLES`; vacío = el del cliente del país) y el perfil de nomenclatura
+    (vacío = estándar BL). Al rol cliente se le ignoran: baja siempre el estándar.
     """
+    if getattr(request.state, "role", None) == "cliente":
+        epsg = perfil_id = None
+    if epsg and epsg not in _EPSG_DXF_ELEGIBLES:
+        return JSONResponse({"error": f"Sistema de coordenadas EPSG:{epsg} no admitido"},
+                            status_code=422)
     engine = get_engine()
     with engine.connect() as conn:
         meta = conn.execute(text("""
@@ -4336,9 +4466,21 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
     # El fijado reemplaza al ENTREGABLE; quien pide capas quiere el dibujo interno y
     # recibir el plano corregido en su lugar sería darle otra cosa sin avisar.
     if fijado.is_file() and not capas:
-        shutil.rmtree(tmpdir, ignore_errors=True)
         logger.warning(f"DXF fijado a mano para {survey_id}: se sirve {fijado} "
                        f"en vez de generarlo. Borrar el archivo para volver al pipeline.")
+        if epsg:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return JSONResponse({"error": "Este plano está fijado a mano: sale siempre en su "
+                                 "sistema de coordenadas. Dejá «Automático»."}, status_code=422)
+        if perfil_id:
+            err = await asyncio.to_thread(_aplicar_perfil_dxf, str(fijado), destino, perfil_id)
+            if err:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return JSONResponse({"error": err}, status_code=422)
+            return FileResponse(destino, media_type="image/vnd.dxf", filename=nombre,
+                                headers={"Cache-Control": "no-store"},
+                                background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
+        shutil.rmtree(tmpdir, ignore_errors=True)
         # `no-store`: la URL de descarga es SIEMPRE la misma y el archivo cambia abajo (el
         # fijado se parcha, no se regenera). Sin esta cabecera el navegador aplica caché
         # heurística sobre `Last-Modified` y otra máquina se baja la versión vieja sin
@@ -4353,13 +4495,13 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
         from scrapitero.agents.dxf_entrega import run as run_agent
         entrada = EntregaInput(survey_id=survey_id, celula_id=celula_id,
                                codlog_csv=codlog_csv or None, output_path=destino,
-                               dxfversion=dxfversion or None)
+                               dxfversion=dxfversion or None, epsg=epsg)
     else:
         from scrapitero.agents.dxf_export import DXFInput
         from scrapitero.agents.dxf_export import run as run_agent
         entrada = DXFInput(survey_id=survey_id, output_path=destino,
                            capas=[c for c in capas.split(",") if c.strip()] or None,
-                           solo_con_uf=solo_con_uf)
+                           solo_con_uf=solo_con_uf, epsg=epsg)
 
     def _job() -> dict:
         _thread_job_id.value = survey_id
@@ -4370,6 +4512,11 @@ async def export_dxf(survey_id: str, celula_id: str = "", codlog_csv: str = "",
         shutil.rmtree(tmpdir, ignore_errors=True)
         return JSONResponse({"error": data.get("error") or "No se pudo generar el DXF"},
                             status_code=422)
+    if perfil_id:
+        err = await asyncio.to_thread(_aplicar_perfil_dxf, destino, destino, perfil_id)
+        if err:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return JSONResponse({"error": err}, status_code=422)
 
     return FileResponse(
         destino, media_type="image/vnd.dxf", filename=nombre,

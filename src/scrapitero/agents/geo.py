@@ -48,8 +48,15 @@ _CRS_DXF_POR_PAIS = {"ARG": 22175}
 
 def epsg_dxf(pais: Optional[str], lon: float, lat: float) -> int:
     """EPSG en que salen los DXF de un relevamiento. Única implementación: la usan los dos
-    agentes de DXF, que tienen que dibujar en el mismo sistema (mismo motivo que `nombre_crs`)."""
-    return _CRS_DXF_POR_PAIS.get((pais or "").upper()) or utm_epsg(lon, lat)
+    agentes de DXF, que tienen que dibujar en el mismo sistema (mismo motivo que `nombre_crs`).
+
+    Argentina en la faja 3 (meridiano -66°, de -67,5° a -64,5°: Salta, Jujuy, Tucumán) sale en
+    «PGA98.Argentina-3» = EPSG:22173, pedido de Jaz el 8-oct-2026 para Salta; en la faja 5 de
+    Buenos Aires la deformación llegaba al 0,4 %. El resto de Argentina sigue en faja 5."""
+    p = (pais or "").upper()
+    if p in ("ARG", "AR") and -67.5 <= lon < -64.5:
+        return 22173
+    return _CRS_DXF_POR_PAIS.get(p) or utm_epsg(lon, lat)
 
 
 def nombre_crs(epsg: int) -> str:
