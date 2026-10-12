@@ -57,6 +57,21 @@ def _salta(cca: Optional[str], nom: Optional[str]) -> Optional[str]:
     return None
 
 
+def _salta_idesa(cca: Optional[str], nom: Optional[str]) -> Optional[str]:
+    """Salta interior (IDESA). Nomenclatura fija de 14, la `VINCULACION` del registro SIGSA:
+    '{dpto:2}{localidad:3}{sección:A-Z}{manzana:3}{letra:1}{parcela:3}{letra:1}'.
+
+    Ej.: '19110D011B0130' → dpto 19, localidad 110, sección D, manzana '011B', parcela '0130'.
+    La letra de manzana es parte de la manzana (011A y 011B son dos manzanas distintas). Los
+    lotes rurales vienen como '00000019xxxxxx', sin sección ni manzana: None.
+    """
+    if nom:
+        m = re.match(r"(\d{2})(\d{3})([A-Z])(\d{3}[A-Z0-9])\d{3}[A-Z0-9]$", nom.strip())
+        if m and m.group(1) != "00":
+            return f"{m.group(1)}{m.group(2)}-{m.group(3)}-{m.group(4)}"
+    return None
+
+
 def _smartgis_vg(cca: Optional[str], nom: Optional[str]) -> Optional[str]:
     """Várzea Grande (SmartGIS). Nomenclatura 'setor-quadra-lote' ej. '103-318-103'.
 
@@ -77,6 +92,7 @@ _PARSERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[str]]] = {
     "arba_carto": _arba,
     "arba_idera": _arba,
     "salta_idemsa": _salta,
+    "salta_idesa": _salta_idesa,
     "smartgis_vg": _smartgis_vg,
 }
 

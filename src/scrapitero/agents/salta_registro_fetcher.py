@@ -145,7 +145,9 @@ def _fetch_tipos(nomenclaturas: list[str], batch_size: int) -> dict[str, str]:
                 "f": "json",
             }
             try:
-                r = client.get(_SIGSA_URL, params=params)
+                # POST: con 100 nomenclaturas en el IN la URL pasa los ~2.400 caracteres y
+                # SIGSA (IIS) contesta 404; por GET sólo entran ~50 (8-oct, Rosario de Lerma).
+                r = client.post(_SIGSA_URL, data=params)
                 r.raise_for_status()
                 data = r.json()
             except httpx.TimeoutException:
