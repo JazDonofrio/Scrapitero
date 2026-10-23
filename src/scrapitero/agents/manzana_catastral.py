@@ -87,6 +87,20 @@ def _smartgis_vg(cca: Optional[str], nom: Optional[str]) -> Optional[str]:
     return None
 
 
+def _santafe(cca: Optional[str], nom: Optional[str]) -> Optional[str]:
+    """Santa Fe (IDESF). Nomenclatura de 15: '{dpto:2}{distrito:2}{sección:2}{manzana:4}{parcela:5}'.
+
+    Ej.: '082403028100005' → manzana '0824030281', parcela '00005'. Los 10 primeros dígitos
+    son exactamente la `nomenclatura` de la capa `manzana` del GeoServer (verificado contra
+    la IDESF en Rafaela, 21-oct-2026), y ya vienen namespaceados por dpto/distrito/sección.
+    """
+    if nom:
+        m = re.match(r"(\d{10})\d{5}$", nom.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
 # Registry: fuente_parcela → parser
 _PARSERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[str]]] = {
     "arba_carto": _arba,
@@ -94,6 +108,7 @@ _PARSERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[str]]] = {
     "salta_idemsa": _salta,
     "salta_idesa": _salta_idesa,
     "smartgis_vg": _smartgis_vg,
+    "santafe_idesf": _santafe,
 }
 
 
