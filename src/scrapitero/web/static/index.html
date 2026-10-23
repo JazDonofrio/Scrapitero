@@ -1219,6 +1219,7 @@ const STEP_MATCHERS = [
   ['parser',             k => k.includes('parser')],            // antes que 'bci': bci_parser → parser
   ['bci',                k => k.includes('bci')],
   ['agrupador',          k => k.includes('agrupador') || k.includes('establecimiento')],
+  ['santafe_catastro',   k => k.includes('santafe')],              // antes que 'catastro' (Salta)
   ['salta_catastro',     k => k.includes('catastro')],
   ['salta_registro',     k => k.includes('registro') || k.includes('sigsa')],
   ['salta_zonificacion', k => k.includes('zonific') || k.includes('cpua')],
@@ -1506,14 +1507,48 @@ function renderEtapasDetalle(pipeline, status, countryCode) {
 }
 
 /* ── Iniciar / Re-escanear relevamiento ────────────────────────── */
+// Antes de arrancar se elige el alcance: «sólo lotes» baja el catastro y termina (sin
+// Google ni orquestador); «completo» delega en Hermes todo el pipeline. Resuelve
+// 'lotes' | 'completo' | null (cancelado).
+function elegirAlcance(rescan) {
+  return new Promise(resolve => {
+    document.getElementById('alcance-dialog')?.remove();
+    const dlg = document.createElement('dialog');
+    dlg.id = 'alcance-dialog';
+    dlg.style.cssText = 'max-width:26rem;width:calc(100% - 32px);padding:1.25rem;'
+      + 'border:1px solid hsl(var(--border));border-radius:.75rem;'
+      + 'background:hsl(var(--card));color:hsl(var(--fg))';
+    const radio = 'display:flex;gap:.5rem;align-items:center;margin:.35rem 0;cursor:pointer;font-weight:600';
+    const nota = 'margin:0 0 .6rem 1.6rem;font-size:.75rem;color:hsl(var(--muted-fg))';
+    dlg.innerHTML = `
+      <h3 style="margin:0 0 .75rem">${rescan ? t('↺ Re-escanear') : t('▶ Iniciar')}</h3>
+      <p style="margin:0 0 .75rem;font-size:.8rem;color:hsl(var(--muted-fg))">${t('¿Qué querés relevar?')}</p>
+      <label style="${radio}"><input type="radio" name="alcance" value="lotes" checked> ${t('Sólo lotes')}</label>
+      <div style="${nota}">${t('Baja las parcelas del catastro (ARBA, Salta o SmartGIS) y termina. Gratis: no usa Google.')}</div>
+      <label style="${radio}"><input type="radio" name="alcance" value="completo"> ${t('Relevamiento completo')}</label>
+      <div style="${nota}">${t('Todo el proceso: lotes, edificios, direcciones, uso del suelo y unidades. Puede usar Google (pago) y tardar mucho.')}</div>
+      <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem">
+        <button type="button" class="btn btn-sm btn-outline alcance-cancelar">${t('Cancelar')}</button>
+        <button type="button" class="btn btn-sm btn-green alcance-ok">${t('Arrancar')}</button>
+      </div>`;
+    let elegido = null;
+    dlg.querySelector('.alcance-cancelar').onclick = () => dlg.close();
+    dlg.querySelector('.alcance-ok').onclick = () => {
+      elegido = dlg.querySelector('input[name="alcance"]:checked').value;
+      dlg.close();
+    };
+    dlg.addEventListener('close', () => { dlg.remove(); resolve(elegido); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+}
+
 async function iniciarRelevamiento(surveyId, btn, rescan = false) {
-  const msg = rescan
-    ? t('¿Re-escanear el área?\nBuscará parcelas nuevas y actualizará las existentes.\nPuede tardar varios minutos.')
-    : t('¿Iniciar el pipeline completo? (SmartGIS → descarga BCIs)\nEsto puede tardar varios minutos.');
-  if (!confirm(msg)) return;
+  const alcance = await elegirAlcance(rescan);
+  if (!alcance) return;
   const labelOrig = btn.textContent;
   btn.disabled = true; btn.textContent = rescan ? '↺ Escaneando…' : '▶ Iniciando…';
-  const url = `/api/surveys/${surveyId}/iniciar${rescan ? '?rescan=true' : ''}`;
+  const url = `/api/surveys/${surveyId}/iniciar?alcance=${alcance}${rescan ? '&rescan=true' : ''}`;
   try {
     const res = await fetch(url, {method:'POST'});
     const data = await res.json();
@@ -2590,6 +2625,8 @@ function dxfCapas() {
     ['DIRECCION', t('Número de puerta (rótulo)')],
     ['TIPO_EDIFICACION', t('Tipo de edificación (rótulo)')],
     ['DATOS', t('Atributos por parcela (invisibles; es lo que más pesa)')],
+    ['CONTEO', t('Manzanas numeradas (conteo de la constancia)')],
+    ['CALLES', t('Nombres de calle (sobre el eje, sin superponerse)')],
   ];
 }
 
@@ -2664,6 +2701,12 @@ async function descargarDxf(sid) {
     </label>
     </div>
     ${opciones}
+    <hr style="border:0;border-top:1px solid hsl(var(--border));margin:.75rem 0">
+    <label style="display:block;font-size:.8rem;font-weight:600;margin:.25rem 0">${t('Formato del archivo')}</label>
+    <select class="dxf-tipo-archivo" style="${DXF_SELECT}">
+      <option value="dxf">${t('DXF')}</option>
+      <option value="dwg">${t('DWG (AutoCAD 2018), con el sistema de coordenadas asociado')}</option>
+    </select>
     <p style="margin:.75rem 0 0;font-size:.72rem;color:hsl(var(--muted-fg))">${t('En zonas grandes puede tardar unos minutos en generarse.')}</p>
     <p class="dxf-error" style="margin:.5rem 0 0;font-size:.78rem;color:var(--danger-fg)" hidden></p>
     <div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem">
@@ -2713,11 +2756,13 @@ async function descargarDxf(sid) {
     }
     const epsg = op ? dlg.querySelector('.dxf-epsg').value : '';
     const pid = op ? dlg.querySelector('.dxf-perfil').value : '';
+    const dwg = dlg.querySelector('.dxf-tipo-archivo').value === 'dwg';
     if (op) dxfGuardarPrefs(sid, { epsg, perfil_id: pid });
-    if (!epsg && !pid) { dlg.close(); window.location = url; return; }
+    if (!epsg && !pid && !dwg) { dlg.close(); window.location = url; return; }
     // Con opciones se baja por fetch: si el servidor rechaza (p.ej. sistema de coordenadas
-    // sobre un plano fijado), el error se muestra acá en vez de abrir una página con JSON.
-    url += (epsg ? `&epsg=${epsg}` : '') + (pid ? `&perfil_id=${pid}` : '');
+    // sobre un plano fijado, o la conversión a DWG), el error se muestra acá en vez de
+    // abrir una página con JSON.
+    url += (epsg ? `&epsg=${epsg}` : '') + (pid ? `&perfil_id=${pid}` : '') + (dwg ? '&formato=dwg' : '');
     const btn = dlg.querySelector('.dxf-descargar');
     const t0 = btn.textContent; btn.disabled = true; btn.textContent = '⟳ ' + t('generando…');
     err.hidden = true;
@@ -2731,7 +2776,7 @@ async function descargarDxf(sid) {
       const cd = r.headers.get('content-disposition') || '';
       const m = cd.match(/filename="?([^"]+)"?/);
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = m ? m[1] : 'relevamiento.dxf';
+      a.href = URL.createObjectURL(blob); a.download = m ? m[1] : (dwg ? 'relevamiento.dwg' : 'relevamiento.dxf');
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       dlg.close();
@@ -3903,6 +3948,7 @@ const STEP_LABELS = {
   arba_cadastral:       t('🗺 ARBA WFS: parcelas PBA'),
   // Argentina — Salta
   salta_catastro:       t('🗺 Catastro Salta: parcelas (WFS)'),
+  santafe_catastro:     t('🗺 Catastro Santa Fe: lotes (IDESF)'),
   salta_zonificacion:   t('🏘 Zonificación CPUA: uso por zona'),
   salta_registro:       t('📋 Registro SIGSA: tipo provincial'),
   salta_rentas:         t('🏗 Rentas DGRM: detectando baldíos'),
@@ -3918,6 +3964,7 @@ const STEP_LABELS = {
   relevamiento_reporter:t('📊 Generando reporte'),
   completado:           t('✓ Pipeline completado'),
   error:                t('✗ Pipeline terminó con error'),
+  hermes_sin_pasos:     t('⚠ Hermes no arrancó el pipeline'),
   detenido:             t('⏹ Pipeline detenido manualmente'),
   sin_pipeline:         t('— Pipeline no definido para este país'),
 };
@@ -3958,6 +4005,8 @@ function stepSummary(result) {
     const v = result[field];
     if (typeof v === 'number' && v > 0) parts.push(`${fmt(v)} ${lbl}`);
   }
+  // Avance por manzanas de los fetchers que van en tandas ("812/2244")
+  if (typeof result.manzanas === 'string') parts.push(`${result.manzanas} ${t('manzanas')}`);
   if (parts.length) return parts.slice(0, 4).join(', ');
   return (result.ok || result.status === 'completed') ? 'ok' : '';
 }

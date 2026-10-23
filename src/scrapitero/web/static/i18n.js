@@ -309,6 +309,8 @@ var I18N_PT = {
   '🗺 ARBA Carto: parcelas PBA': '🗺 ARBA Carto: lotes PBA',
   '🗺 ARBA WFS: parcelas PBA': '🗺 ARBA WFS: lotes PBA',
   '🗺 Catastro Salta: parcelas (WFS)': '🗺 Cadastro Salta: lotes (WFS)',
+  '🗺 Catastro Santa Fe: lotes (IDESF)': '🗺 Cadastro Santa Fe: lotes (IDESF)',
+  'manzanas': 'quadras',
   '🏘 Zonificación CPUA: uso por zona': '🏘 Zoneamento CPUA: uso por zona',
   '📋 Registro SIGSA: tipo provincial': '📋 Registro SIGSA: tipo provincial',
   '🏗 Rentas DGRM: detectando baldíos': '🏗 Rentas DGRM: detectando terrenos vazios',
@@ -319,6 +321,7 @@ var I18N_PT = {
   '📊 Generando reporte': '📊 Gerando relatório',
   '✓ Pipeline completado': '✓ Pipeline concluído',
   '✗ Pipeline terminó con error': '✗ Pipeline terminou com erro',
+  '⚠ Hermes no arrancó el pipeline': '⚠ O Hermes não iniciou o pipeline',
   '⏹ Pipeline detenido manualmente': '⏹ Pipeline parado manualmente',
   '— Pipeline no definido para este país': '— Pipeline não definido para este país',
 
@@ -431,10 +434,6 @@ var I18N_PT = {
     'Não há localização disponível para este levantamento.',
   'El polígono no abarca ninguna dirección del relevamiento anterior.\n\n¿Crear la actualización igual?':
     'O polígono não abrange nenhum endereço do levantamento anterior.\n\nCriar a atualização mesmo assim?',
-  '¿Re-escanear el área?\nBuscará parcelas nuevas y actualizará las existentes.\nPuede tardar varios minutos.':
-    'Reescanear a área?\nBuscará lotes novos e atualizará os existentes.\nPode levar vários minutos.',
-  '¿Iniciar el pipeline completo? (SmartGIS → descarga BCIs)\nEsto puede tardar varios minutos.':
-    'Iniciar o pipeline completo? (SmartGIS → baixa os BCIs)\nIsso pode levar vários minutos.',
 
   /* ── Estados transitorios de botón y mensajes de progreso ───────────────── */
   'Creando…': 'Criando…',
@@ -520,6 +519,15 @@ var I18N_PT = {
   '↺ Re-escanear': '↺ Reescanear',
   'Iniciar pipeline completo': 'Iniciar o pipeline completo',
   '▶ Iniciar': '▶ Iniciar',
+  '¿Qué querés relevar?': 'O que você quer levantar?',
+  'Sólo lotes': 'Só lotes',
+  'Baja las parcelas del catastro (ARBA, Salta o SmartGIS) y termina. Gratis: no usa Google.':
+    'Baixa os lotes do cadastro (ARBA, Salta ou SmartGIS) e termina. Grátis: não usa o Google.',
+  'Relevamiento completo': 'Levantamento completo',
+  'Todo el proceso: lotes, edificios, direcciones, uso del suelo y unidades. Puede usar Google (pago) y tardar mucho.':
+    'O processo todo: lotes, edificações, endereços, uso do solo e unidades. Pode usar o Google (pago) e demorar bastante.',
+  'Arrancar': 'Começar',
+  'Descargando sólo los lotes': 'Baixando só os lotes',
   'Detené el pipeline primero': 'Pare o pipeline primeiro',
   'Restaurar a la lista principal': 'Restaurar para a lista principal',
   'Eliminar DEFINITIVAMENTE (borra parcelas y datos; deja de estar disponible para comparar)':
@@ -576,9 +584,15 @@ var I18N_PT = {
   'Número de puerta (rótulo)': 'Número da porta (rótulo)',
   'Tipo de edificación (rótulo)': 'Tipo de edificação (rótulo)',
   'Atributos por parcela (invisibles; es lo que más pesa)': 'Atributos por lote (invisíveis; é o que mais pesa)',
+  'Manzanas numeradas (conteo de la constancia)': 'Quadras numeradas (contagem da constância)',
+  'Nombres de calle (sobre el eje, sin superponerse)': 'Nomes de rua (sobre o eixo, sem sobreposição)',
   'Sólo contornos': 'Só contornos',
   'Todas las capas': 'Todas as camadas',
   'Sólo parcelas con UF': 'Só lotes com UF',
+  'Formato del archivo': 'Formato do arquivo',
+  'DXF': 'DXF',
+  'DWG (AutoCAD 2018), con el sistema de coordenadas asociado':
+    'DWG (AutoCAD 2018), com o sistema de coordenadas associado',
   'En zonas grandes puede tardar unos minutos en generarse.': 'Em zonas grandes pode levar alguns minutos para gerar.',
   'Elegí al menos una capa.': 'Escolha pelo menos uma camada.',
   '⬇ Descargar': '⬇ Baixar',

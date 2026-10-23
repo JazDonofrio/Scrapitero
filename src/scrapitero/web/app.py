@@ -13,9 +13,11 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import urllib.request
 import uuid
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -67,6 +69,10 @@ def _pisos_estimados(area_terreno: Optional[float], area_construida: Optional[fl
 
 HERMES_WEBHOOK_URL = os.getenv("HERMES_WEBHOOK_URL", "http://localhost:8644/webhooks/relevar")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+# Log del gateway de Hermes (la carpeta data de su contenedor): de ahí sale si Hermes
+# ya contestó el webhook, o sea si terminó su turno.
+HERMES_GATEWAY_LOG = Path(os.getenv("HERMES_GATEWAY_LOG",
+                                    "/docker/hermes-agent-wgnq/data/logs/gateway.log"))
 
 # ── Autenticación (login con 2 roles) ─────────────────────────────────────────
 # Dos contraseñas en el entorno: la de operador habilita la vista completa y las
@@ -329,6 +335,7 @@ def _dispatch_to_hermes(region_id: str, survey_id: str, country_code: str,
         },
         method="POST",
     )
+    inicio = datetime.now(timezone.utc)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = resp.read()
@@ -336,6 +343,227 @@ def _dispatch_to_hermes(region_id: str, survey_id: str, country_code: str,
     except Exception as e:
         logger.error(f"Hermes webhook falló para {survey_id}: {e}")
         _set_survey_status(survey_id, "failed")
+        return
+    try:
+        delivery_id = str(json.loads(body).get("delivery_id") or "")
+    except Exception:
+        delivery_id = ""
+    _vigilar_hermes(survey_id, delivery_id, inicio)
+
+
+# El primer paso puede tardar ~14 min sin registrarse (los runners cortan a los 840 s).
+HERMES_SIN_PASOS_MAX_S = 25 * 60
+# Si Hermes ya contestó el webhook y no registró nada, esperar esto antes de darlo por caído
+# (puede haber dejado un proceso en segundo plano que lo despierta al terminar).
+HERMES_GRACIA_TRAS_RESPUESTA_S = 5 * 60
+
+
+def _hermes_ya_contesto(delivery_id: str) -> bool:
+    """True si el gateway de Hermes ya dio por terminado el turno de esta entrega."""
+    if not delivery_id:
+        return False
+    try:
+        with HERMES_GATEWAY_LOG.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 2_000_000))
+            cola = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    return re.search(rf"response ready: platform=webhook chat=webhook:\S+:{re.escape(delivery_id)}\s",
+                     cola) is not None
+
+
+def _vigilar_hermes(survey_id: str, delivery_id: str, inicio: datetime) -> None:
+    """Avisa en la tarjeta si Hermes aceptó el relevamiento pero no corre ningún paso.
+
+    Hermes puede contestar el webhook sin hacer nada (el 13-oct y el 20-oct no pudo abrir
+    la skill relevar-zona) y nadie marcaba el survey: quedaba «running» para siempre con
+    «Iniciando pipeline…». Mientras no aparezca un paso registrado después de `inicio`:
+    - si Hermes ya terminó su turno → paso `hermes_sin_pasos` (aviso) y, pasada la gracia, failed;
+    - si pasan HERMES_SIN_PASOS_MAX_S → failed.
+    """
+    engine = get_engine()
+    contesto_en: Optional[float] = None
+    while True:
+        time.sleep(20)
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT status, notes FROM surveys WHERE survey_id = :sid"),
+                               {"sid": survey_id}).fetchone()
+        if not row or row[0] != "running":
+            return
+        try:
+            notas = json.loads(row[1] or "{}")
+        except Exception:
+            notas = {}
+        ts = notas.get("paso_actual_ts")
+        try:
+            hubo_paso = (bool(ts) and notas.get("paso_actual") != "hermes_sin_pasos"
+                         and datetime.fromisoformat(ts) > inicio)
+        except ValueError:
+            hubo_paso = False
+        if hubo_paso:
+            return  # Hermes está reportando: de acá en más lo sigue la tarjeta
+
+        transcurrido = (datetime.now(timezone.utc) - inicio).total_seconds()
+        if contesto_en is None and _hermes_ya_contesto(delivery_id):
+            contesto_en = transcurrido
+            logger.warning(f"Hermes terminó su turno sin registrar pasos para {survey_id}")
+            _paso_survey(survey_id, "hermes_sin_pasos", {
+                "ok": False,
+                "error": "Hermes contestó sin correr ningún paso. Si en unos minutos no "
+                         "aparece nada, está trabado: pará y avisá (ver agent.log de Hermes).",
+            })
+        motivo = None
+        if contesto_en is not None and transcurrido - contesto_en > HERMES_GRACIA_TRAS_RESPUESTA_S:
+            motivo = "Hermes terminó sin correr ningún paso del relevamiento"
+        elif transcurrido > HERMES_SIN_PASOS_MAX_S:
+            motivo = f"Hermes no registró ningún paso en {HERMES_SIN_PASOS_MAX_S // 60} minutos"
+        if motivo:
+            logger.error(f"{motivo}: {survey_id}")
+            _paso_survey(survey_id, "error", {"ok": False, "error": motivo + " (ver agent.log de Hermes)"},
+                         status="failed")
+            return
+
+
+def _limpiar_cierre_anterior(survey_id: str) -> None:
+    """Al volver a iniciar, saca de las notas cómo terminó la corrida anterior.
+
+    Si no, el «✗ Error» de un intento previo (p. ej. un «sólo lotes» que falló) queda
+    como último paso y la tarjeta lo muestra mientras corre la corrida nueva.
+    Los pasos que sí corrieron quedan como historial.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT notes FROM surveys WHERE survey_id = :sid FOR UPDATE"),
+                           {"sid": survey_id}).fetchone()
+        try:
+            notas = json.loads(row[0]) if row and row[0] else None
+        except Exception:
+            notas = None
+        if not isinstance(notas, dict):
+            return
+        cierres = ("error", "detenido", "completado", "hermes_sin_pasos")
+        for k in cierres:
+            notas.get("pasos", {}).pop(k, None)
+            notas.get("pasos_ts", {}).pop(k, None)
+        if notas.get("paso_actual") in cierres:
+            notas.pop("paso_actual", None)
+            notas.pop("paso_actual_ts", None)
+        conn.execute(text("UPDATE surveys SET notes = :n WHERE survey_id = :sid"),
+                     {"n": json.dumps(notas), "sid": survey_id})
+
+
+def _paso_survey(survey_id: str, paso: str, resultado: Optional[dict] = None,
+                 status: Optional[str] = None) -> bool:
+    """Registra un paso en surveys.notes (lo que ve la tarjeta). Devuelve True si hay que frenar."""
+    from scrapitero.rpc.survey_step_update import SurveyStepUpdateInput, run as step_run
+    out = step_run(SurveyStepUpdateInput(survey_id=survey_id, paso=paso,
+                                         resultado=resultado, status=status))
+    return out.should_stop
+
+
+def _correr_solo_lotes(region_id: str, survey_id: str, country_code: str) -> None:
+    """Relevamiento «sólo lotes»: baja las parcelas del catastro y termina.
+
+    No pasa por Hermes ni por ningún paso pago (Google): es una sola fuente, elegida por
+    país/provincia, y sin LLM de por medio no hay forma de que derive al proceso completo.
+    - Argentina, Buenos Aires → ARBA/IDERA (`arba_cadastral_fetcher`)
+    - Argentina, Salta        → IDEMSA/IDESA (`salta_catastro_fetcher`)
+    - Argentina, Santa Fe     → IDESF (`santafe_catastro_fetcher`), en tandas mientras sea parcial
+    - Brasil                  → SmartGIS (`smartgis_fetcher`), en pasadas mientras sea parcial
+    La provincia sale del centro de la zona (Nominatim, gratis): `regions.state_code` está
+    vacío en todas las zonas argentinas.
+    """
+    try:
+        if country_code == "BRA":
+            from scrapitero.agents.smartgis_fetcher import SmartGISInput, run as sg_run
+            fuente = "smartgis-fetcher"
+            _paso_survey(survey_id, fuente)
+            total_ins = total_act = 0
+            for pasada in range(1, 201):
+                out = sg_run(SmartGISInput(region_id=region_id, survey_id=survey_id))
+                if not out.ok:
+                    raise RuntimeError(out.error or "SmartGIS falló")
+                total_ins += out.parcelas_insertadas
+                total_act += out.parcelas_actualizadas
+                res = {"parcelas_insertadas": total_ins, "parcelas_actualizadas": total_act,
+                       "pasadas": pasada, "alcance": "solo lotes"}
+                if not out.parcial:
+                    break
+                if _paso_survey(survey_id, fuente, res):
+                    return  # lo pararon desde la web
+            else:
+                raise RuntimeError("SmartGIS sigue parcial después de 200 pasadas")
+        elif country_code == "ARG":
+            from scrapitero.agents.geo import detect_localidad_provincia
+            engine = get_engine()
+            with engine.connect() as conn:
+                c = conn.execute(text(
+                    "SELECT ST_Y(ST_Centroid(ST_GeomFromText(bbox_wkt))), "
+                    "       ST_X(ST_Centroid(ST_GeomFromText(bbox_wkt))) "
+                    "FROM regions WHERE region_id = :r"), {"r": region_id}).fetchone()
+            if not c or c[0] is None:
+                raise RuntimeError("La zona no tiene polígono (bbox_wkt vacío)")
+            _, provincia = detect_localidad_provincia(c[0], c[1])
+            prov = (provincia or "").lower()
+            if "salta" in prov:
+                from scrapitero.agents.salta_catastro_fetcher import SaltaCatastroInput, run as sc_run
+                fuente = "salta-catastro-fetcher"
+                _paso_survey(survey_id, fuente)
+                out = sc_run(SaltaCatastroInput(region_id=region_id, survey_id=survey_id))
+                if not out.ok:
+                    raise RuntimeError(out.error or "Catastro de Salta falló")
+                res = {"parcelas_insertadas": out.parcelas_insertadas,
+                       "parcelas_actualizadas": out.parcelas_actualizadas,
+                       "fuente": out.fuente_usada, "alcance": "solo lotes"}
+            elif "santa fe" in prov:
+                # Lote por lote (no hay WFS): horas por ciudad, así que va en tandas
+                # que guardan lo bajado y dejan ver el avance o parar desde la web.
+                from scrapitero.agents.santafe_catastro_fetcher import (
+                    SantaFeCatastroInput, run as sf_run)
+                fuente = "santafe-catastro-fetcher"
+                _paso_survey(survey_id, fuente)
+                total_ins = total_act = 0
+                for tanda in range(1, 1001):
+                    out = sf_run(SantaFeCatastroInput(region_id=region_id, survey_id=survey_id))
+                    if not out.ok:
+                        raise RuntimeError(out.error or "Catastro de Santa Fe falló")
+                    total_ins += out.parcelas_insertadas
+                    total_act += out.parcelas_actualizadas
+                    res = {"parcelas_insertadas": total_ins, "parcelas_actualizadas": total_act,
+                           "manzanas": f"{out.manzanas_hechas}/{out.manzanas_total}",
+                           "tandas": tanda, "fuente": out.fuente_usada, "alcance": "solo lotes"}
+                    if not out.parcial:
+                        break
+                    if _paso_survey(survey_id, fuente, res):
+                        return  # lo pararon desde la web
+                else:
+                    raise RuntimeError("El catastro de Santa Fe sigue parcial después de 1000 tandas")
+            elif "buenos aires" in prov and "ciudad" not in prov:
+                from scrapitero.agents.arba_cadastral_fetcher import ARBAInput, run as arba_run
+                fuente = "arba-cadastral-fetcher"
+                _paso_survey(survey_id, fuente)
+                out = arba_run(ARBAInput(region_id=region_id, survey_id=survey_id))
+                if not out.ok:
+                    raise RuntimeError(out.error or "ARBA falló")
+                res = {"parcelas_insertadas": out.parcelas_insertadas,
+                       "parcelas_actualizadas": out.parcelas_actualizadas,
+                       "fuentes": out.fuentes, "truncado": out.truncado, "alcance": "solo lotes"}
+            else:
+                raise RuntimeError(
+                    f"No hay catastro de lotes cargado para la provincia «{provincia or '¿?'}» "
+                    "(sólo Buenos Aires, Salta y Santa Fe)")
+        else:
+            raise RuntimeError(f"No hay catastro de lotes para el país {country_code}")
+
+        if _paso_survey(survey_id, fuente, res):
+            return
+        _paso_survey(survey_id, "completado", status="completed")
+        logger.info(f"Sólo lotes {survey_id}: {res}")
+    except Exception as e:
+        logger.exception(f"Sólo lotes falló para {survey_id}")
+        _paso_survey(survey_id, "error", {"ok": False, "error": str(e), "alcance": "solo lotes"},
+                     status="failed")
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -2972,7 +3200,11 @@ def _get_survey_row(survey_id: str) -> Optional[tuple]:
 async def iniciar_relevamiento(
     survey_id: str,
     rescan: bool = Query(False, description="Re-corre SmartGIS aunque ya haya parcelas"),
+    alcance: str = Query("completo", description="'completo' (Hermes, todo el pipeline) o "
+                                                 "'lotes' (sólo el catastro, sin Google ni LLM)"),
 ) -> JSONResponse:
+    if alcance not in ("completo", "lotes"):
+        return JSONResponse({"ok": False, "error": f"Alcance inválido: {alcance!r}"}, status_code=400)
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(text("""
@@ -2988,7 +3220,16 @@ async def iniciar_relevamiento(
     if status == "running":
         return JSONResponse({"ok": False, "error": "Relevamiento ya en ejecución"}, status_code=409)
 
+    _limpiar_cierre_anterior(survey_id)
     _set_survey_status(survey_id, "running")
+
+    if alcance == "lotes":
+        threading.Thread(
+            target=_correr_solo_lotes,
+            args=(region_id, survey_id, country_code),
+            daemon=True,
+        ).start()
+        return JSONResponse({"ok": True, "message": "Descargando sólo los lotes"})
 
     threading.Thread(
         target=_dispatch_to_hermes,
@@ -3003,12 +3244,15 @@ async def parar_relevamiento(survey_id: str) -> JSONResponse:
     row = _get_survey_row(survey_id)
     if not row:
         return JSONResponse({"ok": False, "error": "Survey no encontrado"}, status_code=404)
-    _, _, status = row
+    region_id, _, status = row
     if status not in ("running",):
         return JSONResponse({"ok": False, "error": "El relevamiento no está corriendo"}, status_code=409)
 
     # Marcar como stopped en la DB — Hermes detecta should_stop en el próximo survey-step-update
     _set_survey_status(survey_id, "stopped")
+    # «Sólo lotes» en Brasil corre SmartGIS dentro de este proceso: frenarlo también.
+    from scrapitero.agents.smartgis_fetcher import request_stop
+    request_stop(region_id)
     logger.info(f"Stop solicitado para survey {survey_id} — Hermes lo detectará en el próximo paso")
     return JSONResponse({"ok": True, "message": "Stop solicitado — Hermes detendrá el relevamiento"})
 
@@ -4406,7 +4650,8 @@ def _aplicar_perfil_dxf(origen: str, destino: str, perfil_id: Optional[int]) -> 
 @app.get("/api/surveys/{survey_id}/export/dxf")
 async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codlog_csv: str = "",
                      dxfversion: str = "", capas: str = "", solo_con_uf: bool = False,
-                     epsg: Optional[int] = None, perfil_id: Optional[int] = None):
+                     epsg: Optional[int] = None, perfil_id: Optional[int] = None,
+                     formato: str = "dxf"):
     """DXF (AutoCAD) del relevamiento, **en el formato que espera el cliente del país**.
 
     Si su perfil define un estándar de planos (`plano` en `_EXPORT_PERFILES_CLIENTE`, hoy
@@ -4425,8 +4670,9 @@ async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codl
     (93.073 parcelas) pesa 537 MB y sólo los contornos 31 MB. Vacío = todas las capas. En el
     entregable se ignoran: su contenido lo fija el estándar del cliente.
 
-    DXF y no DWG: el `.dwg` es formato cerrado de Autodesk y ninguna librería libre lo
-    escribe; el DXF es el formato de intercambio del propio AutoCAD, que lo abre nativo.
+    `formato=dwg` (Jaz, 14-oct-2026): el mismo archivo convertido a DWG 2018 con el ODA File
+    Converter (`agents/dwg.py`). Es lo que pide el cliente: bajarlo de una con el sistema de
+    coordenadas asociado (la GeoData de `crs_autocad`), sin pasar por Map 3D.
 
     Se genera on-the-fly (no se cachea: el relevamiento cambia con cada paso del
     pipeline y una corrida sobre 567 parcelas tarda ~2 s) en un temporal que se borra
@@ -4437,6 +4683,8 @@ async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codl
     """
     if getattr(request.state, "role", None) == "cliente":
         epsg = perfil_id = None
+    if formato not in ("dxf", "dwg"):
+        return JSONResponse({"error": f"Formato inválido: {formato!r}"}, status_code=422)
     if epsg and epsg not in _EPSG_DXF_ELEGIBLES:
         return JSONResponse({"error": f"Sistema de coordenadas EPSG:{epsg} no admitido"},
                             status_code=422)
@@ -4477,16 +4725,12 @@ async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codl
             if err:
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 return JSONResponse({"error": err}, status_code=422)
-            return FileResponse(destino, media_type="image/vnd.dxf", filename=nombre,
-                                headers={"Cache-Control": "no-store"},
-                                background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        # `no-store`: la URL de descarga es SIEMPRE la misma y el archivo cambia abajo (el
-        # fijado se parcha, no se regenera). Sin esta cabecera el navegador aplica caché
-        # heurística sobre `Last-Modified` y otra máquina se baja la versión vieja sin
-        # pedirla de nuevo — reportado por Jaz el 22-sep-2026.
-        return FileResponse(str(fijado), media_type="image/vnd.dxf", filename=nombre,
-                            headers={"Cache-Control": "no-store"})
+            return await _servir_plano(destino, nombre, tmpdir, formato)
+        # `no-store` (en `_servir_plano`): la URL de descarga es SIEMPRE la misma y el
+        # archivo cambia abajo (el fijado se parcha, no se regenera). Sin esa cabecera el
+        # navegador aplica caché heurística sobre `Last-Modified` y otra máquina se baja la
+        # versión vieja sin pedirla de nuevo — reportado por Jaz el 22-sep-2026.
+        return await _servir_plano(str(fijado), nombre, tmpdir, formato)
 
     # Pedir capas es pedir el dibujo interno, aunque el país tenga plano: el diálogo de
     # descarga ofrece los dos formatos y el entregable no tiene capas elegibles.
@@ -4518,11 +4762,27 @@ async def export_dxf(survey_id: str, request: Request, celula_id: str = "", codl
             shutil.rmtree(tmpdir, ignore_errors=True)
             return JSONResponse({"error": err}, status_code=422)
 
-    return FileResponse(
-        destino, media_type="image/vnd.dxf", filename=nombre,
-        headers={"Cache-Control": "no-store"},
-        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
-    )
+    return await _servir_plano(destino, nombre, tmpdir, formato)
+
+
+async def _servir_plano(origen: str, nombre: str, tmpdir: str, formato: str):
+    """Sirve el DXF `origen`, o su conversión a DWG si `formato == 'dwg'`. Borra `tmpdir` al
+    terminar (nunca `origen` si está fuera de él, como el plano fijado)."""
+    if formato == "dwg":
+        from scrapitero.agents.dwg import dxf_a_dwg
+        nombre = str(Path(nombre).with_suffix(".dwg"))
+        dwg = os.path.join(tmpdir, nombre)
+        try:
+            await asyncio.to_thread(dxf_a_dwg, origen, dwg)
+        except RuntimeError as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return JSONResponse({"error": str(e)}, status_code=422)
+        origen, media = dwg, "image/vnd.dwg"
+    else:
+        media = "image/vnd.dxf"
+    return FileResponse(origen, media_type=media, filename=nombre,
+                        headers={"Cache-Control": "no-store"},
+                        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
 
 
 @app.get("/api/regions/{region_id}/export/csv-consolidado")
