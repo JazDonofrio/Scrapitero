@@ -48,7 +48,7 @@ from shapely import wkb
 from shapely.geometry import MultiPolygon, Polygon
 from sqlalchemy import text
 
-from scrapitero.agents import geo
+from scrapitero.agents import conteo_manzanas, crs_autocad, geo, rotulos_calle
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.pisos import texto as pisos_texto
 from scrapitero.db.engine import get_engine
@@ -63,6 +63,7 @@ _LAYERS = {
     "TIPO_EDIFICACION": 3,  # verde
     "DATOS": 8,
     "_METADATOS": 8,
+    # La capa CONTEO la crea `conteo_manzanas` (manzanas numeradas, como la constancia).
 }
 
 # Atributos que viajan en el bloque invisible de cada parcela.
@@ -79,7 +80,7 @@ _BLOQUE = "PARCELA_INFO"
 # Capas que se pueden pedir (`DXFInput.capas`). `DATOS` es el bloque de atributos invisibles.
 # Espejo de `DXF_CAPAS` en static/index.html: si se agrega una acá, sumarla allá.
 CAPAS_ELEGIBLES = ["PARCELAS", "UF_VIVIENDA", "UF_COMERCIO", "DIRECCION",
-                   "TIPO_EDIFICACION", "DATOS"]
+                   "TIPO_EDIFICACION", "DATOS", "CONTEO", "CALLES"]
 _CAPAS_POR_PARCELA = {"UF_VIVIENDA", "UF_COMERCIO", "DIRECCION", "TIPO_EDIFICACION", "DATOS"}
 
 
@@ -456,6 +457,21 @@ def run(input: DXFInput) -> DXFOutput:
         total_v, total_c, total_e = _sumar(total_v, total_c, total_e, uso, uf_v, uf_c)
         dibujadas += 1
 
+    # Manzanas numeradas 1, 2, 3… (Jaz, 21-oct-2026). Cuenta TODO el relevamiento aunque
+    # se haya pedido `solo_con_uf` o una muestra: es el número de la constancia.
+    if "CONTEO" in capas:
+        with get_engine().connect() as conn:
+            conteo_manzanas.dibujar(msp, conn, input.survey_id, tr)
+    # Nombres de calle sobre el eje de OSM, sin pisar lotes ni otros nombres (Jaz, 22-oct-2026).
+    if "CALLES" in capas:
+        with get_engine().connect() as conn:
+            region_id, zona_gj = conn.execute(text("""
+                SELECT r.region_id, r.zone_geojson FROM surveys s
+                JOIN regions r ON r.region_id = s.region_id
+                WHERE s.survey_id = CAST(:s AS uuid)"""), {"s": input.survey_id}).fetchone()
+            rotulos_calle.dibujar(msp, conn, input.survey_id, region_id, tr,
+                                  conteo_manzanas._zona(zona_gj))
+
     # Metadatos en el propio dibujo: sin esto, un DXF sin CRS declarado es incalzable
     # contra los planos del cliente y nadie puede auditar con qué salió.
     minx, miny, maxx, maxy = MultiPolygon(
@@ -484,6 +500,9 @@ def run(input: DXFInput) -> DXFOutput:
     msp.dxf.extmax = ext.extmax
     doc.set_modelspace_vport(height=max(ext.size.y, ext.size.x) * 1.05,
                              center=(ext.center.x, ext.center.y))
+    # Sistema de coordenadas asociado (GeoData de Map 3D), así AutoCAD no pide _MAPCSASSIGN.
+    if crs_autocad.asociar_crs(msp, epsg):
+        logger.info(f"DXFExport {input.survey_id}: GeoData {geo.nombre_crs(epsg)} asociada")
     doc.saveas(out)
 
     logger.info(f"DXFExport {input.survey_id}: {dibujadas} parcelas, "

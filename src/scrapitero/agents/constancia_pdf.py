@@ -31,6 +31,7 @@ from shapely.ops import unary_union
 from sqlalchemy import text
 
 from scrapitero.agents._run import agent_run
+from scrapitero.agents.conteo_manzanas import contadas
 from scrapitero.agents.manzana_catastral import manzana_codigo
 from scrapitero.agents.procedencia_pdf import (_FONDO, _GRIS, _INDIGO, _TEAL, _TINTA,
                                                _Ficha, _etiqueta, _txt)
@@ -183,12 +184,9 @@ def _construir(conn, sid: str) -> tuple[_Ficha, dict]:
                 por_mz.setdefault(c, []).append(shape(json.loads(f[7])))
             except Exception:
                 pass
-    if zona is not None:
-        manzanas = sum(1 for trozos in por_mz.values()
-                       if (u := unary_union(trozos)).area
-                       and u.intersection(zona).area / u.area >= 0.5)
-    else:
-        manzanas = len({c for c in codigos if c})
+    # Mismo criterio y misma función que la capa CONTEO de los planos: los dos números
+    # tienen que coincidir.
+    manzanas = len(contadas(por_mz, zona))
     fuentes = Counter(f[0] for f in filas)
     es_salta = any((k or "").startswith("salta_") for k in fuentes)
     fuentes_sin_parser = sorted({f[0] or "sin fuente" for f, c in zip(filas, codigos)

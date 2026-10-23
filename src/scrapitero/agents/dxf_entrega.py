@@ -83,7 +83,7 @@ from shapely.ops import (linemerge, nearest_points, polygonize, polylabel,
 from shapely.strtree import STRtree
 from sqlalchemy import text
 
-from scrapitero.agents import geo
+from scrapitero.agents import conteo_manzanas, geo
 from scrapitero.agents._run import agent_run
 from scrapitero.agents.dxf_export import _consultar, _pais_de_survey
 from scrapitero.agents.logradouro_br import limpiar_nombre_via
@@ -3400,6 +3400,11 @@ def run(input: EntregaInput) -> EntregaOutput:
             oculto = a.dxf.tag not in visibles
             a.dxf.invisible = 1 if oculto else 0
             a.dxf.flags = (a.dxf.flags & ~1) | (1 if oculto else 0)
+
+    # Capa CONTEO: las manzanas numeradas 1, 2, 3… con el conteo de la constancia (Jaz,
+    # 21-oct-2026). Es una capa nuestra, fuera del estándar del cliente.
+    with get_engine().connect() as conn:
+        conteo_manzanas.dibujar(msp, conn, input.survey_id, tr)
 
     # 5. Títulos de célula, con las alturas del ejemplo (30 y 25 m).
     # Se cuelgan **debajo** de todo lo dibujado: puestos en la esquina del bbox caían
